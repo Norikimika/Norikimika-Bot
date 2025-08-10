@@ -272,7 +272,7 @@ bot.hears(/^\/restart/i, adminOnly, async (ctx) => {
     message_thread_id: threadId,
   });
 
-  exec("su -c sh scripts/restart.sh", (error) => {
+  exec("su -c scripts/restart.sh", (error) => {
     if (error) {
       safeReply(ctx, `❌ Failed to restart:\n<pre>${escapeHTML(error.message)}</pre>`, {
         parse_mode: "HTML",
@@ -520,7 +520,7 @@ bot.on("callback_query", adminOnly, async (ctx) => {
 
   await safeEditMessageText(ctx, `🚀 Updating core...`);
 
-  exec(`su -c sh ${scriptPath}`, async (error, stdout, stderr) => {
+  exec(`su -c ${scriptPath}`, async (error, stdout, stderr) => {
     if (error) {
       const escapedError = escapeHTML(error.message || "Unknown error");
       return safeSend(bot, cbMsg.chat.id, `❌ Failed to update:\n<pre>${escapedError}</pre>`, {
@@ -553,7 +553,7 @@ bot.hears(/^\/updated/i, adminOnly, async (ctx) => {
     message_thread_id: threadId,
   });
 
-  exec("su -c sh scripts/update-dashboard.sh", async (error, stdout, stderr) => {
+  exec("su -c scripts/update-dashboard.sh", async (error, stdout, stderr) => {
     if (error) {
       const escapedError = escapeHTML(error.message || "Unknown error");
       const message = `❌ Failed to update dashboard:\n<pre>${escapedError}</pre>`;
