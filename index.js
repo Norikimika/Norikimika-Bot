@@ -168,10 +168,28 @@ const adminOnly = async (ctx, next) => {
     const isAdmin = admins.some((admin) => admin.user.id === userId);
 
     if (!isAdmin) {
+      // Mute user selama 5 menit
+      const untilDate = Math.floor(Date.now() / 1000) + 5 * 60;
+      try {
+        await ctx.telegram.restrictChatMember(chatId, userId, {
+          permissions: {
+            can_send_messages: false,
+            can_send_media_messages: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false
+          },
+          until_date: untilDate
+        });
+
+        console.log(`User ${userId} muted for 5 minutes for trying admin command.`);
+      } catch (muteErr) {
+        console.error("Failed to mute user:", muteErr);
+      }
+
       if (ctx.updateType === "callback_query") {
-        return safeAnswerCbQuery(ctx, "⛔ You are not authorized to do this.", { show_alert: true });
+        return safeAnswerCbQuery(ctx, "⛔ You are not authorized. You are muted for 5 minutes.", { show_alert: true });
       } else {
-        return safeReply(ctx, "⛔ You are not authorized to do this.", {
+        return safeReply(ctx, "⛔ You are not authorized. You are muted for 5 minutes.", {
           reply_to_message_id: ctx.message?.message_id || undefined,
         });
       }
