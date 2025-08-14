@@ -261,7 +261,7 @@ bot.hears(/^\/reboot/i, adminOnly, async (ctx) => {
 bot.hears(/^\/restart/i, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const now = Date.now();
-  const cooldown = 185 * 1000;
+  const cooldown = 90 * 1000;
 
   let lastRestartTime = 0;
   if (fs.existsSync(RESTART_TIMESTAMP_FILE)) {
