@@ -504,7 +504,7 @@ bot.hears(/^\/usage/i, adminOnly, async (ctx) => {
 bot.hears(/^\/updatec/i, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
-  await safeReply(ctx, "🔧 Please choose the core to update:", {
+  await safeReply(ctx, "🦠 Please choose the core to update:", {
     reply_to_message_id: ctx.message?.message_id,
     message_thread_id: threadId,
     reply_markup: {
