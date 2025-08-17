@@ -510,8 +510,11 @@ bot.hears(/^\/updatec/i, adminOnly, async (ctx) => {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "☘️ Update Core", callback_data: "update_mihomo" },
+          { text: "☘️ Update Clash", callback_data: "update_mihomo" },
           { text: "🍀 Update Smart", callback_data: "update_smart" },
+        ],
+        [
+          { text: "🌱 Update Sing-box", callback_data: "update_sing" },
         ],
       ],
     },
@@ -526,6 +529,7 @@ bot.on("callback_query", adminOnly, async (ctx) => {
   const scriptMap = {
     update_mihomo: "scripts/update-mihomo.sh",
     update_smart: "scripts/update-smart.sh",
+    update_sing: "scripts/update-sing.sh",
   };
 
   const scriptPath = scriptMap[data];

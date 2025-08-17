@@ -56,15 +56,16 @@ rm -f "$file_name"
 
 # Move & set permissions
 mv mihomo-* /data/adb/box/bin/xclash/mihomo || {
-  echo "❌ Failed to move mihomo binary"
+  echo "❌ Failed to move clash binary"
   exit 1
 }
 
 chmod 6755 /data/adb/box/bin/xclash/mihomo
+sed -i 's/bin_name="sing-box"/bin_name="clash"/' /data/adb/box/settings.ini
 
 # Restart service
 /data/adb/box/scripts/box.service restart || {
-  echo "❌ Failed to restart Clash service"
+  echo "❌ Failed to restart box service"
   exit 1
 }
 
