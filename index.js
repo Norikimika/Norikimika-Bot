@@ -6,6 +6,7 @@ const cron = require("node-cron");
 const { spawn, exec } = require("child_process");
 const escapeHTML = require("escape-html");
 const https = require("https");
+const dns = require("dns");
 
 // dynamic import for node-fetch
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -58,6 +59,52 @@ function convertMarkdownToHTML(text) {
   safeText = safeText.replace(/\*(?!\s)([^\*\n]+?)\*/g, "<i>$1</i>");
 
   return safeText;
+}
+
+// Convert country code -> flag emoji
+function countryFlag(countryCode) {
+  if (!countryCode) return "";
+  return countryCode
+    .toUpperCase()
+    .replace(/./g, (char) =>
+      String.fromCodePoint(127397 + char.charCodeAt())
+    );
+}
+
+// Simple domain validator
+function isValidDomain(domain) {
+  return /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain);
+}
+
+// Extract domain from text (ignore /ip etc.)
+function extractDomain(text) {
+  if (!text) return null;
+  const match = text.match(/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  return match ? match[1] : null;
+}
+
+// Get geo info from ipinfo.io
+function getGeo(ip) {
+  return new Promise((resolve) => {
+    https.get(`https://ipinfo.io/${ip}/json`, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (json && json.ip) {
+            const flag = countryFlag(json.country);
+            const loc = [json.country, json.region, json.city].filter(Boolean).join(", ");
+            resolve(`<i>${loc || "Unknown location"} ${flag}</i>`);
+          } else {
+            resolve("📍 <i>Unknown location</i>");
+          }
+        } catch {
+          resolve("📍 <i>Unknown location</i>");
+        }
+      });
+    }).on("error", () => resolve("📍 <i>Unknown location</i>"));
+  });
 }
 
 // ==========================
@@ -558,20 +605,111 @@ bot.hears(/^\/updated/i, topicOnly, adminOnly, async (ctx) => {
   });
 });
 
+// /ip
+bot.hears(/^\/ip(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+
+  let domain = ctx.match[1]?.trim();
+
+  // If /ip@BotUsername → ignore
+  if (domain && domain.startsWith("@")) domain = null;
+
+  // If no domain given, check reply
+  if (!domain && ctx.message?.reply_to_message?.text) {
+    const candidate = extractDomain(ctx.message.reply_to_message.text);
+    if (candidate && isValidDomain(candidate)) {
+      domain = candidate;
+    }
+  }
+
+  // Still empty → ask user
+  if (!domain) {
+    return safeReply(ctx,
+      "❌ Please provide a domain.",
+      {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      }
+    );
+  }
+
+  // Validate domain
+  if (!isValidDomain(domain)) {
+    return safeReply(ctx, `❌ <code>${domain}</code> is not a valid domain.`, {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+
+  try {
+    const resolve4 = () =>
+      new Promise((resolve) => dns.resolve4(domain, (err, addresses) => resolve(err ? [] : addresses)));
+    const resolve6 = () =>
+      new Promise((resolve) => dns.resolve6(domain, (err, addresses) => resolve(err ? [] : addresses)));
+
+    const [ipv4, ipv6] = await Promise.all([resolve4(), resolve6()]);
+
+    if (ipv4.length === 0 && ipv6.length === 0) {
+      return safeReply(ctx, `❌ No IP address found for <code>${domain}</code>`, {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    const replyParts = [`<b>🌐 Domain:</b>\n➤ <code>${domain}</code>\n`];
+
+    // IPv4
+    if (ipv4.length) {
+      replyParts.push("🔹 <b>IPv4:</b>");
+      for (const ip of ipv4) {
+        const loc = await getGeo(ip);
+        replyParts.push(`-> <code>${ip}</code>\n📍 ${loc}`);
+      }
+    }
+
+    // IPv6
+    if (ipv6.length) {
+      replyParts.push("\n🔹 <b>IPv6:</b>");
+      for (const ip of ipv6) {
+        const loc = await getGeo(ip);
+        replyParts.push(`-> <code>${ip}</code>\n📍 ${loc}`);
+      }
+    }
+
+    return safeReply(ctx, replyParts.join("\n"), {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  } catch (err) {
+    appendLogLine(`IP lookup failed for ${domain}: ${err.message}`);
+    return safeReply(ctx, `❌ Failed to resolve domain: <code>${domain}</code>`, {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+});
+
 // unknown commands
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const cmd = ctx.match[1].toLowerCase();
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
-  const known = ["ask", "battery", "reboot", "restart", "speed", "usage", "updatec", "updated"];
+  const known = ["ask", "ip", "battery", "reboot", "restart", "speed", "usage", "updatec", "updated"];
   if (known.includes(cmd)) return;
 
   return safeReply(
     ctx,
-    "<b>🍁 Unknown Command 🍁</b>\n" +
+    "<b>🍁 Unknown Command 🍁</b>\n\n" +
       "<b>✹ Ask AI</b>\n" +
       "-> <code>/ask prompt</code>\n" +
+      "<b>✹ IP Lookup</b>\n" +
+      "-> <code>/ip domain</code>\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
       "-> /battery\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
