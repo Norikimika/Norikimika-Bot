@@ -107,6 +107,19 @@ function getGeo(ip) {
   });
 }
 
+// Validate IPv4 or IPv6
+function isValidIP(ip) {
+  return /^(25[0-5]|2[0-4]\d|[01]?\d\d?)(\.(25[0-5]|2[0-4]\d|[01]?\d\d?)){3}$/.test(ip) ||  // IPv4
+         /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/.test(ip); // IPv6
+}
+
+// Extract IP from text (ignore /domain etc.)
+function extractIP(text) {
+  if (!text) return null;
+  const match = text.match(/((?:\d{1,3}\.){3}\d{1,3}|(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4})/);
+  return match ? match[1] : null;
+}
+
 // ==========================
 // Safe wrappers for Telegram API calls
 // ==========================
@@ -694,6 +707,73 @@ bot.hears(/^\/ip(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
   }
 });
 
+//domain
+bot.hears(/^\/domain(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+
+  let ip = ctx.match[1]?.trim();
+
+  // If no IP given, check reply
+  if (!ip && ctx.message?.reply_to_message?.text) {
+    const candidate = extractIP(ctx.message.reply_to_message.text);
+    if (candidate && isValidIP(candidate)) ip = candidate;
+  }
+
+  // Still empty
+  if (!ip) {
+    return safeReply(ctx,
+      "❌ Please provide an IP address.",
+      {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      }
+    );
+  }
+
+  // Validate IP
+  if (!isValidIP(ip)) {
+    return safeReply(ctx, `❌ <code>${ip}</code> is not a valid IP address.`, {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+
+  try {
+    const hostnames = await new Promise((resolve) => {
+      dns.reverse(ip, (err, domains) => resolve(err ? [] : domains));
+    });
+
+    if (!hostnames.length) {
+      return safeReply(ctx, `❌ No domain found for <code>${ip}</code>`, {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    const replyParts = [`<b>🔎 IP:</b>\n➤ <code>${ip}</code>\n`];
+    replyParts.push("🌐 Domain:");
+    for (const host of hostnames) {
+      replyParts.push(`-> <code>${host}</code>`);
+    }
+
+    return safeReply(ctx, replyParts.join("\n"), {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  } catch (err) {
+    appendLogLine(`Reverse DNS lookup failed for ${ip}: ${err.message}`);
+    return safeReply(ctx, `❌ Failed to resolve IP: <code>${ip}</code>`, {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+});
+
 // unknown commands
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
@@ -708,6 +788,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
     "<b>🍁 Unknown Command 🍁</b>\n\n" +
       "<b>✹ Ask AI</b>\n" +
       "-> <code>/ask prompt</code>\n" +
+      "<b>✹ Domain Lookup</b>\n" +
+      "-> <code>/domain ip</code>\n" +
       "<b>✹ IP Lookup</b>\n" +
       "-> <code>/ip domain</code>\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
