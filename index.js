@@ -415,17 +415,29 @@ bot.command("ask", async (ctx) => {
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
   const text = ctx.message.text?.trim();
-  let prompt = text.replace(/^\/ask(@\w+)?\s*/i, "").trim();
+  let argPrompt = text.replace(/^\/ask(@\w+)?\s*/i, "").trim();
+  let replyText = ctx.message.reply_to_message?.text?.trim();
 
-  if ((!prompt || prompt === "") && ctx.message.reply_to_message) {
-    prompt = ctx.message.reply_to_message.text?.trim();
+  let prompt = "";
+
+  if (argPrompt && replyText) {
+    prompt = `${argPrompt}: ${replyText}`;
+  } else if (argPrompt) {
+    prompt = argPrompt;
+  } else if (replyText) {
+    prompt = replyText;
   }
 
   if (!prompt) {
-    return safeReply(ctx, "❌ Please provide a prompt.", {
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
-    });
+    return safeReply(
+      ctx,
+      "❌ Please provide a prompt.",
+      {
+        reply_to_message_id: ctx.message?.message_id,
+        parse_mode: "HTML",
+        message_thread_id: threadId,
+      }
+    );
   }
 
   try {
@@ -439,9 +451,11 @@ bot.command("ask", async (ctx) => {
     );
 
     const data = await res.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "❌ No response.";
+    const rawText =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text || "❌ No response.";
     const MAX_LENGTH = 3500;
-    const parts = rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
+    const parts =
+      rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
 
     for (let i = 0; i < parts.length; i++) {
       const html = convertMarkdownToHTML(parts[i]);
