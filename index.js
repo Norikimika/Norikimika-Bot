@@ -194,7 +194,7 @@ async function sendUsageReport() {
     vnstat.on("close", async (code) => {
       if (code !== 0 || errOutput) {
         appendLogLine(`Daily usage vnstat failed: ${errOutput || `code ${code}`}`);
-        await safeSend(bot, process.env.GROUP_ID, "❌ Failed to get daily usage", {
+        await safeSend(bot, process.env.ALLOWED_CHAT_ID, "❌ Failed to get daily usage", {
           message_thread_id: ALLOWED_TOPIC_ID_USAGE,
         });
         return resolve();
@@ -228,13 +228,13 @@ async function sendUsageReport() {
           `<b>📊 Daily Usage Report (${iface})</b>\n\n` +
           (todayData ? `📅 <b>Today</b>\n⏫ Upload: ${todayData.up}\n⏬ Download: ${todayData.down}\n📦 Total: ${todayData.total}` : "⚠️ No data");
 
-        await safeSend(bot, process.env.GROUP_ID, usageReport.trim(), {
+        await safeSend(bot, process.env.ALLOWED_CHAT_ID, usageReport.trim(), {
           parse_mode: "HTML",
           message_thread_id: ALLOWED_TOPIC_ID_USAGE,
         });
       } catch (parseError) {
         appendLogLine(`Daily usage parse failed: ${parseError.message}`);
-        await safeSend(bot, process.env.GROUP_ID, "❌ Failed to parse daily usage", {
+        await safeSend(bot, process.env.ALLOWED_CHAT_ID, "❌ Failed to parse daily usage", {
           message_thread_id: ALLOWED_TOPIC_ID_USAGE,
         });
       }
