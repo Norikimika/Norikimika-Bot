@@ -799,7 +799,6 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
 
   return safeReply(
     ctx,
-    "<b>🍁 Unknown Command 🍁</b>\n\n" +
       "<b>✹ Ask AI</b>\n" +
       "-> <code>/ask prompt</code>\n" +
       "<b>✹ Domain Lookup</b>\n" +
