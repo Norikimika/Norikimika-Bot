@@ -568,8 +568,8 @@ bot.hears(/^\/updatec/i, topicOnly, adminOnly, async (ctx) => {
     message_thread_id: threadId,
     reply_markup: {
       inline_keyboard: [
-        [{ text: "☘️ Update Clash", callback_data: "update_mihomo" }, { text: "🍀 Update Smart", callback_data: "update_smart" }],
-        [{ text: "🌱 Update Sing-box", callback_data: "update_sing" }],
+        [{ text: "☘️ Clash", callback_data: "update_mihomo" }, { text: "🍀 Smart", callback_data: "update_smart" }],
+        [{ text: "🌱 Sing-box", callback_data: "update_sing" }],
       ],
     },
   });
