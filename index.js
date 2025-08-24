@@ -581,6 +581,8 @@ bot.on("callback_query", topicOnly, adminOnly, async (ctx) => {
   const cbMsg = ctx.callbackQuery?.message;
   const threadId = cbMsg?.message_thread_id;
 
+  const replyTargetId = cbMsg?.reply_to_message?.message_id;
+
   const scriptMap = {
     update_mihomo: "scripts/update-mihomo.sh",
     update_smart: "scripts/update-smart.sh",
@@ -596,12 +598,12 @@ bot.on("callback_query", topicOnly, adminOnly, async (ctx) => {
     if (error) {
       appendLogLine(`Update core failed: ${error.message}`);
       return safeSend(bot, cbMsg.chat.id, "❌ Failed to update core", {
-        reply_to_message_id: cbMsg?.message_id,
+        reply_to_message_id: replyTargetId,
         message_thread_id: threadId,
       });
     }
     await safeSend(bot, cbMsg.chat.id, "✅ Core updated successfully!", {
-      reply_to_message_id: cbMsg?.message_id,
+      reply_to_message_id: replyTargetId,
       message_thread_id: threadId,
     });
   });
