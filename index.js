@@ -264,10 +264,19 @@ const topicOnly = (ctx, next) => {
 const adminOnly = async (ctx, next) => {
   try {
     const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id || ctx.message?.chat?.id || ctx.callbackQuery?.message?.chat?.id;
+    const firstName = ctx.from?.first_name || "User";
+    const chatId =
+      ctx.chat?.id ||
+      ctx.message?.chat?.id ||
+      ctx.callbackQuery?.message?.chat?.id;
+
+    const replyToMsgId =
+      ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
 
     if (!userId || !chatId) {
-      return safeReply(ctx, "❌ Permission error", { reply_to_message_id: ctx.message?.message_id });
+      return safeReply(ctx, "❌ Permission error", {
+        reply_to_message_id: replyToMsgId,
+      });
     }
 
     const admins = await ctx.telegram.getChatAdministrators(chatId);
@@ -275,6 +284,7 @@ const adminOnly = async (ctx, next) => {
 
     if (!isAdmin) {
       const untilDate = Math.floor(Date.now() / 1000) + 5 * 60;
+
       try {
         await ctx.telegram.restrictChatMember(chatId, userId, {
           permissions: { can_send_messages: false },
@@ -284,15 +294,26 @@ const adminOnly = async (ctx, next) => {
         appendLogLine(`Mute failed: ${muteErr.message}`);
       }
 
+      if (ctx.callbackQuery) {
+        await ctx.answerCbQuery(
+          "⛔ Not authorized. You are muted for 5 minutes.",
+          { show_alert: true }
+        );
+        return;
+      }
+
       return safeReply(ctx, "⛔ Not authorized. You are muted for 5 minutes.", {
-        reply_to_message_id: ctx.message?.message_id,
+        reply_to_message_id: replyToMsgId,
       });
     }
 
     return next();
   } catch (err) {
     appendLogLine(`adminOnly error: ${err.message}`);
-    return safeReply(ctx, "⚠️ Permission check failed.", { reply_to_message_id: ctx.message?.message_id });
+    return safeReply(ctx, "⚠️ Permission check failed.", {
+      reply_to_message_id:
+        ctx.message?.message_id || ctx.callbackQuery?.message?.message_id,
+    });
   }
 };
 
