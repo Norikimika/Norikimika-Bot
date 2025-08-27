@@ -102,8 +102,8 @@ update_yacd() {
 
 # Run both updates
 update_zashboard
-# update_metacubexd
-update_yacd
+update_metacubexd
+# update_yacd
 
 echo "🎉 All dashboards updated successfully"
 exit 0
