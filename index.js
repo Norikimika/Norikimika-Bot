@@ -589,19 +589,21 @@ bot.hears(/^\/updatec/i, topicOnly, adminOnly, async (ctx) => {
     message_thread_id: threadId,
     reply_markup: {
       inline_keyboard: [
-        [{ text: "☘️ Clash", callback_data: "update_mihomo" }, { text: "🍀 Smart", callback_data: "update_smart" }],
+        [
+          { text: "☘️ Clash", callback_data: "update_mihomo" },
+          { text: "🍀 Smart", callback_data: "update_smart" },
+        ],
         [{ text: "🌱 Sing-box", callback_data: "update_sing" }],
       ],
     },
   });
 });
 
-// callback_query
-bot.on("callback_query", topicOnly, adminOnly, async (ctx) => {
+// ================= UPDATE CORE =================
+bot.action(/^update_/, topicOnly, adminOnly, async (ctx) => {
   const data = ctx.callbackQuery?.data;
   const cbMsg = ctx.callbackQuery?.message;
   const threadId = cbMsg?.message_thread_id;
-
   const replyTargetId = cbMsg?.reply_to_message?.message_id;
 
   const scriptMap = {
@@ -811,13 +813,220 @@ bot.hears(/^\/domain(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
   }
 });
 
+// ================== MUSIC STATE ==================
+let musicQueue = [];
+let isPlaying = false;
+let currentTitle = "";
+let currentProcess = null;
+let stoppedManually = false; // prevent double stop
+// =================================================
+
+// Inline buttons builder
+function musicControls(queueLength) {
+  if (queueLength > 0) {
+    // Queue exists → show Skip + Stop
+    return {
+      inline_keyboard: [
+        [
+          { text: "⏭ Skip", callback_data: "music_skip" },
+          { text: "⏹ Stop", callback_data: "music_stop" },
+        ],
+      ],
+    };
+  } else {
+    // Only current song → show Stop only
+    return {
+      inline_keyboard: [[{ text: "⏹ Stop", callback_data: "music_stop" }]],
+    };
+  }
+}
+
+// Always send new message
+async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
+  let text = "";
+
+  if (isPlaying && currentTitle) {
+    text += `<b>🎵 Now playing:</b>\n➤ <code>${currentTitle}</code>\n\n`;
+  } else if (!isPlaying && musicQueue.length === 0) {
+    if (forcedStop) {
+      text += "⏹ Music stopped.";
+    } else {
+      text += "❌ Please provide a song title or YouTube link.";
+    }
+    return ctx.reply(text, {
+      reply_to_message_id: replyTo,
+      message_thread_id: threadId,
+      parse_mode: "HTML",
+    });
+  }
+
+  if (musicQueue.length > 0) {
+    text += "<b>📜 Queue:</b>\n";
+    musicQueue.slice(0, 5).forEach((song, i) => {
+      text += `${i + 1}. ${song.title}\n`;
+    });
+    if (musicQueue.length > 5) {
+      text += `...and ${musicQueue.length - 5} more`;
+    }
+  }
+
+  const replyMarkup = isPlaying
+    ? musicControls(musicQueue.length)
+    : undefined;
+
+  await ctx.reply(text, {
+    reply_to_message_id: replyTo,
+    message_thread_id: threadId,
+    parse_mode: "HTML",
+    reply_markup: replyMarkup,
+  });
+}
+
+// Play next song
+function playNext(ctx, threadId, replyTo) {
+  if (musicQueue.length === 0) {
+    isPlaying = false;
+    currentTitle = "";
+    currentProcess = null;
+    updateNowPlaying(ctx, threadId, replyTo, true); // ✅ forcedStop = true
+    return;
+  }
+
+  const next = musicQueue.shift();
+  const videoUrl = `https://youtu.be/${next.id}`;
+
+  exec(`yt-dlp -f 251 --get-url --get-title "${videoUrl}"`, (err, stdout) => {
+    if (err || !stdout) return playNext(ctx, threadId, replyTo);
+
+    const lines = stdout.trim().split("\n");
+    const title = lines[0];
+    const audioUrl = lines[1];
+    currentTitle = title;
+
+    if (currentProcess) currentProcess.kill("SIGKILL");
+
+    currentProcess = spawn("mpv", ["--no-video", audioUrl]);
+
+    // prevent double update on stop
+    currentProcess.on("exit", () => {
+      const wasStopped = stoppedManually;
+      stoppedManually = false;
+      currentProcess = null;
+
+      if (!wasStopped) {
+        playNext(ctx, threadId, replyTo);
+      }
+    });
+
+    isPlaying = true;
+    updateNowPlaying(ctx, threadId, replyTo);
+  });
+}
+
+// ================== COMMAND ==================
+bot.command("music", topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+  if (threadId !== ALLOWED_TOPIC_ID) return;
+
+  const text = ctx.message.text?.trim();
+  const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
+
+  if (!query) {
+    await updateNowPlaying(ctx, threadId, ctx.message?.message_id);
+    return;
+  }
+
+  // yt-dlp command builder
+  let command;
+  if (/^https?:\/\/(www\.)?youtube\.com\/playlist\?/.test(query)) {
+    command = `yt-dlp --flat-playlist --get-id --get-title "${query}"`;
+  } else if (query.startsWith("http")) {
+    command = `yt-dlp --get-id --get-title "${query}"`;
+  } else {
+    command = `yt-dlp --get-id --get-title "ytsearch1:${query}"`;
+  }
+
+  exec(command, async (err, stdout) => {
+    if (err || !stdout) {
+      return ctx.reply("❌ Failed to add music.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    const lines = stdout.trim().split("\n");
+    const ids = [];
+    for (let i = 0; i < lines.length; i += 2) {
+      ids.push({ title: lines[i], id: lines[i + 1] });
+    }
+
+    if (ids.length === 0) {
+      return ctx.reply("❌ No results found.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    musicQueue.push(...ids);
+
+    if (!isPlaying) {
+      playNext(ctx, threadId, ctx.message?.message_id);
+    } else {
+      updateNowPlaying(ctx, threadId, ctx.message?.message_id);
+    }
+  });
+});
+
+// ================== INLINE CONTROLS ==================
+bot.action(/^music_/, topicOnly, adminOnly, async (ctx) => {
+  const data = ctx.callbackQuery?.data;
+  const threadId = ctx.callbackQuery?.message?.message_thread_id;
+
+  if (data === "music_skip") {
+    if (currentProcess) {
+      currentProcess.kill("SIGKILL");
+      return ctx.answerCbQuery(); // ✅ no duplicate message
+    }
+    return ctx.answerCbQuery("⚠️ Nothing to skip.");
+  }
+
+  if (data === "music_stop") {
+    if (currentProcess) {
+      stoppedManually = true;
+      currentProcess.kill("SIGKILL");
+      currentProcess = null;
+    }
+    musicQueue = [];
+    isPlaying = false;
+    currentTitle = "";
+
+    await ctx.answerCbQuery("⏹ Stopped.");
+
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.callbackQuery.message.chat.id,
+        ctx.callbackQuery.message.message_id,
+        null,
+        "⏹ Music stopped.",
+        { parse_mode: "HTML" }
+      );
+    } catch (e) {
+      await ctx.reply("⏹ Music stopped.", {
+        reply_to_message_id: ctx.callbackQuery.message.message_id,
+        message_thread_id: threadId,
+      });
+    }
+    return;
+  }
+});
+
 // unknown commands
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const cmd = ctx.match[1].toLowerCase();
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
-  const known = ["ask", "ip", "battery", "reboot", "restart", "speed", "usage", "updatec", "updated"];
+  const known = ["ask", "ip", "battery", "reboot", "restart", "speed", "music", "usage", "updatec", "updated"];
   if (known.includes(cmd)) return;
 
   return safeReply(
@@ -830,6 +1039,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> <code>/ip domain</code>\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
       "-> /battery\n" +
+      "<b>✹ Play Music (admin)</b>\n" +
+      "-> <code>/music tittle</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
       "-> /usage\n" +
       "<b>✹ Reboot Device (admin)</b>\n" +
