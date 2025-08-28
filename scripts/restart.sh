@@ -17,14 +17,14 @@ sleep 2
 input tap 350 470
 sleep 2
 input tap 500 840
-sleep 2
+# sleep 2
 # input tap 350 420
-input tap 350 470
-sleep 2
+# input tap 350 470
+# sleep 2
 # input tap 350 420
-input tap 350 470
-sleep 2
-input tap 500 840
+# input tap 350 470
+# sleep 2
+# input tap 500 840
 sleep 2
 input keyevent 3
 
