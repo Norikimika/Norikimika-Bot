@@ -1109,15 +1109,3 @@ bot.launch()
     console.error("Failed to launch bot:", err.message);
     appendLogLine(`Failed to launch bot: ${err.message}`);
   });
-
-// ==========================
-// Graceful shutdown
-// ==========================
-process.once("SIGINT", () => {
-  appendLogLine("SIGINT received, stopping bot...");
-  bot.stop("SIGINT");
-});
-process.once("SIGTERM", () => {
-  appendLogLine("SIGTERM received, stopping bot...");
-  bot.stop("SIGTERM");
-});
