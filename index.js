@@ -1020,13 +1020,79 @@ bot.action(/^music_/, topicOnly, adminOnly, async (ctx) => {
   }
 });
 
+// ================== /BUY ==================
+// ANSI cleaner (remove escape codes from Python output)
+function cleanAnsi(text) {
+  return text.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+// Active sessions per chat { chatId: { process, timeout } }
+const buySessions = {};
+
+bot.command("buy", topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+  if (threadId !== ALLOWED_TOPIC_ID) return;
+
+  const chatId = ctx.chat.id;
+  const replyTo = ctx.message?.message_id;
+  const cwd = "/data/user/0/com.termux/files/home/myxl-cli"; // adjust path
+
+  // Kill any existing session in this chat
+  if (buySessions[chatId]) {
+    buySessions[chatId].process.kill("SIGKILL");
+    clearTimeout(buySessions[chatId].timeout);
+    delete buySessions[chatId];
+  }
+
+  // Directly run Python script
+  const py = spawn("python3", ["main.py"], { cwd });
+  buySessions[chatId] = { process: py, timeout: null };
+
+  // Reset timeout helper (1 minute)
+  const resetTimeout = () => {
+    if (buySessions[chatId].timeout) clearTimeout(buySessions[chatId].timeout);
+    buySessions[chatId].timeout = setTimeout(() => {
+      py.kill("SIGKILL");
+      delete buySessions[chatId];
+    }, 60 * 1000);
+  };
+
+  resetTimeout();
+
+  // Handle Python stdout
+  py.stdout.on("data", async (data) => {
+    const cleaned = cleanAnsi(data.toString());
+    if (cleaned.trim() !== "") {
+      await safeReply(ctx, cleaned, {
+        reply_to_message_id: replyTo,
+        message_thread_id: threadId,
+      });
+    }
+    resetTimeout();
+  });
+
+  // Handle Python stderr (only log, don’t send to Telegram)
+  py.stderr.on("data", (data) => {
+    appendLogLine(`Buy stderr: ${data.toString()}`);
+  });
+
+  // When process ends
+  py.on("close", async (code) => {
+    delete buySessions[chatId];
+    await safeReply(ctx, `✅ Buy process finished`, {
+      reply_to_message_id: replyTo,
+      message_thread_id: threadId,
+    });
+  });
+});
+
 // unknown commands
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const cmd = ctx.match[1].toLowerCase();
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
-  const known = ["ask", "ip", "battery", "reboot", "restart", "speed", "music", "usage", "updatec", "updated"];
+  const known = ["ask", "ip", "battery", "buy", "reboot", "restart", "speed", "music", "usage", "updatec", "updated"];
   if (known.includes(cmd)) return;
 
   return safeReply(
@@ -1039,6 +1105,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> <code>/ip domain</code>\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
       "-> /battery\n" +
+      "<b>✹ Buy Package (admin)</b>\n" +
+      "-> /buy\n" +
       "<b>✹ Play Music (admin)</b>\n" +
       "-> <code>/music tittle</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
@@ -1060,21 +1128,45 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
 // ==========================
 // Mute non-command messages (except admins)
 // ==========================
-bot.on("text", async (ctx) => {
+bot.on("text", async (ctx, next) => {
   const threadId = ctx.message?.message_thread_id;
-  if (threadId !== ALLOWED_TOPIC_ID) return;
-
   const text = ctx.message?.text?.trim() || "";
-  if (!text.startsWith("/")) {
-    const userId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
+  const chatId = ctx.chat?.id;
+  const userId = ctx.from?.id;
 
+  // 1. Skip if not in allowed topic
+  if (threadId !== ALLOWED_TOPIC_ID) return next();
+
+  // 2. Handle /buy reply session if active
+  const session = buySessions[chatId];
+  if (session && session.process) {
+    const replied = ctx.message?.reply_to_message;
+    if (replied && replied.from?.id === ctx.botInfo.id) {
+      // Admin check
+      try {
+        const admins = await ctx.telegram.getChatAdministrators(chatId);
+        const isAdmin = admins.some((a) => a.user.id === userId);
+        if (!isAdmin) return;
+
+        if (text && !text.startsWith("/")) {
+          session.process.stdin.write(text + "\n");
+          resetTimeout(chatId, ctx);
+          return;
+        }
+      } catch (err) {
+        console.error("buy-forwarder error:", err);
+      }
+    }
+  }
+
+  // 3. Mute check for non-command messages
+  if (!text.startsWith("/")) {
     try {
       const admins = await ctx.telegram.getChatAdministrators(chatId);
       const isAdmin = admins.some((admin) => admin.user.id === userId);
 
       if (!isAdmin) {
-        const untilDate = Math.floor(Date.now() / 1000) + 5 * 60; // 5 menit
+        const untilDate = Math.floor(Date.now() / 1000) + 5 * 60; // 5 min
         await ctx.telegram.restrictChatMember(chatId, userId, {
           permissions: { can_send_messages: false },
           until_date: untilDate,
@@ -1088,6 +1180,9 @@ bot.on("text", async (ctx) => {
       appendLogLine(`Mute non-command failed: ${err.message}`);
     }
   }
+
+  // 4. Let other handlers run
+  return next();
 });
 
 // ==========================
