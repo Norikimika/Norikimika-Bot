@@ -97,13 +97,13 @@ function getGeo(ip) {
             const loc = [json.country, json.region, json.city].filter(Boolean).join(", ");
             resolve(`<i>${loc || "Unknown location"} ${flag}</i>`);
           } else {
-            resolve("📍 <i>Unknown location</i>");
+            resolve("<i>Unknown location</i>");
           }
         } catch {
-          resolve("📍 <i>Unknown location</i>");
+          resolve("<i>Unknown location</i>");
         }
       });
-    }).on("error", () => resolve("📍 <i>Unknown location</i>"));
+    }).on("error", () => resolve("<i>Unknown location</i>"));
   });
 }
 
