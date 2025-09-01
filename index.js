@@ -324,7 +324,8 @@ const adminOnly = async (ctx, next) => {
 // /speed
 bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-  exec("speedtest-cli --simple", async (error, stdout) => {
+
+  exec("speedtest-go --json", async (error, stdout) => {
     if (error) {
       appendLogLine(`Speedtest failed: ${error.message}`);
       return safeReply(ctx, "❌ Failed to run speedtest", {
@@ -332,11 +333,32 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
         message_thread_id: threadId,
       });
     }
-    await safeReply(ctx, `<b>⚡ Speed Test Result</b>\n<pre>${escapeHTML(stdout)}</pre>`, {
-      parse_mode: "HTML",
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
-    });
+
+    try {
+      const result = JSON.parse(stdout);
+
+      const isp = result.user_info?.Isp || "Unknown";
+      const server = result.servers?.[0]?.name || "Unknown";
+      const country = result.servers?.[0]?.country || "-";
+      const latency = (result.servers?.[0]?.latency || 0) / 1e6; // ns → ms
+      const download = (result.servers?.[0]?.dl_speed || 0) / 125000; // bps → Mbps
+      const upload = (result.servers?.[0]?.ul_speed || 0) / 125000;
+
+      const summary = `<b>⚡ Speed Test Result</b>\n<pre>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(server)} (${escapeHTML(country)})\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</pre>`;
+
+      await safeReply(ctx, summary.trim(), {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+
+    } catch (e) {
+      appendLogLine(`Speedtest JSON parse failed: ${e.message}`);
+      await safeReply(ctx, "⚠️ Failed to parse speedtest result.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
   });
 });
 
