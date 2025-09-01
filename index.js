@@ -1057,7 +1057,7 @@ bot.command("buy", topicOnly, adminOnly, async (ctx) => {
 
   const chatId = ctx.chat.id;
   const replyTo = ctx.message?.message_id;
-  const cwd = "/data/user/0/com.termux/files/home/myxl-cli"; // adjust path
+  const cwd = "/data/user/0/com.termux/files/home/SERVER/myxl-cli"; // adjust path
 
   // Kill any existing session in this chat
   if (buySessions[chatId]) {
