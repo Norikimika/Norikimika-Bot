@@ -1108,13 +1108,35 @@ bot.command("buy", topicOnly, adminOnly, async (ctx) => {
   });
 });
 
+// ================== /STATUS ==================
+bot.hears(/^\/status/i, topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+
+  exec("su -c /data/adb/box/scripts/box.service status", async (error, stdout, stderr) => {
+    if (error) {
+      appendLogLine(`Status check failed: ${error.message}`);
+      return safeReply(ctx, "❌ Failed to check status.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    const output = stdout || stderr || "⚠️ No output.";
+    await safeReply(ctx, `<b>📡 Box Status</b>\n<pre>${escapeHTML(output)}</pre>`, {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  });
+});
+
 // unknown commands
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const cmd = ctx.match[1].toLowerCase();
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
-  const known = ["ask", "ip", "battery", "buy", "reboot", "restart", "speed", "music", "usage", "updatec", "updated"];
+  const known = ["ask", "ip", "battery", "buy", "reboot", "restart", "speed", "status", "music", "usage", "updatec", "updated"];
   if (known.includes(cmd)) return;
 
   return safeReply(
@@ -1139,6 +1161,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> /restart\n" +
       "<b>✹ Speed Test (admin)</b>\n" +
       "-> /speed\n" +
+      "<b>✹ Box Status (admin)</b>\n" +
+      "-> /status\n" +
       "<b>✹ Update Core (admin)</b>\n" +
       "-> /updatec\n" +
       "<b>✹ Update Dashboard (admin)</b>\n" +
