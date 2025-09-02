@@ -344,7 +344,7 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
       const download = (result.servers?.[0]?.dl_speed || 0) / 125000; // bps → Mbps
       const upload = (result.servers?.[0]?.ul_speed || 0) / 125000;
 
-      const summary = `<b>⚡ Speed Test Result</b>\n<pre>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(server)} (${escapeHTML(country)})\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</pre>`;
+      const summary = `<b>⚡ Speed Test Result</b>\n<blockquote>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(server)} (${escapeHTML(country)})\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</blockquote>`;
 
       await safeReply(ctx, summary.trim(), {
         parse_mode: "HTML",
@@ -1122,7 +1122,7 @@ bot.hears(/^\/status/i, topicOnly, adminOnly, async (ctx) => {
     }
 
     const output = stdout || stderr || "⚠️ No output.";
-    await safeReply(ctx, `<b>📡 Box Status</b>\n<pre>${escapeHTML(output)}</pre>`, {
+    await safeReply(ctx, `<b>📡 Box Status</b>\n<blockquote>${escapeHTML(output)}</blockquote>`, {
       parse_mode: "HTML",
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
