@@ -9,6 +9,8 @@ input keyevent 3
 sleep 2
 
 # Server
+am force-stop com.termux
+sleep 2
 monkey -p com.termux -c android.intent.category.LAUNCHER 1
 sleep 2
 input tap 687 1300
