@@ -224,9 +224,9 @@ async function sendUsageReport() {
 
         const todayData = extractTraffic(traffic?.day?.at(-1));
 
-        const usageReport =
-          `<b>📊 Daily Usage Report (${iface})</b>\n\n` +
-          (todayData ? `📅 <b>Today</b>\n⏫ Upload: ${todayData.up}\n⏬ Download: ${todayData.down}\n📦 Total: ${todayData.total}` : "⚠️ No data");
+        const usageReport = `<b>📊 Daily Usage Report (${iface})</b>\n<blockquote>` +
+          (todayData ? `📅 <b>Today</b>\nUpload : ${todayData.up}\nDownload : ${todayData.down}\nTotal : ${todayData.total}` : "No data") +
+          `</blockquote>`;
 
         await safeSend(bot, process.env.ALLOWED_CHAT_ID, usageReport.trim(), {
           parse_mode: "HTML",
@@ -582,11 +582,11 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
       const weekData = getWeekData();
       const monthData = extractTraffic(traffic?.month?.at(-1));
 
-      const usageReport =
-        `<b>📊 Data Usage (${iface})</b>\n\n` +
-        (todayData ? `📅 <b>Today</b>\n⏫ Upload: ${todayData.up}\n⏬ Download: ${todayData.down}\n📦 Total: ${todayData.total}\n` : "⚠️ No data\n") +
-        (weekData ? `\n📅 <b>This Week</b>\n⏫ Upload: ${weekData.up}\n⏬ Download: ${weekData.down}\n📦 Total: ${weekData.total}\n` : "⚠️ No data\n") +
-        (monthData ? `\n📅 <b>This Month</b>\n⏫ Upload: ${monthData.up}\n⏬ Download: ${monthData.down}\n📦 Total: ${monthData.total}` : "");
+      const usageReport = `<b>📊 Data Usage (${iface})</b>\n<blockquote>` +
+        (todayData ? `📅 <b>Today</b>\nUpload : ${todayData.up}\nDownload : ${todayData.down}\nTotal : ${todayData.total}\n` : "No data\n") +
+        (weekData ? `\n📆 <b>This Week</b>\nUpload : ${weekData.up}\nDownload : ${weekData.down}\nTota l: ${weekData.total}\n` : "No data\n") +
+        (monthData ? `\n🗓️ <b>This Month</b>\nUpload : ${monthData.up}\nDownload : ${monthData.down}\nTotal : ${monthData.total}` : "") +
+        `</blockquote>`;
 
       return safeReply(ctx, usageReport.trim(), {
         parse_mode: "HTML",
