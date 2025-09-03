@@ -584,7 +584,7 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
 
       const usageReport = `<b>📊 Data Usage (${iface})</b>\n<blockquote>` +
         (todayData ? `📅 <b>Today</b>\nUpload : ${todayData.up}\nDownload : ${todayData.down}\nTotal : ${todayData.total}\n` : "No data\n") +
-        (weekData ? `\n📆 <b>This Week</b>\nUpload : ${weekData.up}\nDownload : ${weekData.down}\nTota l: ${weekData.total}\n` : "No data\n") +
+        (weekData ? `\n📆 <b>This Week</b>\nUpload : ${weekData.up}\nDownload : ${weekData.down}\nTotal : ${weekData.total}\n` : "No data\n") +
         (monthData ? `\n🗓️ <b>This Month</b>\nUpload : ${monthData.up}\nDownload : ${monthData.down}\nTotal : ${monthData.total}` : "") +
         `</blockquote>`;
 
