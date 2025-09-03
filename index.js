@@ -439,7 +439,7 @@ bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
       const data = JSON.parse(stdout);
       return safeReply(
         ctx,
-        `<b>🔋 Battery Status</b>\n<pre>Percentage: ${data.percentage}%\nStatus: ${data.status}\nTemperature: ${Math.round(data.temperature)}°C</pre>`,
+        `<b>🔋 Battery Status</b>\n<pre>Percentage : ${data.percentage}%\nStatus : ${data.status}\nTemperature : ${Math.round(data.temperature)}°C</pre>`,
         { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
       );
     } catch (parseError) {
