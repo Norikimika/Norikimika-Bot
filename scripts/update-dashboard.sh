@@ -29,6 +29,13 @@ update_zashboard() {
         return 1
     }
 
+    rm -rf /data/adb/box/clash/dashboard/*
+    cp -r zashboard-gh-pages/* /data/adb/box/clash/dashboard/ || {
+        echo "❌ Failed to copy new dashboard files"
+        rm -rf "$TMP_DIR"
+        return 1
+    }
+
     # Cleanup
     rm -rf "$TMP_DIR"
     echo "✅ Zashboard updated successfully"
@@ -102,7 +109,7 @@ update_yacd() {
 
 # Run both updates
 update_zashboard
-update_metacubexd
+# update_metacubexd
 # update_yacd
 
 echo "🎉 All dashboards updated successfully"
