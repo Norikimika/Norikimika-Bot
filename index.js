@@ -7,6 +7,7 @@ const { spawn, exec } = require("child_process");
 const escapeHTML = require("escape-html");
 const https = require("https");
 const dns = require("dns");
+const path = require("path");
 
 // dynamic import for node-fetch
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -910,12 +911,13 @@ function playNext(ctx, threadId, replyTo) {
     isPlaying = false;
     currentTitle = "";
     currentProcess = null;
-    updateNowPlaying(ctx, threadId, replyTo, true); // ✅ forcedStop = true
+    updateNowPlaying(ctx, threadId, replyTo, true);
     return;
   }
 
   const next = musicQueue.shift();
   const videoUrl = `https://youtu.be/${next.id}`;
+  const tempFile = path.join(__dirname, `${next.id}.webm`);
 
   exec(`yt-dlp -f 251 --get-url --get-title "${videoUrl}"`, (err, stdout) => {
     if (err || !stdout) return playNext(ctx, threadId, replyTo);
@@ -929,7 +931,6 @@ function playNext(ctx, threadId, replyTo) {
 
     currentProcess = spawn("mpv", ["--no-video", audioUrl]);
 
-    // prevent double update on stop
     currentProcess.on("exit", () => {
       const wasStopped = stoppedManually;
       stoppedManually = false;
@@ -942,6 +943,25 @@ function playNext(ctx, threadId, replyTo) {
 
     isPlaying = true;
     updateNowPlaying(ctx, threadId, replyTo);
+
+    exec(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`, async (err2) => {
+      if (err2) return;
+      try {
+        await ctx.replyWithAudio(
+          { source: tempFile },
+          {
+            title: title,
+            performer: "YouTube",
+            reply_to_message_id: replyTo,
+            message_thread_id: threadId,
+          }
+        );
+      } catch (e) {
+        console.error("Failed to send audio:", e);
+      } finally {
+        fs.unlink(tempFile, () => {});
+      }
+    });
   });
 }
 
