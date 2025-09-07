@@ -40,6 +40,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 const ALLOWED_TOPIC_ID = parseInt(process.env.ALLOWED_TOPIC_ID || "0");
 const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE || "0");
+const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC || "0");
 
 // Markdown to HTML converter
 function convertMarkdownToHTML(text) {
@@ -837,9 +838,9 @@ bot.hears(/^\/domain(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
 });
 
 // ================== MUSIC STATE ==================
-let musicQueue = [];
+let musicQueue = []; // [{id, title, performer, duration}]
 let isPlaying = false;
-let currentTitle = "";
+let currentTrack = null; // {title, performer, duration}
 let currentProcess = null;
 let stoppedManually = false; // prevent double stop
 // =================================================
@@ -847,7 +848,6 @@ let stoppedManually = false; // prevent double stop
 // Inline buttons builder
 function musicControls(queueLength) {
   if (queueLength > 0) {
-    // Queue exists → show Skip + Stop
     return {
       inline_keyboard: [
         [
@@ -857,7 +857,6 @@ function musicControls(queueLength) {
       ],
     };
   } else {
-    // Only current song → show Stop only
     return {
       inline_keyboard: [[{ text: "⏹ Stop", callback_data: "music_stop" }]],
     };
@@ -868,14 +867,10 @@ function musicControls(queueLength) {
 async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
   let text = "";
 
-  if (isPlaying && currentTitle) {
-    text += `<b>🎵 Now playing:</b>\n➤ <code>${currentTitle}</code>\n\n`;
+  if (isPlaying && currentTrack) {
+    text += `<b>🎵 Now playing:</b>\n-> <code>${currentTrack.performer} - ${currentTrack.title}</code>\n<b>⏳ Duration:</b>\n-> ${currentTrack.duration}\n`;
   } else if (!isPlaying && musicQueue.length === 0) {
-    if (forcedStop) {
-      text += "⏹ Music stopped.";
-    } else {
-      text += "❌ Please provide a song title or YouTube link.";
-    }
+    text += forcedStop ? "⏹ Music stopped." : "❌ Please provide a song title or YouTube link.";
     return ctx.reply(text, {
       reply_to_message_id: replyTo,
       message_thread_id: threadId,
@@ -884,20 +879,19 @@ async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
   }
 
   if (musicQueue.length > 0) {
-    text += "<b>📜 Queue:</b>\n";
+    text += "<b>📜 Queue:</b>\n<blockquote>";
     musicQueue.slice(0, 5).forEach((song, i) => {
       text += `${i + 1}. ${song.title}\n`;
     });
     if (musicQueue.length > 5) {
       text += `...and ${musicQueue.length - 5} more`;
     }
+    text += "</blockquote>";
   }
 
-  const replyMarkup = isPlaying
-    ? musicControls(musicQueue.length)
-    : undefined;
+  const replyMarkup = isPlaying ? musicControls(musicQueue.length) : undefined;
 
-  await ctx.reply(text, {
+  await ctx.reply(text.trim(), {
     reply_to_message_id: replyTo,
     message_thread_id: threadId,
     parse_mode: "HTML",
@@ -905,11 +899,19 @@ async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
   });
 }
 
-// Play next song
+// Helper: format seconds into m:ss
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return "??:??";
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// ================== PLAY NEXT ==================
 function playNext(ctx, threadId, replyTo) {
   if (musicQueue.length === 0) {
     isPlaying = false;
-    currentTitle = "";
+    currentTrack = null;
     currentProcess = null;
     updateNowPlaying(ctx, threadId, replyTo, true);
     return;
@@ -919,13 +921,22 @@ function playNext(ctx, threadId, replyTo) {
   const videoUrl = `https://youtu.be/${next.id}`;
   const tempFile = path.join(__dirname, `${next.id}.webm`);
 
-  exec(`yt-dlp -f 251 --get-url --get-title "${videoUrl}"`, (err, stdout) => {
+  exec(`yt-dlp -f 251 -j "${videoUrl}"`, (err, stdout) => {
     if (err || !stdout) return playNext(ctx, threadId, replyTo);
 
-    const lines = stdout.trim().split("\n");
-    const title = lines[0];
-    const audioUrl = lines[1];
-    currentTitle = title;
+    let info;
+    try {
+      info = JSON.parse(stdout);
+    } catch {
+      return playNext(ctx, threadId, replyTo);
+    }
+
+    const title = info.track || info.title || "Unknown Title";
+    const performer = info.artist || info.uploader || "Unknown Artist";
+    const duration = formatDuration(info.duration);
+    const audioUrl = info.url;
+
+    currentTrack = { title, performer, duration };
 
     if (currentProcess) currentProcess.kill("SIGKILL");
 
@@ -935,25 +946,23 @@ function playNext(ctx, threadId, replyTo) {
       const wasStopped = stoppedManually;
       stoppedManually = false;
       currentProcess = null;
-
-      if (!wasStopped) {
-        playNext(ctx, threadId, replyTo);
-      }
+      if (!wasStopped) playNext(ctx, threadId, replyTo);
     });
 
     isPlaying = true;
     updateNowPlaying(ctx, threadId, replyTo);
 
+    // send audio
     exec(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`, async (err2) => {
       if (err2) return;
       try {
         await ctx.replyWithAudio(
           { source: tempFile },
           {
-            title: title,
-            performer: "YouTube",
-            reply_to_message_id: replyTo,
-            message_thread_id: threadId,
+            title,
+            performer,
+            duration: info.duration,
+            message_thread_id: ALLOWED_TOPIC_ID_MUSIC,
           }
         );
       } catch (e) {
