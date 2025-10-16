@@ -13,7 +13,7 @@ if [ "$ABI" = "arm64-v8a" ]; then
 fi
 
 # Download build page
-/data/user/0/com.termux/files/usr/bin/wget -q --show-progress -O CORE "https://nightly.link/taamarin/clash/workflows/build/Alpha/$cores" || {
+/data/user/0/com.termux/files/usr/bin/wget -q --show-progress -O CORE "https://nightly.link/MetaCubeX/mihomo/workflows/build/Alpha/$cores" || {
   echo "❌ Failed to fetch download page"
   exit 1
 }

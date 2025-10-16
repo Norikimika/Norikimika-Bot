@@ -1,6 +1,7 @@
 {
   "dependencies": {
-    "dotenv": "^17.2.2",
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.3",
     "escape-html": "^1.0.3",
     "node-cron": "^4.2.1",
     "node-fetch": "^3.3.2",

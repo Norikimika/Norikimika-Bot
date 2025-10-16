@@ -15,7 +15,6 @@ const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fet
 // Logging
 const LOG_FILE = "bot.log";
 const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
-const RESTART_TIMESTAMP_FILE = "last_restart.txt";
 
 function appendLogLine(line) {
   try {
@@ -43,24 +42,52 @@ const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE || "0
 const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC || "0");
 
 // Markdown to HTML converter
-function convertMarkdownToHTML(text) {
-  if (!text) return "";
-  let safeText = escapeHTML(text);
+function convertMarkdownToHTML(mdText) {
+  if (!mdText) return '';
 
-  safeText = safeText.replace(/^#### (.*)$/gm, "<u>$1</u>");
-  safeText = safeText.replace(/^### (.*)$/gm, "<b><u>$1</u></b>");
-  safeText = safeText.replace(/^## (.*)$/gm, "<b>$1</b>");
-  safeText = safeText.replace(/^# (.*)$/gm, "<b><i>$1</i></b>");
-  safeText = safeText.replace(/^\s*[\*\-]\s+/gm, "• ");
-  safeText = safeText.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
-    const escapedCode = escapeHTML(code.trim());
-    return `<pre><code>${escapedCode}</code></pre>`;
-  });
-  safeText = safeText.replace(/`([^`\n]+?)`/g, (_, code) => `<code>${escapeHTML(code)}</code>`);
-  safeText = safeText.replace(/\*\*(?!\s)([^\*\n]+?)\*\*/g, "<b>$1</b>");
-  safeText = safeText.replace(/\*(?!\s)([^\*\n]+?)\*/g, "<i>$1</i>");
+  const fenceRe = /```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g;
 
-  return safeText;
+  let lastIndex = 0;
+  let parts = [];
+  let match;
+
+  while ((match = fenceRe.exec(mdText)) !== null) {
+    const idx = match.index;
+    const lang = match[1] || '';
+    const code = match[2];
+
+    if (idx > lastIndex) {
+      let preceding = mdText.slice(lastIndex, idx);
+
+      preceding = preceding.replace(/^(\s*\d+)\.\s{2,}/gm, '$1. ');
+
+      preceding = escapeHTML(preceding)
+        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+        .replace(/\*([^*]+)\*/g, '<i>$1</i>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+      parts.push(preceding);
+    }
+
+    const escapedCode = escapeHTML(code);
+    const classAttr = lang ? ` class="language-${escapeHTML(lang)}"` : '';
+    parts.push(`<pre><code${classAttr}>${escapedCode}</code></pre>`);
+
+    lastIndex = fenceRe.lastIndex;
+  }
+
+  if (lastIndex < mdText.length) {
+    let trailing = mdText.slice(lastIndex);
+
+    trailing = trailing.replace(/^(\s*\d+)\.\s{2,}/gm, '$1. ');
+
+    trailing = escapeHTML(trailing)
+      .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')   
+      .replace(/\*([^*]+)\*/g, '<i>$1</i>')     
+      .replace(/`([^`]+)`/g, '<code>$1</code>'); 
+    parts.push(trailing);
+  }
+
+  return parts.join('');
 }
 
 // Convert country code -> flag emoji
@@ -342,11 +369,12 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
       const isp = result.user_info?.Isp || "Unknown";
       const server = result.servers?.[0]?.name || "Unknown";
       const country = result.servers?.[0]?.country || "-";
+      const sponsor = result.servers?.[0]?.sponsor || "Unknown";
       const latency = (result.servers?.[0]?.latency || 0) / 1e6; // ns → ms
       const download = (result.servers?.[0]?.dl_speed || 0) / 125000; // bps → Mbps
       const upload = (result.servers?.[0]?.ul_speed || 0) / 125000;
 
-      const summary = `<b>⚡ Speed Test Result</b>\n<blockquote>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(server)} (${escapeHTML(country)})\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</blockquote>`;
+      const summary = `<b>⚡ Speed Test Result</b>\n<blockquote>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(sponsor)}\nCountry : ${escapeHTML(server)} ${escapeHTML(country)}\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</blockquote>`;
 
       await safeReply(ctx, summary.trim(), {
         parse_mode: "HTML",
@@ -371,58 +399,21 @@ bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
     reply_to_message_id: ctx.message?.message_id,
     message_thread_id: threadId,
   });
-  exec("su -c reboot", (error) => {
+
+  exec("am force-stop com.termux", (error) => {
     if (error) {
-      appendLogLine(`Reboot failed: ${error.message}`);
-      return safeReply(ctx, "❌ Failed to reboot", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
+      appendLogLine(`Force stop Termux failed: ${error.message}`);
     }
-  });
-});
 
-// /restart
-bot.hears(/^\/restart/i, topicOnly, adminOnly, async (ctx) => {
-  const threadId = ctx.message?.message_thread_id;
-  const now = Date.now();
-  const cooldown = 50 * 1000;
-
-  let lastRestartTime = 0;
-  if (fs.existsSync(RESTART_TIMESTAMP_FILE)) {
-    try {
-      const raw = fs.readFileSync(RESTART_TIMESTAMP_FILE, "utf-8");
-      lastRestartTime = parseInt(raw.trim(), 10) || 0;
-    } catch (_) {}
-  }
-
-  if (now - lastRestartTime < cooldown) {
-    const remaining = Math.ceil((cooldown - (now - lastRestartTime)) / 1000);
-    return safeReply(ctx, `⏳ Please wait ${remaining}s before restarting again.`, {
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
+    exec("su -c reboot", (rebootError) => {
+      if (rebootError) {
+        appendLogLine(`Reboot failed: ${rebootError.message}`);
+        return safeReply(ctx, "❌ Failed to reboot", {
+          reply_to_message_id: ctx.message?.message_id,
+          message_thread_id: threadId,
+        });
+      }
     });
-  }
-
-  try {
-    fs.writeFileSync(RESTART_TIMESTAMP_FILE, now.toString());
-  } catch (e) {
-    appendLogLine(`Write restart timestamp failed: ${e.message}`);
-  }
-
-  await safeReply(ctx, "♻️ Restarting server...", {
-    reply_to_message_id: ctx.message?.message_id,
-    message_thread_id: threadId,
-  });
-
-  exec("su -c scripts/restart.sh", (error) => {
-    if (error) {
-      appendLogLine(`Restart failed: ${error.message}`);
-      return safeReply(ctx, "❌ Failed to restart", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
-    }
   });
 });
 
@@ -605,10 +596,10 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   });
 });
 
-// /updatec
-bot.hears(/^\/updatec/i, topicOnly, adminOnly, async (ctx) => {
+// /update
+bot.hears(/^\/update/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-  await safeReply(ctx, "🦠 Choose core to update:", {
+  await safeReply(ctx, "🦠 Choose a component to update:", {
     reply_to_message_id: ctx.message?.message_id,
     message_thread_id: threadId,
     reply_markup: {
@@ -617,13 +608,17 @@ bot.hears(/^\/updatec/i, topicOnly, adminOnly, async (ctx) => {
           { text: "☘️ Clash", callback_data: "update_mihomo" },
           { text: "🍀 Smart", callback_data: "update_smart" },
         ],
-        [{ text: "🌱 Sing-box", callback_data: "update_sing" }],
+        [
+          { text: "🌱 Sing-box", callback_data: "update_sing-box" },
+          { text: "🍃 Geo", callback_data: "update_geo" }
+        ],
+        [{ text: "🌿 Dashboard", callback_data: "update_dashboard" }],
       ],
     },
   });
 });
 
-// ================= UPDATE CORE =================
+// Unified handler for all update actions
 bot.action(/^update_/, topicOnly, adminOnly, async (ctx) => {
   const data = ctx.callbackQuery?.data;
   const cbMsg = ctx.callbackQuery?.message;
@@ -633,52 +628,33 @@ bot.action(/^update_/, topicOnly, adminOnly, async (ctx) => {
   const scriptMap = {
     update_mihomo: "scripts/update-mihomo.sh",
     update_smart: "scripts/update-smart.sh",
-    update_sing: "scripts/update-sing.sh",
+    "update_sing-box": "scripts/update-sing-box.sh",
+    update_dashboard: "scripts/update-dashboard.sh",
+    update_geo: "/data/adb/box/scripts/box.tool geox"
   };
 
   const scriptPath = scriptMap[data];
   if (!scriptPath) return safeAnswerCbQuery(ctx, "❌ Invalid selection!");
 
-  await safeEditMessageText(ctx, `🚀 Updating core...`);
+  const rawName = data.replace("update_", "");
+  const targetName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+  await safeEditMessageText(ctx, `🚀 Updating ${targetName}...`);
 
   exec(`su -c ${scriptPath}`, async (error) => {
     if (error) {
-      appendLogLine(`Update core failed: ${error.message}`);
-      return safeSend(bot, cbMsg.chat.id, "❌ Failed to update core", {
+      appendLogLine(`Update ${targetName} failed: ${error.message}`);
+      return safeSend(bot, cbMsg.chat.id, `❌ Failed to update ${targetName}`, {
         reply_to_message_id: replyTargetId,
         message_thread_id: threadId,
       });
     }
-    await safeSend(bot, cbMsg.chat.id, "✅ Core updated successfully!", {
+    await safeSend(bot, cbMsg.chat.id, `✅ ${targetName} updated successfully!`, {
       reply_to_message_id: replyTargetId,
       message_thread_id: threadId,
     });
   });
 
-  await safeAnswerCbQuery(ctx, "⏳ Updating core...");
-});
-
-// /updated
-bot.hears(/^\/updated/i, topicOnly, adminOnly, async (ctx) => {
-  const threadId = ctx.message?.message_thread_id;
-  await safeReply(ctx, "🚀 Updating dashboard...", {
-    reply_to_message_id: ctx.message?.message_id,
-    message_thread_id: threadId,
-  });
-
-  exec("su -c scripts/update-dashboard.sh", async (error) => {
-    if (error) {
-      appendLogLine(`Update dashboard failed: ${error.message}`);
-      return safeReply(ctx, "❌ Failed to update dashboard", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
-    }
-    await safeReply(ctx, "✅ Dashboard updated successfully!", {
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
-    });
-  });
+  await safeAnswerCbQuery(ctx, "⏳ Updating...");
 });
 
 // /ip
@@ -838,14 +814,13 @@ bot.hears(/^\/domain(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
 });
 
 // ================== MUSIC STATE ==================
-let musicQueue = []; // [{id, title, performer, duration}]
+let musicQueue = [];
 let isPlaying = false;
-let currentTrack = null; // {title, performer, duration}
+let currentTrack = null;
 let currentProcess = null;
-let stoppedManually = false; // prevent double stop
-// =================================================
+let stoppedManually = false;
+let nowPlayingMessageId = null;
 
-// Inline buttons builder
 function musicControls(queueLength) {
   if (queueLength > 0) {
     return {
@@ -863,7 +838,6 @@ function musicControls(queueLength) {
   }
 }
 
-// Always send new message
 async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
   let text = "";
 
@@ -871,6 +845,16 @@ async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
     text += `<b>🎵 Now playing:</b>\n-> <code>${currentTrack.performer} - ${currentTrack.title}</code>\n<b>⏳ Duration:</b>\n-> ${currentTrack.duration}\n`;
   } else if (!isPlaying && musicQueue.length === 0) {
     text += forcedStop ? "⏹ Music stopped." : "❌ Please provide a song title or YouTube link.";
+
+    if (nowPlayingMessageId) {
+      try {
+        await ctx.deleteMessage(nowPlayingMessageId);
+      } catch (e) {
+        appendLogLine(`Failed to delete now playing message: ${e.message}`);
+      }
+      nowPlayingMessageId = null;
+    }
+
     return ctx.reply(text, {
       reply_to_message_id: replyTo,
       message_thread_id: threadId,
@@ -891,15 +875,24 @@ async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
 
   const replyMarkup = isPlaying ? musicControls(musicQueue.length) : undefined;
 
-  await ctx.reply(text.trim(), {
+  if (nowPlayingMessageId) {
+    try {
+      await ctx.deleteMessage(nowPlayingMessageId);
+    } catch (e) {
+      appendLogLine(`Failed to delete now playing message: ${e.message}`);
+    }
+  }
+
+  const message = await ctx.reply(text.trim(), {
     reply_to_message_id: replyTo,
     message_thread_id: threadId,
     parse_mode: "HTML",
     reply_markup: replyMarkup,
   });
+
+  nowPlayingMessageId = message.message_id;
 }
 
-// Helper: format seconds into m:ss
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return "??:??";
   const m = Math.floor(seconds / 60);
@@ -922,12 +915,16 @@ function playNext(ctx, threadId, replyTo) {
   const tempFile = path.join(__dirname, `${next.id}.webm`);
 
   exec(`yt-dlp -f 251 -j "${videoUrl}"`, (err, stdout) => {
-    if (err || !stdout) return playNext(ctx, threadId, replyTo);
+    if (err || !stdout) {
+      appendLogLine(`Failed to get video info for ${videoUrl}: ${err?.message || 'No output'}`);
+      return playNext(ctx, threadId, replyTo);
+    }
 
     let info;
     try {
       info = JSON.parse(stdout);
-    } catch {
+    } catch (e) {
+      appendLogLine(`Failed to parse video info JSON: ${e.message}`);
       return playNext(ctx, threadId, replyTo);
     }
 
@@ -952,9 +949,12 @@ function playNext(ctx, threadId, replyTo) {
     isPlaying = true;
     updateNowPlaying(ctx, threadId, replyTo);
 
-    // send audio
     exec(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`, async (err2) => {
-      if (err2) return;
+      if (err2) {
+        appendLogLine(`Failed to download audio for ${videoUrl}: ${err2.message}`);
+        return;
+      }
+      
       try {
         await ctx.replyWithAudio(
           { source: tempFile },
@@ -966,9 +966,13 @@ function playNext(ctx, threadId, replyTo) {
           }
         );
       } catch (e) {
-        console.error("Failed to send audio:", e);
+        appendLogLine(`Failed to send audio: ${e.message}`);
       } finally {
-        fs.unlink(tempFile, () => {});
+        fs.unlink(tempFile, (unlinkErr) => {
+          if (unlinkErr) {
+            appendLogLine(`Failed to delete temp file ${tempFile}: ${unlinkErr.message}`);
+          }
+        });
       }
     });
   });
@@ -987,7 +991,6 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
     return;
   }
 
-  // yt-dlp command builder
   let command;
   if (/^https?:\/\/(www\.)?youtube\.com\/playlist\?/.test(query)) {
     command = `yt-dlp --flat-playlist --get-id --get-title "${query}"`;
@@ -999,6 +1002,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 
   exec(command, async (err, stdout) => {
     if (err || !stdout) {
+      appendLogLine(`Failed to execute yt-dlp command: ${err?.message || 'No output'}`);
       return ctx.reply("❌ Failed to add music.", {
         reply_to_message_id: ctx.message?.message_id,
         message_thread_id: threadId,
@@ -1008,7 +1012,9 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
     const lines = stdout.trim().split("\n");
     const ids = [];
     for (let i = 0; i < lines.length; i += 2) {
-      ids.push({ title: lines[i], id: lines[i + 1] });
+      if (lines[i + 1]) {
+        ids.push({ title: lines[i], id: lines[i + 1] });
+      }
     }
 
     if (ids.length === 0) {
@@ -1032,109 +1038,52 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 bot.action(/^music_/, topicOnly, adminOnly, async (ctx) => {
   const data = ctx.callbackQuery?.data;
   const threadId = ctx.callbackQuery?.message?.message_thread_id;
+  const chatId = ctx.callbackQuery?.message?.chat.id;
+  const messageId = ctx.callbackQuery?.message?.message_id;
 
   if (data === "music_skip") {
-    if (currentProcess) {
+    if (currentProcess && isPlaying) {
+      await ctx.answerCbQuery("⏭ Skipping...");
       currentProcess.kill("SIGKILL");
-      return ctx.answerCbQuery(); // ✅ no duplicate message
+      return;
     }
     return ctx.answerCbQuery("⚠️ Nothing to skip.");
   }
 
   if (data === "music_stop") {
-    if (currentProcess) {
+    if (isPlaying || musicQueue.length > 0) {
+      await ctx.answerCbQuery("⏹ Stopping...");
+
       stoppedManually = true;
-      currentProcess.kill("SIGKILL");
-      currentProcess = null;
-    }
-    musicQueue = [];
-    isPlaying = false;
-    currentTitle = "";
+      if (currentProcess) {
+        currentProcess.kill("SIGKILL");
+        currentProcess = null;
+      }
 
-    await ctx.answerCbQuery("⏹ Stopped.");
+      musicQueue = [];
+      isPlaying = false;
+      currentTrack = null;
 
-    try {
-      await ctx.telegram.editMessageText(
-        ctx.callbackQuery.message.chat.id,
-        ctx.callbackQuery.message.message_id,
-        null,
-        "⏹ Music stopped.",
-        { parse_mode: "HTML" }
-      );
-    } catch (e) {
-      await ctx.reply("⏹ Music stopped.", {
-        reply_to_message_id: ctx.callbackQuery.message.message_id,
-        message_thread_id: threadId,
-      });
+      try {
+        await ctx.telegram.editMessageText(
+          chatId,
+          messageId,
+          null,
+          "⏹ Music stopped.",
+          { parse_mode: "HTML" }
+        );
+        nowPlayingMessageId = null;
+      } catch (e) {
+        appendLogLine(`Failed to edit message: ${e.message}`);
+        await ctx.reply("⏹ Music stopped.", {
+          message_thread_id: threadId,
+        });
+        nowPlayingMessageId = null;
+      }
+      return;
     }
-    return;
+    return ctx.answerCbQuery("⚠️ No music is playing.");
   }
-});
-
-// ================== /BUY ==================
-// ANSI cleaner (remove escape codes from Python output)
-function cleanAnsi(text) {
-  return text.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
-}
-
-// Active sessions per chat { chatId: { process, timeout } }
-const buySessions = {};
-
-bot.command("buy", topicOnly, adminOnly, async (ctx) => {
-  const threadId = ctx.message?.message_thread_id;
-  if (threadId !== ALLOWED_TOPIC_ID) return;
-
-  const chatId = ctx.chat.id;
-  const replyTo = ctx.message?.message_id;
-  const cwd = "/data/user/0/com.termux/files/home/SERVER/myxl-cli"; // adjust path
-
-  // Kill any existing session in this chat
-  if (buySessions[chatId]) {
-    buySessions[chatId].process.kill("SIGKILL");
-    clearTimeout(buySessions[chatId].timeout);
-    delete buySessions[chatId];
-  }
-
-  // Directly run Python script
-  const py = spawn("python3", ["main.py"], { cwd });
-  buySessions[chatId] = { process: py, timeout: null };
-
-  // Reset timeout helper (1 minute)
-  const resetTimeout = () => {
-    if (buySessions[chatId].timeout) clearTimeout(buySessions[chatId].timeout);
-    buySessions[chatId].timeout = setTimeout(() => {
-      py.kill("SIGKILL");
-      delete buySessions[chatId];
-    }, 60 * 1000);
-  };
-
-  resetTimeout();
-
-  // Handle Python stdout
-  py.stdout.on("data", async (data) => {
-    const cleaned = cleanAnsi(data.toString());
-    if (cleaned.trim() !== "") {
-      await safeReply(ctx, cleaned, {
-        reply_to_message_id: replyTo,
-        message_thread_id: threadId,
-      });
-    }
-    resetTimeout();
-  });
-
-  // Handle Python stderr (only log, don’t send to Telegram)
-  py.stderr.on("data", (data) => {
-    appendLogLine(`Buy stderr: ${data.toString()}`);
-  });
-
-  // When process ends
-  py.on("close", async (code) => {
-    delete buySessions[chatId];
-    await safeReply(ctx, `✅ Buy process finished`, {
-      reply_to_message_id: replyTo,
-      message_thread_id: threadId,
-    });
-  });
 });
 
 // ================== /STATUS ==================
@@ -1159,14 +1108,620 @@ bot.hears(/^\/status/i, topicOnly, adminOnly, async (ctx) => {
   });
 });
 
+// ==================== /WORKER ====================
+const axios = require('axios');
+const crypto = require('crypto');
+
+const DOMAIN = process.env.WORKER_DOMAIN || 'error.zerotwo.my.id';
+const PATH_PREFIX = process.env.WORKER_PATH_PREFIX || 'zerotwo';
+const UUID = process.env.WORKER_UUID || crypto.randomUUID();
+const MAX_SERVERS = 8; // Changed from 10 to 8
+
+function countryFlag(code) {
+  if (typeof code !== 'string' || code.length !== 2) return '🌐';
+  const base = 0x1F1E6;
+  const c = code.toUpperCase();
+  return String.fromCodePoint(base + c.charCodeAt(0) - 65) +
+         String.fromCodePoint(base + c.charCodeAt(1) - 65);
+}
+
+async function pingServer(host, port) {
+  const url = `https://api.jb8fd7grgd.workers.dev/${host}:${port}`;
+
+  try {
+    const res = await axios.get(url, { timeout: 10000 });
+    const data = res.data;
+    
+    if (Array.isArray(data) && data.length > 0 && data[0].latency) {
+      const latency = data[0].latency;
+      const latencyMs = parseInt(latency.replace('ms', ''));
+      return {
+        success: true,
+        latency: latencyMs,
+        rawLatency: latency
+      };
+    }
+    return { success: false, latency: null, rawLatency: 'Timeout' };
+  } catch (err) {
+    return { success: false, latency: null, rawLatency: 'Error' };
+  }
+}
+
+async function getProxyServers() {
+  const url =
+    'https://raw.githubusercontent.com/Rashgn/Proxy/master/ProxyList.txt';
+
+  try {
+    const res = await axios.get(url, { timeout: 10000 });
+    const rawData = res.data;
+
+    const lines = rawData.split('\n').filter(line => line.trim() !== '');
+
+    return lines.map(line => {
+      const parts = line.split(',');
+
+      if (parts.length < 4) return null;
+
+      const host = parts[0].trim();
+      const port = parseInt(parts[1].trim(), 10);
+      const code = parts[2].trim().toUpperCase();
+      const name = parts[3].trim();
+
+      return {
+        host,
+        port,
+        code,
+        flag: countryFlag(code),
+        name,
+        latency: null,
+        rawLatency: ''
+      };
+    }).filter(Boolean);
+
+  } catch (err) {
+    appendLogLine(`worker: failed to fetch or parse proxy list: ${err.message}`);
+    return [];
+  }
+}
+
+const BUG_OPTIONS = [
+  'ava.game.naver.com',
+  'grabacademyportal.grab.com',
+  'quiz.int.vidio.com',
+  'support.zoom.us'
+];
+
+const workerSessions = {};
+
+bot.command('worker', topicOnly, async ctx => {
+  const threadId = ctx.message?.message_thread_id;
+  if (threadId !== ALLOWED_TOPIC_ID) return;
+
+  const chatId = ctx.chat.id;
+  workerSessions[chatId] = { 
+    protocol: null, 
+    allServers: [], 
+    filteredServers: [], 
+    selectedBug: null,
+    selectedServers: [], // Array to store multiple selected servers
+    selectionMode: false // Flag to indicate if we're in multi-selection mode
+  };
+
+  await ctx.reply(
+    '<b>🔧 Choose protocol:</b>',
+    {
+      parse_mode: 'HTML',
+      message_thread_id: threadId,
+      reply_to_message_id: ctx.message?.message_id,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'VLESS', callback_data: 'worker_proto_vless' },
+            { text: 'VMess', callback_data: 'worker_proto_vmess' },
+            { text: 'Trojan', callback_data: 'worker_proto_trojan' },
+          ],
+        ],
+      },
+    }
+  );
+});
+
+bot.action(/^worker_proto_/, topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const protocol = ctx.callbackQuery.data.replace('worker_proto_', '');
+
+  if (!workerSessions[chatId]) workerSessions[chatId] = {};
+  workerSessions[chatId].protocol = protocol;
+
+  const bugKeyboard = BUG_OPTIONS.map((bug, index) => [
+    { text: bug, callback_data: `worker_bug_${index}` }
+  ]);
+
+  bugKeyboard.push([{ text: '⬅️ Back', callback_data: 'worker_back_proto' }]);
+
+  await ctx.editMessageText(
+    `<b>🔧 Protocol:</b> ${protocol.toUpperCase()}\n<b>🐛 Choose custom bug:</b>`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: bugKeyboard },
+    }
+  );
+});
+
+bot.action(/^worker_bug_/, topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const bugIndex = parseInt(ctx.callbackQuery.data.replace('worker_bug_', ''), 10);
+  const session = workerSessions[chatId];
+
+  if (!session || bugIndex >= BUG_OPTIONS.length) {
+    return ctx.answerCbQuery(
+      '⚠️ Invalid bug selection. Please start over.',
+      { show_alert: true }
+    );
+  }
+
+  session.selectedBug = BUG_OPTIONS[bugIndex];
+
+  let servers;
+  try {
+    await ctx.answerCbQuery('Fetching server list…');
+    servers = await getProxyServers();
+    session.allServers = servers;
+  } catch (e) {
+    appendLogLine(`worker: failed to fetch servers: ${e.message}`);
+    return ctx.editMessageText(
+      '❌ Failed to fetch server list. Please try again later.',
+      { message_thread_id: ctx.callbackQuery.message.message_thread_id }
+    );
+  }
+
+  const countryCodes = [...new Set(servers.map(s => s.code))].sort();
+  if (countryCodes.length === 0) {
+    return ctx.editMessageText(
+      '❌ No servers found in the list.',
+      { message_thread_id: ctx.callbackQuery.message.message_thread_id }
+    );
+  }
+
+  const keyboard = countryCodes.reduce((acc, code, i) => {
+    const flag = countryFlag(code);
+    const button = { text: `${flag} ${code}`, callback_data: `worker_country_${code}` };
+    const row = Math.floor(i / 5);
+    if (!acc[row]) acc[row] = [];
+    acc[row].push(button);
+    return acc;
+  }, []);
+
+  keyboard.push([{ text: '⬅️ Back', callback_data: 'worker_back_bug' }]);
+
+  await ctx.editMessageText(
+    `<b>🔧 Protocol:</b> ${session.protocol.toUpperCase()}\n` +
+    `<b>🐛 Bug:</b> ${session.selectedBug}\n` +
+    `<b>🌏 Choose country:</b>`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard },
+    }
+  );
+});
+
+bot.action(/^worker_country_/, topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const session = workerSessions[chatId];
+  const countryCode = ctx.callbackQuery.data.replace('worker_country_', '');
+
+  if (!session || !session.allServers) {
+    return ctx.answerCbQuery(
+      '⚠️ Session expired. Please start over with /worker.',
+      { show_alert: true }
+    );
+  }
+
+  const filteredServers = session.allServers.filter(s => s.code === countryCode);
+
+  await ctx.answerCbQuery('Checking server latency…');
+
+  const pingPromises = filteredServers.map(async (server) => {
+    const pingResult = await pingServer(server.host, server.port);
+    server.latency = pingResult.latency;
+    server.rawLatency = pingResult.rawLatency;
+    return server;
+  });
+
+  const serversWithPing = await Promise.all(pingPromises);
+
+  serversWithPing.sort((a, b) => {
+    if (a.latency === null) return 1;
+    if (b.latency === null) return -1;
+    return a.latency - b.latency;
+  });
+
+  workerSessions[chatId].filteredServers = serversWithPing;
+  workerSessions[chatId].selectedServers = []; // Reset selected servers
+
+  // Create server selection keyboard
+  const keyboard = serversWithPing.slice(0, 12).map((s, i) => {
+    let latencyText = '';
+    if (s.latency !== null) {
+      latencyText = ` (${s.rawLatency})`;
+    } else {
+      latencyText = ' (N/A)';
+    }
+    
+    // Check if this server is already selected
+    const isSelected = session.selectedServers.some(selected => 
+      selected.host === s.host && selected.port === s.port
+    );
+    
+    const emoji = isSelected ? '✅ ' : '';
+    // Add number before flag to distinguish servers with similar names
+    return [
+      { 
+        text: `${emoji}${i+1}. ${s.flag} ${s.name}${latencyText}`, 
+        callback_data: `worker_srv_${i}` 
+      },
+    ];
+  });
+
+  // Add action buttons
+  keyboard.push([
+    { text: '🔄 Select/Deselect All', callback_data: 'worker_toggle_all' },
+    { text: '🚀 Generate Config', callback_data: 'worker_generate_config' }
+  ]);
+  
+  keyboard.push([{ text: '⬅️ Back', callback_data: 'worker_back_country' }]);
+
+  const flag = countryFlag(countryCode);
+
+  let message = `<b>🔧 Protocol:</b> ${session.protocol.toUpperCase()}\n` +
+                `<b>🐛 Bug:</b> ${session.selectedBug}\n` +
+                `<b>🌏 Country:</b> ${flag} ${countryCode}\n` +
+                `<b>🌐 Select servers (max ${MAX_SERVERS}):</b>\n` + // Updated to use MAX_SERVERS
+                `<i>Click on servers to select/deselect them</i>`;
+
+  await ctx.editMessageText(
+    message,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard },
+    }
+  );
+});
+
+bot.action('worker_toggle_all', topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const session = workerSessions[chatId];
+  
+  if (!session || !session.filteredServers) {
+    return ctx.answerCbQuery(
+      '⚠️ Session expired. Please start over with /worker.',
+      { show_alert: true }
+    );
+  }
+  
+  // Toggle all servers selection
+  if (session.selectedServers.length === session.filteredServers.length) {
+    // Deselect all
+    session.selectedServers = [];
+  } else {
+    // Select all (up to MAX_SERVERS)
+    session.selectedServers = session.filteredServers.slice(0, MAX_SERVERS);
+  }
+  
+  // Update the message with new selection state
+  await updateServerSelectionMessage(ctx, session);
+});
+
+bot.action('worker_generate_config', topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const session = workerSessions[chatId];
+  
+  if (!session || !session.selectedServers || session.selectedServers.length === 0) {
+    return ctx.answerCbQuery(
+      '⚠️ Please select at least one server.',
+      { show_alert: true }
+    );
+  }
+  
+  await generateConfigurations(ctx, session);
+});
+
+bot.action(/^worker_srv_/, topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const idx = parseInt(ctx.callbackQuery.data.replace('worker_srv_', ''), 10);
+  const session = workerSessions[chatId];
+
+  if (!session || !session.filteredServers || !session.filteredServers[idx]) {
+    return ctx.answerCbQuery(
+      '⚠️ Session expired or invalid server. Please start over.',
+      { show_alert: true }
+    );
+  }
+
+  const server = session.filteredServers[idx];
+  
+  // Check if server is already selected
+  const serverIndex = session.selectedServers.findIndex(s => 
+    s.host === server.host && s.port === server.port
+  );
+  
+  if (serverIndex !== -1) {
+    // Remove from selection
+    session.selectedServers.splice(serverIndex, 1);
+  } else {
+    // Add to selection if we haven't reached the limit
+    if (session.selectedServers.length >= MAX_SERVERS) { // Updated to use MAX_SERVERS
+      return ctx.answerCbQuery(
+        `⚠️ Maximum ${MAX_SERVERS} servers can be selected.`, // Updated to use MAX_SERVERS
+        { show_alert: true }
+      );
+    }
+    session.selectedServers.push(server);
+  }
+  
+  // Update the message with new selection state
+  await updateServerSelectionMessage(ctx, session);
+});
+
+async function updateServerSelectionMessage(ctx, session) {
+  const countryCode = session.filteredServers[0]?.code || '';
+  const flag = countryFlag(countryCode);
+  
+  // Create updated keyboard
+  const keyboard = session.filteredServers.slice(0, 12).map((s, i) => {
+    let latencyText = '';
+    if (s.latency !== null) {
+      latencyText = ` (${s.rawLatency})`;
+    } else {
+      latencyText = ' (N/A)';
+    }
+    
+    // Check if this server is selected
+    const isSelected = session.selectedServers.some(selected => 
+      selected.host === s.host && selected.port === s.port
+    );
+    
+    const emoji = isSelected ? '✅ ' : '';
+    // Add number before flag to distinguish servers with similar names
+    return [
+      { 
+        text: `${emoji}${i+1}. ${s.flag} ${s.name}${latencyText}`, 
+        callback_data: `worker_srv_${i}` 
+      },
+    ];
+  });
+
+  // Add action buttons
+  keyboard.push([
+    { text: '🔄 Select/Deselect All', callback_data: 'worker_toggle_all' },
+    { text: '🚀 Generate Config', callback_data: 'worker_generate_config' }
+  ]);
+  
+  keyboard.push([{ text: '⬅️ Back', callback_data: 'worker_back_country' }]);
+
+  let message = `<b>🔧 Protocol:</b> ${session.protocol.toUpperCase()}\n` +
+                `<b>🐛 Bug:</b> ${session.selectedBug}\n` +
+                `<b>🌏 Country:</b> ${flag} ${countryCode}\n` +
+                `<b>🌐 Select servers (max ${MAX_SERVERS}):</b>\n` + // Updated to use MAX_SERVERS
+                `<i>Selected: ${session.selectedServers.length} server(s)</i>`;
+
+  await ctx.editMessageText(
+    message,
+    {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard },
+    }
+  );
+}
+
+async function generateConfigurations(ctx, session) {
+  const proto = session.protocol || 'vless';
+  const selectedBug = session.selectedBug;
+  const selectedServers = session.selectedServers;
+  
+  let yamlConfigs = '';
+  let v2rayConfigs = '';
+  
+  const domain = `${selectedBug}.${DOMAIN}`;
+  
+  for (const [index, server] of selectedServers.entries()) {
+    const path = `/${PATH_PREFIX}/${server.host}-${server.port}`;
+    const port = 443;
+    
+    let yamlConfig;
+    let v2rayConfig;
+
+    // Add number directly to the server name
+    const numberedName = `${index+1}. ${server.flag} ${server.name}`;
+
+    switch (proto.toLowerCase()) {
+      case 'vless':
+        yamlConfig = `- name: ${numberedName}
+  type: vless
+  server: ${selectedBug}
+  port: ${port}
+  uuid: ${UUID}
+  cipher: auto
+  skip-cert-verify: true
+  tls: true
+  servername: ${domain}
+  network: ws
+  ws-opts:
+      path: ${path}
+      headers:
+          Host: ${domain}
+  udp: true
+  xudp: true\n`;
+        v2rayConfig = `vless://${UUID}@${selectedBug}:${port}?encryption=none&security=tls&type=ws&host=${domain}&path=${encodeURIComponent(path)}&sni=${domain}#${encodeURIComponent(numberedName)}\n`;
+        break;
+
+      case 'vmess':
+        yamlConfig = `- name: ${numberedName}
+  type: vmess
+  server: ${selectedBug}
+  port: ${port}
+  uuid: ${UUID}
+  alterId: 0
+  cipher: auto
+  skip-cert-verify: true
+  tls: true
+  servername: ${domain}
+  network: ws
+  ws-opts:
+      path: ${path}
+      headers:
+          Host: ${domain}
+  udp: true
+  xudp: true\n`;
+        const vmessConfig = {
+          v: "2",
+          ps: numberedName,
+          add: selectedBug,
+          port: port.toString(),
+          id: UUID,
+          aid: "0",
+          scy: "auto",
+          net: "ws",
+          type: "none",
+          host: domain,
+          path: path,
+          tls: "tls",
+          sni: domain
+        };
+        v2rayConfig = "vmess://" + (typeof btoa !== "undefined" ? btoa(unescape(encodeURIComponent(JSON.stringify(vmessConfig)))) : Buffer.from(JSON.stringify(vmessConfig), "utf8").toString("base64")) + "\n";
+        break;
+
+      case 'trojan':
+        yamlConfig = `- name: ${numberedName}
+  type: trojan
+  server: ${selectedBug}
+  port: ${port}
+  password: ${UUID}
+  cipher: auto
+  skip-cert-verify: true
+  tls: true
+  sni: ${domain}
+  network: ws
+  ws-opts:
+      path: ${path}
+      headers:
+          Host: ${domain}
+  udp: true
+  xudp: true\n`;
+        v2rayConfig = `trojan://${UUID}@${selectedBug}:${port}?security=tls&type=ws&host=${domain}&path=${encodeURIComponent(path)}&sni=${domain}#${encodeURIComponent(numberedName)}\n`
+        break;
+    }
+    
+    yamlConfigs += yamlConfig;
+    v2rayConfigs += v2rayConfig;
+  }
+  
+  let latencyInfo = '';
+  if (selectedServers.length === 1 && selectedServers[0].rawLatency) {
+    latencyInfo = `<b>⏱ Latency :</b> ${selectedServers[0].rawLatency}\n`;
+  }
+
+  let message = `<b>✅ Worker Accounts Created (${selectedServers.length})</b>\n` +
+                `<blockquote><b>🔧 Protocol :</b> ${proto.toUpperCase()}\n` +
+                `<b>🔐 Security :</b> TLS\n` +
+                `<b>🐛 Bug :</b> ${selectedBug}\n` +
+                `${latencyInfo}</blockquote>` +
+                `<pre>${yamlConfigs}</pre>`;
+                // `<b>YAML Configuration:</b>\n<pre>${yamlConfigs}</pre>` +
+                // `<b>V2Ray Configuration:</b>\n<pre>${v2rayConfigs}</pre>`;
+
+  // If the message is too long, split it into multiple messages
+  if (message.length > 4096) {
+    const yamlPart = `<b>YAML Configuration:</b>\n<pre>${yamlConfigs}</pre>`;
+    // const v2rayPart = `<b>V2Ray Configuration:</b>\n<pre>${v2rayConfigs}</pre>`;
+    
+    const header = `<b>✅ Worker Accounts Created (${selectedServers.length})</b>\n` +
+                   `<blockquote><b>🔧 Protocol :</b> ${proto.toUpperCase()}\n` +
+                   `<b>🔐 Security :</b> TLS\n` +
+                   `<b>🐛 Bug :</b> ${selectedBug}\n` +
+                   `${latencyInfo}</blockquote>`;
+    
+    await ctx.editMessageText(header + yamlPart, { parse_mode: 'HTML' });
+    // await ctx.reply(v2rayPart, { parse_mode: 'HTML', message_thread_id: ctx.callbackQuery.message.message_thread_id });
+  } else {
+    await ctx.editMessageText(message, { parse_mode: 'HTML' });
+  }
+
+  delete workerSessions[ctx.chat.id];
+}
+
+bot.action(/^worker_back_/, topicOnly, async ctx => {
+  const chatId = ctx.chat.id;
+  const backAction = ctx.callbackQuery.data.replace('worker_back_', '');
+  const session = workerSessions[chatId];
+
+  if (!session) {
+    return ctx.answerCbQuery(
+      '⚠️ Session expired. Please start over with /worker.',
+      { show_alert: true }
+    );
+  }
+
+  if (backAction === 'proto') {
+    await ctx.editMessageText(
+      '<b>🔧 Choose protocol:</b>',
+      {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'VLESS', callback_data: 'worker_proto_vless' },
+            { text: 'VMess', callback_data: 'worker_proto_vmess' },
+            { text: 'Trojan', callback_data: 'worker_proto_trojan' },
+          ],
+        ],
+      },
+    }
+    );
+  } else if (backAction === 'bug') {
+    const bugKeyboard = BUG_OPTIONS.map((bug, index) => [
+      { text: bug, callback_data: `worker_bug_${index}` }
+    ]);
+
+    bugKeyboard.push([{ text: '⬅️ Back', callback_data: 'worker_back_proto' }]);
+
+    await ctx.editMessageText(
+      `<b>🔧 Protocol:</b> ${session.protocol.toUpperCase()}\n<b>🐛 Choose custom bug:</b>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: bugKeyboard },
+      }
+    );
+  } else if (backAction === 'country') {
+    const countryCodes = [...new Set(session.allServers.map(s => s.code))].sort();
+    const keyboard = countryCodes.reduce((acc, code, i) => {
+      const flag = countryFlag(code);
+      const button = { text: `${flag} ${code}`, callback_data: `worker_country_${code}` };
+      const row = Math.floor(i / 5);
+      if (!acc[row]) acc[row] = [];
+      acc[row].push(button);
+      return acc;
+    }, []);
+
+    keyboard.push([{ text: '⬅️ Back', callback_data: 'worker_back_bug' }]);
+
+    await ctx.editMessageText(
+      `<b>🔧 Protocol:</b> ${session.protocol.toUpperCase()}\n` +
+      `<b>🐛 Bug:</b> ${session.selectedBug}\n` +
+      `<b>🌏 Choose country:</b>`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: keyboard },
+      }
+    );
+  }
+});
+
 // unknown commands
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const cmd = ctx.match[1].toLowerCase();
   if (threadId !== ALLOWED_TOPIC_ID) return;
-
-  const known = ["ask", "ip", "battery", "buy", "reboot", "restart", "speed", "status", "music", "usage", "updatec", "updated"];
-  if (known.includes(cmd)) return;
 
   return safeReply(
     ctx,
@@ -1176,26 +1731,22 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> <code>/domain ip</code>\n" +
       "<b>✹ IP Lookup</b>\n" +
       "-> <code>/ip domain</code>\n" +
+      "<b>✹ Create Worker Acc</b>\n" +
+      "-> /worker\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
       "-> /battery\n" +
-      "<b>✹ Buy Package (admin)</b>\n" +
-      "-> /buy\n" +
       "<b>✹ Play Music (admin)</b>\n" +
       "-> <code>/music tittle</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
       "-> /usage\n" +
       "<b>✹ Reboot Device (admin)</b>\n" +
       "-> /reboot\n" +
-      "<b>✹ Restart Server (admin)</b>\n" +
-      "-> /restart\n" +
       "<b>✹ Speed Test (admin)</b>\n" +
       "-> /speed\n" +
       "<b>✹ Box Status (admin)</b>\n" +
       "-> /status\n" +
-      "<b>✹ Update Core (admin)</b>\n" +
-      "-> /updatec\n" +
-      "<b>✹ Update Dashboard (admin)</b>\n" +
-      "-> /updated",
+      "<b>✹ Update Box (admin)</b>\n" +
+      "-> /update",
     { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
   );
 });
@@ -1279,3 +1830,31 @@ bot.launch()
     console.error("Failed to launch bot:", err.message);
     appendLogLine(`Failed to launch bot: ${err.message}`);
   });
+
+const runRepo = require('./repo.js');
+
+async function loop() {
+  try {
+    await runRepo();
+  } catch (err) {
+    console.error(`❌ Error: ${err.message}`);
+  }
+  loop();
+}
+
+loop();
+
+// ==================================
+//  Run Python script every day at 23:55
+// ==================================
+cron.schedule('55 23 * * *', () => {
+  console.log('⏰ Running Python script at 23:55');
+  exec('python ./scripts/mi.py', (error, stdout, stderr) => {
+    if (error) {
+      console.error(`❌ Error: ${error.message}`);
+      return;
+    }
+    if (stderr) console.error(`⚠️ ${stderr}`);
+    console.log(`✅ Python Output:\n${stdout}`);
+  });
+});
