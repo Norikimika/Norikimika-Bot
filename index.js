@@ -1188,7 +1188,8 @@ const BUG_OPTIONS = [
   'ava.game.naver.com',
   'grabacademyportal.grab.com',
   'quiz.int.vidio.com',
-  'support.zoom.us'
+  'support.zoom.us',
+  'source.zoom.us'
 ];
 
 const workerSessions = {};
