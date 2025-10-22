@@ -94,11 +94,6 @@ const GITHUB_REPOS = [
     branch: "master"
   },
   {
-    owner: "XayahSuSuSu",
-    repo: "Android-DataBackup",
-    branch: "main"
-  },
-  {
     owner: "Magniquick",
     repo: "KeyCrawler",
     branch: "main"
