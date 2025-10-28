@@ -22,13 +22,6 @@ update_zashboard() {
     }
 
     # Replace existing dashboard
-    rm -rf /data/adb/php7/files/www/zashboard/*
-    cp -r zashboard-gh-pages/* /data/adb/php7/files/www/zashboard/ || {
-        echo "❌ Failed to copy new dashboard files"
-        rm -rf "$TMP_DIR"
-        return 1
-    }
-
     rm -rf /data/adb/box/clash/dashboard/*
     cp -r zashboard-gh-pages/* /data/adb/box/clash/dashboard/ || {
         echo "❌ Failed to copy new dashboard files"
