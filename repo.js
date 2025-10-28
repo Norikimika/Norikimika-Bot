@@ -196,6 +196,11 @@ const GITHUB_REPOS = [
     owner: "tak-bro",
     repo: "aicommit2",
     branch: "main"
+  },
+  {
+    owner: "peternmuller",
+    repo: "revanced-builder",
+    branch: "update"
   }
 ];
 
