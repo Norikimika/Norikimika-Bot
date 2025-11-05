@@ -201,6 +201,11 @@ const GITHUB_REPOS = [
     owner: "peternmuller",
     repo: "revanced-builder",
     branch: "update"
+  },
+  {
+    owner: "anasfanani",
+    repo: "Magisk-Tailscaled",
+    branch: "master"
   }
 ];
 
