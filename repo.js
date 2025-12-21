@@ -10,7 +10,7 @@ const GITHUB_REPOS = [
   {
     owner: "rifsxd",
     repo: "KernelSU-Next",
-    branch: "legacy",
+    branch: "dev",
     path: "kernel"
   },
   {
