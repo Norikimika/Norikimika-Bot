@@ -205,7 +205,7 @@ const GITHUB_REPOS = [
   {
     owner: "anasfanani",
     repo: "Magisk-Tailscaled",
-    branch: "master"
+    branch: "main"
   }
 ];
 
