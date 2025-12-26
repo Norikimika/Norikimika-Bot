@@ -1848,14 +1848,14 @@ loop();
 // ==================================
 //  Run Python script every day at 23:55
 // ==================================
-cron.schedule('55 23 * * *', () => {
-  console.log('⏰ Running Python script at 23:55');
-  exec('python ./scripts/mi.py', (error, stdout, stderr) => {
-    if (error) {
-      console.error(`❌ Error: ${error.message}`);
-      return;
-    }
-    if (stderr) console.error(`⚠️ ${stderr}`);
-    console.log(`✅ Python Output:\n${stdout}`);
-  });
-});
+// cron.schedule('55 23 * * *', () => {
+  // console.log('⏰ Running Python script at 23:55');
+  // exec('python ./scripts/mi.py', (error, stdout, stderr) => {
+    // if (error) {
+      // console.error(`❌ Error: ${error.message}`);
+      // return;
+    // }
+    // if (stderr) console.error(`⚠️ ${stderr}`);
+    // console.log(`✅ Python Output:\n${stdout}`);
+  // });
+// });
