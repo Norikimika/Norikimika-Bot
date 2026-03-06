@@ -8,37 +8,6 @@ const os = require('os');
 // ====== GitHub Repos ======
 const GITHUB_REPOS = [
   {
-    owner: "rifsxd",
-    repo: "KernelSU-Next",
-    branch: "dev",
-    path: "kernel"
-  },
-  {
-    owner: "AOSPA",
-    repo: "android_kernel_xiaomi_sm8250",
-    branch: "uvite"
-  },
-  {
-    owner: "AOSPA",
-    repo: "android_kernel_xiaomi_sm8250",
-    branch: "vauxite"
-  },
-  {
-    owner: "EmanuelCN",
-    repo: "kernel_xiaomi_sm8250",
-    branch: "staging"
-  },
-  {
-    owner: "Neutron-Toolchains",
-    repo: "antman",
-    branch: "main"
-  },
-  {
-    owner: "Neutron-Toolchains",
-    repo: "clang-build-catalogue",
-    branch: "main"
-  },
-  {
     owner: "JingMatrix",
     repo: "LSPosed",
     branch: "master"
@@ -54,11 +23,6 @@ const GITHUB_REPOS = [
     branch: "main"
   },
   {
-    owner: "bindhosts",
-    repo: "bindhosts",
-    branch: "master"
-  },
-  {
     owner: "KOWX712",
     repo: "PlayIntegrityFix",
     branch: "inject_s"
@@ -71,16 +35,6 @@ const GITHUB_REPOS = [
   {
     owner: "Keinta15",
     repo: "Magisk-iOS-Emoji",
-    branch: "main"
-  },
-  {
-    owner: "Rohail33",
-    repo: "Realking_kernel_sm8250",
-    branch: "m-staging"
-  },
-  {
-    owner: "XSans0",
-    repo: "WeebX-Clang",
     branch: "main"
   },
   {
@@ -104,41 +58,8 @@ const GITHUB_REPOS = [
     branch: "main"
   },
   {
-    owner: "osm0sis",
-    repo: "AnyKernel3",
-    branch: "master"
-  },
-  {
-    owner: "android",
-    repo: "ndk",
-    branch: "master"
-  },
-  {
     owner: "canaria3406",
     repo: "hoyolab-auto-sign",
-    branch: "main"
-  },
-  {
-    owner: "tiann",
-    repo: "KernelSU",
-    branch: "main",
-    path: "kernel"
-  },
-  {
-    owner: "openssl",
-    repo: "openssl",
-    branch: "master",
-    path: "VERSION.dat"
-  },
-  {
-    owner: "astral-sh",
-    repo: "uv",
-    branch: "main",
-    path: "CHANGELOG.md"
-  },
-  {
-    owner: "PixelLineage",
-    repo: "res",
     branch: "main"
   },
   {
@@ -148,48 +69,8 @@ const GITHUB_REPOS = [
     path: "CHANGELOG.md"
   },
   {
-    owner: "taamarin",
-    repo: "box_for_magisk",
-    branch: "master"
-  },
-  {
     owner: "zwc456baby",
     repo: "ScrcpyForAndroid",
-    branch: "main"
-  },
-  {
-    owner: "Zephyruso",
-    repo: "zashboard",
-    branch: "main"
-  },
-  {
-    owner: "MetaCubeX",
-    repo: "mihomo",
-    branch: "Alpha"
-  },
-  {
-    owner: "vernesong",
-    repo: "mihomo",
-    branch: "Alpha"
-  },
-  {
-    owner: "Impqxr",
-    repo: "KernelSU-Next",
-    branch: "next-susfs"
-  },
-  {
-    owner: "FoolVPN-ID",
-    repo: "Siren",
-    branch: "master"
-  },
-  {
-    owner: "purplemashu",
-    repo: "me-cli",
-    branch: "main"
-  },
-  {
-    owner: "KernelSU-Next",
-    repo: "kernel_patches",
     branch: "main"
   },
   {
@@ -198,23 +79,28 @@ const GITHUB_REPOS = [
     branch: "main"
   },
   {
-    owner: "peternmuller",
-    repo: "revanced-builder",
-    branch: "update"
-  },
-  {
     owner: "anasfanani",
     repo: "Magisk-Tailscaled",
+    branch: "main"
+  },
+  {
+    owner: "Dev4Mod",
+    repo: "WaEnhancer",
+    branch: "master"
+  },
+  {
+    owner: "chsbuffer",
+    repo: "ReVancedXposed",
     branch: "main"
   }
 ];
 
 // ====== GitLab Repos ======
 const GITLAB_REPOS = [
-  { 
-    owner: "simonpunk",
-    repo: "susfs4ksu" 
-  }
+  // { 
+    // owner: "simonpunk",
+    // repo: "susfs4ksu" 
+  // }
 ];
 
 // ====== Tokens & IDs ======
@@ -230,14 +116,35 @@ const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo_state.json'
 
 // ====================== UTILITIES ======================
 function loadState() {
-  if (fs.existsSync(STATE_FILE)) {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  try {
+    if (!fs.existsSync(STATE_FILE)) return {};
+
+    const raw = fs.readFileSync(STATE_FILE, 'utf8')
+      .replace(/\0/g, '')
+      .trim();
+
+    if (!raw) return {};
+
+    return JSON.parse(raw);
+
+  } catch (err) {
+    console.error("⚠️ State file corrupted. Resetting.");
+
+    try {
+      fs.renameSync(
+        STATE_FILE,
+        STATE_FILE + ".corrupt-" + Date.now()
+      );
+    } catch {}
+
+    return {};
   }
-  return {};
 }
 
 function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  const tmp = STATE_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+  fs.renameSync(tmp, STATE_FILE);
 }
 
 function escapeMarkdownV2(text) {
