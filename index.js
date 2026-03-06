@@ -1843,7 +1843,7 @@ async function loop() {
   loop();
 }
 
-// loop();
+loop();
 
 // ==================================
 //  Run Python script every day at 23:55
