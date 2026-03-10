@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Optimized Notification Monitor
-- Incremental parsing of dumpsys output
-- Safer root command execution with fallbacks
-- SQLite WAL mode, indexes, longer timeout
-- Telegram send with retries + rate-limit handling
-- Safer auto-clear strategy (throttled pkill as last resort)
-- Simpler new-notification detection by UNIQUE constraint in DB
-"""
-
 import os
 import re
 import time
@@ -203,12 +190,6 @@ class NotificationMonitor:
         return ok
 
     def execute_root_command(self, command, timeout=10):
-        """
-        Safer root execution:
-         - prefer list form when possible
-         - cache su availability
-        Returns stdout string ('' on failure)
-        """
         try:
             if self.check_su():
                 # use su -c and avoid shell=True where possible
@@ -242,13 +223,6 @@ class NotificationMonitor:
         return 0
 
     def clear_all_notifications(self):
-        """
-        Safer clear:
-          1) cmd notification remove_all
-          2) service call notification 1
-          3) pkill com.android.systemui (LAST RESORT, throttled)
-        Returns True if any method indicates success (we verify by count).
-        """
         logger.info("Attempting to clear notifications (safe mode)")
         before = self.get_notification_count()
         # method 1
@@ -292,18 +266,14 @@ class NotificationMonitor:
             current_count = self.get_notification_count()
             logger.info(f"Current notification count: {current_count}")
             if current_count >= self.config["max_notifications"]:
-                logger.warning(f"Threshold reached ({current_count} >= {self.config['max_notifications']}). Auto-clearing...")
+                logger.warning(
+                    f"Threshold reached ({current_count} >= {self.config['max_notifications']}). Auto-clearing..."
+                )
                 success = self.clear_all_notifications()
                 new_count = self.get_notification_count()
-                # notify Telegram about auto-clear (best-effort)
-                try:
-                    msg = f"<b>🧹 Auto Clear Notification</b>\n<blockquote>📊 Count: {current_count} → {new_count}\n⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</blockquote>"
-                    self.send_telegram_message(msg, self.config["monitored_packages"]["com.macrovideo.v380pro"]["topic_id"])
-                except Exception:
-                    logger.exception("Failed to send Telegram auto-clear message")
                 return new_count
             return current_count
-        except Exception as e:
+        except Exception:
             logger.exception("check_and_clear_notifications error")
             return 0
 
@@ -311,12 +281,6 @@ class NotificationMonitor:
     # Parsing notifications (incremental)
     # -------------------------
     def get_new_notifications(self):
-        """
-        Parse dumpsys incrementally:
-          - split by lines, accumulate blocks starting with 'NotificationRecord('
-          - extract pkg=, title=, text=, when= when available
-        Returns list of dicts: {package, title, text, timestamp, time_str}
-        """
         out = self.execute_root_command("dumpsys notification --noredact 2>/dev/null")
         if not out:
             return []
