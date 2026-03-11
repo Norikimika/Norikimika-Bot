@@ -231,12 +231,16 @@ async function sendUsageReport() {
 
       try {
         const data = JSON.parse(output);
-        const ifaceData = data.interfaces
-          .map((i) => ({ name: i.name, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
-          .sort((a, b) => b.total - a.total)[0];
+        // const ifaceData = data.interfaces
+          // .map((i) => ({ name: i.name, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
+          // .sort((a, b) => b.total - a.total)[0];
 
-        const iface = ifaceData?.name || "unknown";
-        const traffic = data.interfaces.find((i) => i.name === iface)?.traffic;
+        // const iface = ifaceData?.name || "unknown";
+        // const traffic = data.interfaces.find((i) => i.name === iface)?.traffic;
+
+        const iface = "wlan0";
+        const ifaceData = data.interfaces.find((i) => i.name === iface) || data.interfaces[0];
+        const traffic = ifaceData?.traffic;
 
         const formatBytes = (kB) => {
           if (kB < 1024 * 1024) return `${kB.toFixed(2)} KB`;
@@ -532,12 +536,16 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
 
     try {
       const data = JSON.parse(output);
-      const ifaceData = data.interfaces
-        .map((i) => ({ name: i.name, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
-        .sort((a, b) => b.total - a.total)[0];
+      // const ifaceData = data.interfaces
+        // .map((i) => ({ name: i.name, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
+        // .sort((a, b) => b.total - a.total)[0];
 
-      const iface = ifaceData?.name || "unknown";
-      const traffic = data.interfaces.find((i) => i.name === iface)?.traffic;
+      // const iface = ifaceData?.name || "unknown";
+      // const traffic = data.interfaces.find((i) => i.name === iface)?.traffic;
+
+      const iface = "wlan0";
+      const ifaceData = data.interfaces.find((i) => i.name === iface) || data.interfaces[0];
+      const traffic = ifaceData?.traffic;
 
       function formatBytes(kB) {
         if (kB < 1024 * 1024) return `${kB.toFixed(2)} KB`;
