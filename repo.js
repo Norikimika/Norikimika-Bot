@@ -92,6 +92,11 @@ const GITHUB_REPOS = [
     owner: "chsbuffer",
     repo: "ReVancedXposed",
     branch: "main"
+  },
+  {
+    owner: "LSPosed",
+    repo: "DisableFlagSecure",
+    branch: "main"
   }
 ];
 
