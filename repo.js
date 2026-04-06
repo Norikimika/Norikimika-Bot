@@ -89,8 +89,8 @@ const GITHUB_REPOS = [
     branch: "master"
   },
   {
-    owner: "chsbuffer",
-    repo: "ReVancedXposed",
+    owner: "NexAlloy",
+    repo: "NexAlloy",
     branch: "main"
   },
   {
