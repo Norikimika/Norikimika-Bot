@@ -822,85 +822,6 @@ bot.hears(/^\/domain(?:@[\w_]+)?(?:\s+(.+))?/i, topicOnly, async (ctx) => {
 });
 
 // ================== MUSIC STATE ==================
-let musicQueue = [];
-let isPlaying = false;
-let currentTrack = null;
-let currentProcess = null;
-let stoppedManually = false;
-let nowPlayingMessageId = null;
-
-function musicControls(queueLength) {
-  if (queueLength > 0) {
-    return {
-      inline_keyboard: [
-        [
-          { text: "⏭ Skip", callback_data: "music_skip" },
-          { text: "⏹ Stop", callback_data: "music_stop" },
-        ],
-      ],
-    };
-  } else {
-    return {
-      inline_keyboard: [[{ text: "⏹ Stop", callback_data: "music_stop" }]],
-    };
-  }
-}
-
-async function updateNowPlaying(ctx, threadId, replyTo, forcedStop = false) {
-  let text = "";
-
-  if (isPlaying && currentTrack) {
-    text += `<b>🎵 Now playing:</b>\n-> <code>${currentTrack.performer} - ${currentTrack.title}</code>\n<b>⏳ Duration:</b>\n-> ${currentTrack.duration}\n`;
-  } else if (!isPlaying && musicQueue.length === 0) {
-    text += forcedStop ? "⏹ Music stopped." : "❌ Please provide a song title or YouTube link.";
-
-    if (nowPlayingMessageId) {
-      try {
-        await ctx.deleteMessage(nowPlayingMessageId);
-      } catch (e) {
-        appendLogLine(`Failed to delete now playing message: ${e.message}`);
-      }
-      nowPlayingMessageId = null;
-    }
-
-    return ctx.reply(text, {
-      reply_to_message_id: replyTo,
-      message_thread_id: threadId,
-      parse_mode: "HTML",
-    });
-  }
-
-  if (musicQueue.length > 0) {
-    text += "<b>📜 Queue:</b>\n<blockquote>";
-    musicQueue.slice(0, 5).forEach((song, i) => {
-      text += `${i + 1}. ${song.title}\n`;
-    });
-    if (musicQueue.length > 5) {
-      text += `...and ${musicQueue.length - 5} more`;
-    }
-    text += "</blockquote>";
-  }
-
-  const replyMarkup = isPlaying ? musicControls(musicQueue.length) : undefined;
-
-  if (nowPlayingMessageId) {
-    try {
-      await ctx.deleteMessage(nowPlayingMessageId);
-    } catch (e) {
-      appendLogLine(`Failed to delete now playing message: ${e.message}`);
-    }
-  }
-
-  const message = await ctx.reply(text.trim(), {
-    reply_to_message_id: replyTo,
-    message_thread_id: threadId,
-    parse_mode: "HTML",
-    reply_markup: replyMarkup,
-  });
-
-  nowPlayingMessageId = message.message_id;
-}
-
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return "??:??";
   const m = Math.floor(seconds / 60);
@@ -908,61 +829,67 @@ function formatDuration(seconds) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-// ================== PLAY NEXT ==================
-function playNext(ctx, threadId, replyTo) {
-  if (musicQueue.length === 0) {
-    isPlaying = false;
-    currentTrack = null;
-    currentProcess = null;
-    updateNowPlaying(ctx, threadId, replyTo, true);
-    return;
+bot.command("music", topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+  if (threadId !== ALLOWED_TOPIC_ID) return;
+
+  const text = ctx.message.text?.trim();
+  const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
+
+  if (!query) {
+    return ctx.reply("❌ Please provide a song title or YouTube link.", {
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
   }
 
-  const next = musicQueue.shift();
-  const videoUrl = `https://youtu.be/${next.id}`;
-  const tempFile = path.join(__dirname, `${next.id}.webm`);
+  const command = query.startsWith("http")
+    ? `yt-dlp -f 251 -j "${query}"`
+    : `yt-dlp -f 251 -j "ytsearch1:${query}"`;
 
-  exec(`yt-dlp -f 251 -j "${videoUrl}"`, (err, stdout) => {
+  exec(command, async (err, stdout) => {
     if (err || !stdout) {
-      appendLogLine(`Failed to get video info for ${videoUrl}: ${err?.message || 'No output'}`);
-      return playNext(ctx, threadId, replyTo);
+      appendLogLine(`yt-dlp error: ${err?.message}`);
+      return ctx.reply("❌ Failed to fetch music.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
     }
 
     let info;
     try {
       info = JSON.parse(stdout);
     } catch (e) {
-      appendLogLine(`Failed to parse video info JSON: ${e.message}`);
-      return playNext(ctx, threadId, replyTo);
+      appendLogLine(`JSON parse error: ${e.message}`);
+      return;
     }
 
     const title = info.track || info.title || "Unknown Title";
     const performer = info.artist || info.uploader || "Unknown Artist";
     const duration = formatDuration(info.duration);
-    const audioUrl = info.url;
+    const videoUrl = `https://youtu.be/${info.id}`;
+    const tempFile = path.join(__dirname, `${info.id}.webm`);
 
-    currentTrack = { title, performer, duration };
-
-    if (currentProcess) currentProcess.kill("SIGKILL");
-
-    currentProcess = spawn("mpv", ["--no-video", audioUrl]);
-
-    currentProcess.on("exit", () => {
-      const wasStopped = stoppedManually;
-      stoppedManually = false;
-      currentProcess = null;
-      if (!wasStopped) playNext(ctx, threadId, replyTo);
-    });
-
-    isPlaying = true;
-    updateNowPlaying(ctx, threadId, replyTo);
+    await ctx.reply(
+      `<b>🎵 Music Info</b>\n` +
+      `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
+      `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
+      `<b>⏳ Duration:</b>\n-> <code>${duration}</code>`,
+      {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      }
+    );
 
     exec(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`, async (err2) => {
       if (err2) {
-        appendLogLine(`Failed to download audio for ${videoUrl}: ${err2.message}`);
-        return;
+        appendLogLine(`Download error: ${err2.message}`);
+        return ctx.reply("❌ Failed to download audio.", {
+          message_thread_id: threadId,
+        });
       }
-      
+
       try {
         await ctx.replyWithAudio(
           { source: tempFile },
@@ -974,124 +901,12 @@ function playNext(ctx, threadId, replyTo) {
           }
         );
       } catch (e) {
-        appendLogLine(`Failed to send audio: ${e.message}`);
+        appendLogLine(`Send audio error: ${e.message}`);
       } finally {
-        fs.unlink(tempFile, (unlinkErr) => {
-          if (unlinkErr) {
-            appendLogLine(`Failed to delete temp file ${tempFile}: ${unlinkErr.message}`);
-          }
-        });
+        fs.unlink(tempFile, () => {});
       }
     });
   });
-}
-
-// ================== COMMAND ==================
-bot.command("music", topicOnly, adminOnly, async (ctx) => {
-  const threadId = ctx.message?.message_thread_id;
-  if (threadId !== ALLOWED_TOPIC_ID) return;
-
-  const text = ctx.message.text?.trim();
-  const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
-
-  if (!query) {
-    await updateNowPlaying(ctx, threadId, ctx.message?.message_id);
-    return;
-  }
-
-  let command;
-  if (/^https?:\/\/(www\.)?youtube\.com\/playlist\?/.test(query)) {
-    command = `yt-dlp --flat-playlist --get-id --get-title "${query}"`;
-  } else if (query.startsWith("http")) {
-    command = `yt-dlp --get-id --get-title "${query}"`;
-  } else {
-    command = `yt-dlp --get-id --get-title "ytsearch1:${query}"`;
-  }
-
-  exec(command, async (err, stdout) => {
-    if (err || !stdout) {
-      appendLogLine(`Failed to execute yt-dlp command: ${err?.message || 'No output'}`);
-      return ctx.reply("❌ Failed to add music.", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
-    }
-
-    const lines = stdout.trim().split("\n");
-    const ids = [];
-    for (let i = 0; i < lines.length; i += 2) {
-      if (lines[i + 1]) {
-        ids.push({ title: lines[i], id: lines[i + 1] });
-      }
-    }
-
-    if (ids.length === 0) {
-      return ctx.reply("❌ No results found.", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
-    }
-
-    musicQueue.push(...ids);
-
-    if (!isPlaying) {
-      playNext(ctx, threadId, ctx.message?.message_id);
-    } else {
-      updateNowPlaying(ctx, threadId, ctx.message?.message_id);
-    }
-  });
-});
-
-// ================== INLINE CONTROLS ==================
-bot.action(/^music_/, topicOnly, adminOnly, async (ctx) => {
-  const data = ctx.callbackQuery?.data;
-  const threadId = ctx.callbackQuery?.message?.message_thread_id;
-  const chatId = ctx.callbackQuery?.message?.chat.id;
-  const messageId = ctx.callbackQuery?.message?.message_id;
-
-  if (data === "music_skip") {
-    if (currentProcess && isPlaying) {
-      await ctx.answerCbQuery("⏭ Skipping...");
-      currentProcess.kill("SIGKILL");
-      return;
-    }
-    return ctx.answerCbQuery("⚠️ Nothing to skip.");
-  }
-
-  if (data === "music_stop") {
-    if (isPlaying || musicQueue.length > 0) {
-      await ctx.answerCbQuery("⏹ Stopping...");
-
-      stoppedManually = true;
-      if (currentProcess) {
-        currentProcess.kill("SIGKILL");
-        currentProcess = null;
-      }
-
-      musicQueue = [];
-      isPlaying = false;
-      currentTrack = null;
-
-      try {
-        await ctx.telegram.editMessageText(
-          chatId,
-          messageId,
-          null,
-          "⏹ Music stopped.",
-          { parse_mode: "HTML" }
-        );
-        nowPlayingMessageId = null;
-      } catch (e) {
-        appendLogLine(`Failed to edit message: ${e.message}`);
-        await ctx.reply("⏹ Music stopped.", {
-          message_thread_id: threadId,
-        });
-        nowPlayingMessageId = null;
-      }
-      return;
-    }
-    return ctx.answerCbQuery("⚠️ No music is playing.");
-  }
 });
 
 // ================== /STATUS ==================
