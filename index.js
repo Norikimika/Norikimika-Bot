@@ -892,7 +892,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 
       try {
         await ctx.replyWithAudio(
-          { source: tempFile },
+          { source: fs.createReadStream(tempFile) },
           {
             title,
             performer,
