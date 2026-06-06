@@ -1578,7 +1578,7 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> /worker\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
       "-> /battery\n" +
-      "<b>✹ Play Music (admin)</b>\n" +
+      "<b>✹ Download Music (admin)</b>\n" +
       "-> <code>/music tittle</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
       "-> /usage\n" +
