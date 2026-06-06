@@ -850,6 +850,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   exec(command, async (err, stdout) => {
     if (err || !stdout) {
       appendLogLine(`yt-dlp error: ${err?.message}`);
+
       return ctx.reply("❌ Failed to fetch music.", {
         reply_to_message_id: ctx.message?.message_id,
         message_thread_id: threadId,
@@ -857,11 +858,16 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
     }
 
     let info;
+
     try {
       info = JSON.parse(stdout);
     } catch (e) {
       appendLogLine(`JSON parse error: ${e.message}`);
-      return;
+
+      return ctx.reply("❌ Failed to parse music information.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
     }
 
     const title = info.track || info.title || "Unknown Title";
@@ -870,7 +876,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
     const videoUrl = `https://youtu.be/${info.id}`;
     const tempFile = path.join(__dirname, `${info.id}.webm`);
 
-    await ctx.reply(
+    const infoMessage = await ctx.reply(
       `<b>🎵 Music Info</b>\n` +
       `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
       `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
@@ -885,14 +891,20 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
     exec(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`, async (err2) => {
       if (err2) {
         appendLogLine(`Download error: ${err2.message}`);
-        return ctx.reply("❌ Failed to download audio.", {
-          message_thread_id: threadId,
-        });
+
+        return ctx.telegram.editMessageText(
+          ctx.chat.id,
+          infoMessage.message_id,
+          undefined,
+          "❌ Failed to download audio."
+        );
       }
 
       try {
         await ctx.replyWithAudio(
-          { source: fs.createReadStream(tempFile) },
+          {
+            source: fs.createReadStream(tempFile),
+          },
           {
             title,
             performer,
@@ -902,6 +914,13 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         );
       } catch (e) {
         appendLogLine(`Send audio error: ${e.message}`);
+
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          infoMessage.message_id,
+          undefined,
+          "❌ Failed to send audio."
+        );
       } finally {
         fs.unlink(tempFile, () => {});
       }
