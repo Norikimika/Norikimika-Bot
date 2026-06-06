@@ -97,6 +97,11 @@ const GITHUB_REPOS = [
     owner: "LSPosed",
     repo: "DisableFlagSecure",
     branch: "main"
+  },
+  {
+    owner: "backslashxx",
+    repo: "KernelSU",
+    branch: "master"
   }
 ];
 
