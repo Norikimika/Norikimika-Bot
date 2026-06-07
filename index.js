@@ -399,26 +399,39 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
 // /reboot
 bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+
   await safeReply(ctx, "♻️ Rebooting system...", {
     reply_to_message_id: ctx.message?.message_id,
     message_thread_id: threadId,
   });
 
-  exec("am force-stop com.termux", (error) => {
-    if (error) {
-      appendLogLine(`Force stop Termux failed: ${error.message}`);
-    }
+  exec(
+    "su -c \"find /data/data -type f -name '*gms*' -print -exec rm {} \\;\"",
+    async (error, stdout, stderr) => {
+      if (stdout) appendLogLine(stdout);
+      if (stderr) appendLogLine(stderr);
 
-    exec("su -c reboot", (rebootError) => {
-      if (rebootError) {
-        appendLogLine(`Reboot failed: ${rebootError.message}`);
+      if (error) {
+        appendLogLine(`GMS cleanup failed: ${error.message}`);
+
         return safeReply(ctx, "❌ Failed to reboot", {
           reply_to_message_id: ctx.message?.message_id,
           message_thread_id: threadId,
         });
       }
-    });
-  });
+
+      exec("su -c reboot", (rebootError) => {
+        if (rebootError) {
+          appendLogLine(`Reboot failed: ${rebootError.message}`);
+
+          return safeReply(ctx, "❌ Failed to reboot", {
+            reply_to_message_id: ctx.message?.message_id,
+            message_thread_id: threadId,
+          });
+        }
+      });
+    }
+  );
 });
 
 // /battery
