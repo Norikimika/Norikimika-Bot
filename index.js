@@ -1,4 +1,4 @@
-// bot.js
+// ================== BOT JS ==================
 require("dotenv").config();
 const fs = require("fs");
 const { Telegraf } = require("telegraf");
@@ -9,10 +9,8 @@ const https = require("https");
 const dns = require("dns");
 const path = require("path");
 
-// dynamic import for node-fetch
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
-// Logging
 const LOG_FILE = "bot.log";
 const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
 
@@ -41,7 +39,6 @@ const ALLOWED_TOPIC_ID = parseInt(process.env.ALLOWED_TOPIC_ID || "0");
 const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE || "0");
 const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC || "0");
 
-// Markdown to HTML converter
 function convertMarkdownToHTML(mdText) {
   if (!mdText) return '';
 
@@ -90,9 +87,6 @@ function convertMarkdownToHTML(mdText) {
   return parts.join('');
 }
 
-// ==========================
-// Safe wrappers for Telegram API calls
-// ==========================
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
 
@@ -217,9 +211,7 @@ async function sendUsageReport() {
   });
 }
 
-// ==========================
-// Middleware & Admin check
-// ==========================
+// ================== ADMIN CHECK ==================
 bot.use(async (ctx, next) => {
   const user = ctx.from?.username || ctx.from?.id || "unknown";
   const msg = ctx.message?.text || "<non-text>";
@@ -228,7 +220,8 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
-// topicOnly middleware
+
+// ================== TOPIC ONLY MIDDLEWARE ==================
 const topicOnly = (ctx, next) => {
   const threadId = ctx.message?.message_thread_id || ctx.callbackQuery?.message?.message_thread_id;
   if (threadId !== ALLOWED_TOPIC_ID) return;
@@ -291,11 +284,7 @@ const adminOnly = async (ctx, next) => {
   }
 };
 
-// ==========================
-// Commands
-// ==========================
-
-// /speed
+// ================== SPEED ==================
 bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
@@ -337,7 +326,7 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
   });
 });
 
-// /reboot
+// ================== REBOOT ==================
 bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
@@ -375,7 +364,7 @@ bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
   );
 });
 
-// /battery
+// ================== BATTERY ==================
 bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   exec("termux-battery-status", (error, stdout) => {
@@ -403,7 +392,7 @@ bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
   });
 });
 
-// /ask
+// ================== AI ==================
 bot.command("ask", async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   if (threadId !== ALLOWED_TOPIC_ID) return;
@@ -468,7 +457,7 @@ bot.command("ask", async (ctx) => {
   }
 });
 
-// /usage
+// ================== USAGE ==================
 bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
@@ -558,7 +547,7 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   });
 });
 
-// ================== MUSIC STATE ==================
+// ================== MUSIC ==================
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return "??:??";
   const m = Math.floor(seconds / 60);
@@ -665,7 +654,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   });
 });
 
-// unknown commands
+// ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const cmd = ctx.match[1].toLowerCase();
@@ -689,24 +678,19 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
   );
 });
 
-// ==========================
-// Mute non-command messages (except admins)
-// ==========================
+// ================== MUTE ==================
 bot.on("text", async (ctx, next) => {
   const threadId = ctx.message?.message_thread_id;
   const text = ctx.message?.text?.trim() || "";
   const chatId = ctx.chat?.id;
   const userId = ctx.from?.id;
 
-  // 1. Skip if not in allowed topic
   if (threadId !== ALLOWED_TOPIC_ID) return next();
 
-  // 2. Handle /buy reply session if active
   const session = buySessions[chatId];
   if (session && session.process) {
     const replied = ctx.message?.reply_to_message;
     if (replied && replied.from?.id === ctx.botInfo.id) {
-      // Admin check
       try {
         const admins = await ctx.telegram.getChatAdministrators(chatId);
         const isAdmin = admins.some((a) => a.user.id === userId);
@@ -723,7 +707,6 @@ bot.on("text", async (ctx, next) => {
     }
   }
 
-  // 3. Mute check for non-command messages
   if (!text.startsWith("/")) {
     try {
       const admins = await ctx.telegram.getChatAdministrators(chatId);
@@ -744,21 +727,15 @@ bot.on("text", async (ctx, next) => {
       appendLogLine(`Mute non-command failed: ${err.message}`);
     }
   }
-
-  // 4. Let other handlers run
   return next();
 });
 
-// ==========================
-// Cron daily usage report
-// ==========================
+// ================== DAILY USAGE ==================
 cron.schedule("59 23 * * *", async () => {
   await sendUsageReport();
 });
 
-// ==========================
-// Launch bot
-// ==========================
+// ================== LAUNCH BOT ==================
 bot.launch()
   .then(() => {
     console.log("Bot launched");
@@ -769,6 +746,7 @@ bot.launch()
     appendLogLine(`Failed to launch bot: ${err.message}`);
   });
 
+// ================== REPOSITORY UPDATE ==================
 const runRepo = require('./repo.js');
 
 async function loop() {
@@ -782,9 +760,7 @@ async function loop() {
 
 loop();
 
-// ==================================
-//  Run Python script every day at 23:55
-// ==================================
+// ================== SCRIPT CRON ==================
 // cron.schedule('55 23 * * *', () => {
   // console.log('⏰ Running Python script at 23:55');
   // exec('python ./scripts/mi.py', (error, stdout, stderr) => {
