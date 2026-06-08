@@ -487,57 +487,79 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
 // ================== MUSIC ==================
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return "??:??";
+
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
+
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function execPromise(command) {
+  return new Promise((resolve, reject) => {
+    exec(command, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(stdout);
+    });
+  });
 }
 
 bot.command("music", topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
-  const text = ctx.message.text?.trim();
-  const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
+  const text = ctx.message.text?.trim() || "";
+
+  const query = text
+    .replace(/^\/music(@\w+)?\s*/i, "")
+    .trim();
 
   if (!query) {
-    return ctx.reply("❌ Please provide a song title or YouTube link.", {
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
-    });
+    return ctx.reply(
+      "❌ Please provide a song title or YouTube link.",
+      {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      }
+    );
   }
 
-  const command = query.startsWith("http")
-    ? `yt-dlp -f 251 -j "${query}"`
-    : `yt-dlp -f 251 -j "ytsearch1:${query}"`;
+  try {
+    const searchCommand = query.startsWith("http")
+      ? `yt-dlp -f 251 -j "${query}"`
+      : `yt-dlp -f 251 -j "ytsearch1:${query}"`;
 
-  exec(command, async (err, stdout) => {
-    if (err || !stdout) {
-      appendLogLine(`yt-dlp error: ${err?.message}`);
+    const stdout = await execPromise(searchCommand);
 
-      return ctx.reply("❌ Failed to fetch music.", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
-    }
+    const info = JSON.parse(stdout);
 
-    let info;
+    const title =
+      info.track ||
+      info.title ||
+      "Unknown Title";
 
-    try {
-      info = JSON.parse(stdout);
-    } catch (e) {
-      appendLogLine(`JSON parse error: ${e.message}`);
+    const performer =
+      info.artist ||
+      info.uploader ||
+      "Unknown Artist";
 
-      return ctx.reply("❌ Failed to parse music information.", {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      });
-    }
+    const duration = formatDuration(
+      info.duration
+    );
 
-    const title = info.track || info.title || "Unknown Title";
-    const performer = info.artist || info.uploader || "Unknown Artist";
-    const duration = formatDuration(info.duration);
     const videoUrl = `https://youtu.be/${info.id}`;
-    const tempFile = path.join(__dirname, `${info.id}.webm`);
+
+    const tempFile = path.join(
+      __dirname,
+      `${info.id}.webm`
+    );
+
+    const thumbBase = path.join(
+      __dirname,
+      info.id
+    );
+
+    const thumbFile = `${thumbBase}.jpg`;
 
     const infoMessage = await ctx.reply(
       `<b>🎵 Music Info</b>\n` +
@@ -546,49 +568,103 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
       `<b>⏳ Duration:</b>\n-> <code>${duration}</code>`,
       {
         parse_mode: "HTML",
-        reply_to_message_id: ctx.message?.message_id,
+        reply_to_message_id:
+          ctx.message?.message_id,
         message_thread_id: threadId,
       }
     );
 
-    exec(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`, async (err2) => {
-      if (err2) {
-        appendLogLine(`Download error: ${err2.message}`);
+    try {
+      appendLogLine(
+        `[DOWNLOAD AUDIO] ${videoUrl}`
+      );
 
-        return ctx.telegram.editMessageText(
-          ctx.chat.id,
-          infoMessage.message_id,
-          undefined,
-          "❌ Failed to download audio."
-        );
+      await execPromise(
+        `yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`
+      );
+
+      appendLogLine(
+        `[DOWNLOAD THUMBNAIL] ${videoUrl}`
+      );
+
+      await execPromise(
+        `yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg -o "${thumbBase}" "${videoUrl}"`
+      );
+
+      const audioOptions = {
+        title,
+        performer,
+        duration: info.duration,
+        message_thread_id:
+          ALLOWED_TOPIC_ID_MUSIC,
+      };
+
+      if (fs.existsSync(thumbFile)) {
+        audioOptions.thumbnail = {
+          source: fs.createReadStream(
+            thumbFile
+          ),
+        };
       }
 
-      try {
-        await ctx.replyWithAudio(
-          {
-            source: fs.createReadStream(tempFile),
-          },
-          {
-            title,
-            performer,
-            duration: info.duration,
-            message_thread_id: ALLOWED_TOPIC_ID_MUSIC,
+      appendLogLine(
+        `[SEND AUDIO] ${tempFile}`
+      );
+
+      await ctx.replyWithAudio(
+        {
+          source: fs.createReadStream(
+            tempFile
+          ),
+        },
+        audioOptions
+      );
+
+      appendLogLine(
+        `[SEND AUDIO SUCCESS] ${tempFile}`
+      );
+
+    } catch (e) {
+      appendLogLine(
+        `[SEND AUDIO ERROR] ${
+          e.stack || e.message
+        }`
+      );
+
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        infoMessage.message_id,
+        undefined,
+        "❌ Failed to process audio."
+      );
+    } finally {
+      [tempFile, thumbFile].forEach(
+        (file) => {
+          if (
+            file &&
+            fs.existsSync(file)
+          ) {
+            fs.unlink(file, () => {});
           }
-        );
-      } catch (e) {
-        appendLogLine(`Send audio error: ${e.message}`);
+        }
+      );
+    }
+  } catch (e) {
+    appendLogLine(
+      `[MUSIC ERROR] ${
+        e.stack || e.message
+      }`
+    );
 
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          infoMessage.message_id,
-          undefined,
-          "❌ Failed to send audio."
-        );
-      } finally {
-        fs.unlink(tempFile, () => {});
+    return ctx.reply(
+      "❌ Failed to fetch music.",
+      {
+        reply_to_message_id:
+          ctx.message?.message_id,
+        message_thread_id: threadId,
       }
-    });
-  });
+    );
+  }
 });
 
 // ================== HELP COMMAND ==================
