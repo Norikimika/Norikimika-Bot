@@ -35,10 +35,11 @@ process.on("unhandledRejection", (reason) => {
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-const ALLOWED_TOPIC_ID = parseInt(process.env.ALLOWED_TOPIC_ID || "0");
-const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE || "0");
-const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC || "0");
-const ALLOWED_TOPIC_ID_STATUS = parseInt(process.env.ALLOWED_TOPIC_ID_STATUS || "0");
+const ALLOWED_CHAT_ID = parseInt(process.env.ALLOWED_CHAT_ID);
+const ALLOWED_TOPIC_ID = parseInt(process.env.ALLOWED_TOPIC_ID);
+const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE);
+const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC);
+const ALLOWED_TOPIC_ID_STATUS = parseInt(process.env.ALLOWED_TOPIC_ID_STATUS);
 
 function convertMarkdownToHTML(mdText) {
   if (!mdText) return '';
@@ -145,71 +146,6 @@ async function safeAnswerCbQuery(ctx, text, options = {}, retries = DEFAULT_RETR
     }
   }
   return false;
-}
-
-async function sendUsageReport() {
-  return new Promise((resolve) => {
-    const vnstat = spawn("vnstat", ["--json"]);
-    let output = "";
-    let errOutput = "";
-
-    vnstat.stdout.on("data", (data) => (output += data.toString()));
-    vnstat.stderr.on("data", (data) => (errOutput += data.toString()));
-
-    vnstat.on("close", async (code) => {
-      if (code !== 0 || errOutput) {
-        appendLogLine(`Daily usage vnstat failed: ${errOutput || `code ${code}`}`);
-        await safeSend(bot, process.env.ALLOWED_CHAT_ID, "❌ Failed to get daily usage", {
-          message_thread_id: ALLOWED_TOPIC_ID_USAGE,
-        });
-        return resolve();
-      }
-
-      try {
-        const data = JSON.parse(output);
-        // const ifaceData = data.interfaces
-          // .map((i) => ({ name: i.name, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
-          // .sort((a, b) => b.total - a.total)[0];
-
-        // const iface = ifaceData?.name || "unknown";
-        // const traffic = data.interfaces.find((i) => i.name === iface)?.traffic;
-
-        const iface = "wlan0";
-        const ifaceData = data.interfaces.find((i) => i.name === iface) || data.interfaces[0];
-        const traffic = ifaceData?.traffic;
-
-        const formatBytes = (kB) => {
-          if (kB < 1024 * 1024) return `${kB.toFixed(2)} KB`;
-          if (kB < 1024 * 1024 * 1024) return `${(kB / 1024 / 1024).toFixed(2)} MB`;
-          if (kB < 1024 * 1024 * 1024 * 1024) return `${(kB / 1024 / 1024 / 1024).toFixed(2)} GB`;
-          return `${(kB / 1024 / 1024 / 1024 / 1024).toFixed(2)} TB`;
-        };
-
-        const extractTraffic = (obj) => {
-          if (!obj) return null;
-          const up = obj.tx || 0, down = obj.rx || 0;
-          return { up: formatBytes(up), down: formatBytes(down), total: formatBytes(up + down) };
-        };
-
-        const todayData = extractTraffic(traffic?.day?.at(-1));
-
-        const usageReport = `<b>📊 Daily Usage Report (${iface})</b>\n<blockquote>` +
-          (todayData ? `📅 <b>Today</b>\nUpload : ${todayData.up}\nDownload : ${todayData.down}\nTotal : ${todayData.total}` : "No data") +
-          `</blockquote>`;
-
-        await safeSend(bot, process.env.ALLOWED_CHAT_ID, usageReport.trim(), {
-          parse_mode: "HTML",
-          message_thread_id: ALLOWED_TOPIC_ID_USAGE,
-        });
-      } catch (parseError) {
-        appendLogLine(`Daily usage parse failed: ${parseError.message}`);
-        await safeSend(bot, process.env.ALLOWED_CHAT_ID, "❌ Failed to parse daily usage", {
-          message_thread_id: ALLOWED_TOPIC_ID_USAGE,
-        });
-      }
-      resolve();
-    });
-  });
 }
 
 // ================== ADMIN CHECK ==================
@@ -731,11 +667,6 @@ bot.on("text", async (ctx, next) => {
   return next();
 });
 
-// ================== DAILY USAGE ==================
-cron.schedule("59 23 * * *", async () => {
-  await sendUsageReport();
-});
-
 // ================== LAUNCH BOT ==================
 bot.launch()
   .then(() => {
@@ -761,6 +692,18 @@ async function loop() {
 
 loop();
 
+// ================== MONITOR STAT ==================
+const startMonitor = require("./monitor.js");
+
+startMonitor({
+  bot,
+  safeSend,
+  appendLogLine,
+  ALLOWED_TOPIC_ID_USAGE,
+  ALLOWED_TOPIC_ID_STATUS,
+  ALLOWED_CHAT_ID,
+});
+
 // ================== SCRIPT CRON ==================
 // cron.schedule('55 23 * * *', () => {
   // console.log('⏰ Running Python script at 23:55');
@@ -773,62 +716,3 @@ loop();
     // console.log(`✅ Python Output:\n${stdout}`);
   // });
 // });
-
-// ================== BATTERY MONITOR ==================
-let battery80Sent = false;
-let battery20Sent = false;
-
-async function checkBatteryLevel() {
-  exec("termux-battery-status", async (error, stdout) => {
-    if (error) {
-      appendLogLine(`Battery monitor failed: ${error.message}`);
-      return;
-    }
-
-    try {
-      const data = JSON.parse(stdout);
-      const level = data.percentage;
-      const status = data.status;
-      const temperature = Math.round(data.temperature);
-
-      // Reset flags when leaving threshold range
-      if (level < 80) battery80Sent = false;
-      if (level > 20) battery20Sent = false;
-
-      // Battery fully charged
-      if (level >= 80 && !battery80Sent) {
-        battery80Sent = true;
-
-        await safeSend(
-          bot,
-          process.env.ALLOWED_CHAT_ID,
-          `<b>🔋 Battery Fully Charged</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
-          {
-            parse_mode: "HTML",
-            message_thread_id: ALLOWED_TOPIC_ID_STATUS,
-          }
-        );
-      }
-
-      // Low battery warning
-      if (level <= 20 && !battery20Sent) {
-        battery20Sent = true;
-
-        await safeSend(
-          bot,
-          process.env.ALLOWED_CHAT_ID,
-          `<b>🪫 Low Battery Warning</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
-          {
-            parse_mode: "HTML",
-            message_thread_id: ALLOWED_TOPIC_ID_STATUS,
-          }
-        );
-      }
-    } catch (err) {
-      appendLogLine(`Battery monitor parse error: ${err.message}`);
-    }
-  });
-}
-
-// Check every minute
-cron.schedule("* * * * *", checkBatteryLevel);
