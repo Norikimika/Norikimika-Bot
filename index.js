@@ -38,6 +38,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const ALLOWED_TOPIC_ID = parseInt(process.env.ALLOWED_TOPIC_ID || "0");
 const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE || "0");
 const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC || "0");
+const ALLOWED_TOPIC_ID_STATUS = parseInt(process.env.ALLOWED_TOPIC_ID_STATUS || "0");
 
 function convertMarkdownToHTML(mdText) {
   if (!mdText) return '';
@@ -772,3 +773,62 @@ loop();
     // console.log(`✅ Python Output:\n${stdout}`);
   // });
 // });
+
+// ================== BATTERY MONITOR ==================
+let battery80Sent = false;
+let battery20Sent = false;
+
+async function checkBatteryLevel() {
+  exec("termux-battery-status", async (error, stdout) => {
+    if (error) {
+      appendLogLine(`Battery monitor failed: ${error.message}`);
+      return;
+    }
+
+    try {
+      const data = JSON.parse(stdout);
+      const level = data.percentage;
+      const status = data.status;
+      const temperature = Math.round(data.temperature);
+
+      // Reset flags when leaving threshold range
+      if (level < 80) battery80Sent = false;
+      if (level > 20) battery20Sent = false;
+
+      // Battery fully charged
+      if (level >= 80 && !battery80Sent) {
+        battery80Sent = true;
+
+        await safeSend(
+          bot,
+          process.env.ALLOWED_CHAT_ID,
+          `<b>🔋 Battery Fully Charged</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
+          {
+            parse_mode: "HTML",
+            message_thread_id: ALLOWED_TOPIC_ID_STATUS,
+          }
+        );
+      }
+
+      // Low battery warning
+      if (level <= 20 && !battery20Sent) {
+        battery20Sent = true;
+
+        await safeSend(
+          bot,
+          process.env.ALLOWED_CHAT_ID,
+          `<b>🪫 Low Battery Warning</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
+          {
+            parse_mode: "HTML",
+            message_thread_id: ALLOWED_TOPIC_ID_STATUS,
+          }
+        );
+      }
+    } catch (err) {
+      appendLogLine(`Battery monitor parse error: ${err.message}`);
+    }
+  });
+}
+
+// Check every minute
+cron.schedule("* * * * *", checkBatteryLevel);
