@@ -519,10 +519,12 @@ async function updateMusicStatus(
       messageId,
       undefined,
       `<b>🎵 Music Info</b>\n` +
+        `<blockquote>` +
         `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
         `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
         `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
-        `<b>📦 Status:</b>\n-> <code>${status}</code>`,
+        `<b>📦 Status:</b>\n-> <code>${status}</code>` +
+        `</blockquote>`,
       {
         parse_mode: "HTML",
       }
@@ -590,10 +592,12 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 
     const infoMessage = await ctx.reply(
       `<b>🎵 Music Info</b>\n` +
+        `<blockquote>` +
         `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
         `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
         `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
-        `<b>📦 Status:</b>\n-> <code>Downloading</code>`,
+        `<b>📦 Status:</b>\n-> <code>Downloading</code>` +
+        `</blockquote>`,
       {
         parse_mode: "HTML",
         reply_to_message_id:
