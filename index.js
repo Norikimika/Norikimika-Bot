@@ -503,6 +503,33 @@ function execPromise(command) {
   });
 }
 
+async function updateMusicStatus(
+  ctx,
+  messageId,
+  {
+    title,
+    performer,
+    duration,
+    status,
+  }
+) {
+  try {
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      messageId,
+      undefined,
+      `<b>🎵 Music Info</b>\n` +
+        `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
+        `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
+        `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
+        `<b>📦 Status:</b>\n-> <code>${status}</code>`,
+      {
+        parse_mode: "HTML",
+      }
+    );
+  } catch {}
+}
+
 bot.command("music", topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
@@ -563,9 +590,10 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 
     const infoMessage = await ctx.reply(
       `<b>🎵 Music Info</b>\n` +
-      `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
-      `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
-      `<b>⏳ Duration:</b>\n-> <code>${duration}</code>`,
+        `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
+        `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
+        `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
+        `<b>📦 Status:</b>\n-> <code>Downloading</code>`,
       {
         parse_mode: "HTML",
         reply_to_message_id:
@@ -579,6 +607,17 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         `[DOWNLOAD AUDIO] ${videoUrl}`
       );
 
+      await updateMusicStatus(
+        ctx,
+        infoMessage.message_id,
+        {
+          title,
+          performer,
+          duration,
+          status: "Downloading"
+        }
+      );
+
       await execPromise(
         `yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`
       );
@@ -589,6 +628,17 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 
       await execPromise(
         `yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg -o "${thumbBase}" "${videoUrl}"`
+      );
+
+      await updateMusicStatus(
+        ctx,
+        infoMessage.message_id,
+        {
+          title,
+          performer,
+          duration,
+          status: "Sending"
+        }
       );
 
       const audioOptions = {
@@ -624,6 +674,17 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         `[SEND AUDIO SUCCESS] ${tempFile}`
       );
 
+      await updateMusicStatus(
+        ctx,
+        infoMessage.message_id,
+        {
+          title,
+          performer,
+          duration,
+          status: "Success"
+        }
+      );
+
     } catch (e) {
       appendLogLine(
         `[SEND AUDIO ERROR] ${
@@ -631,11 +692,15 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         }`
       );
 
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
+      await updateMusicStatus(
+        ctx,
         infoMessage.message_id,
-        undefined,
-        "❌ Failed to process audio."
+        {
+          title,
+          performer,
+          duration,
+          status: "Failed"
+        }
       );
     } finally {
       [tempFile, thumbFile].forEach(
