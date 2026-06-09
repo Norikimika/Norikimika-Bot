@@ -152,6 +152,6 @@ module.exports = function ({
     });
   }
 
-  cron.schedule("59 23 * * *", sendUsageReport);
+  cron.schedule("0 0 * * *", sendUsageReport);
   cron.schedule("* * * * *", checkBatteryLevel);
 };

@@ -101,7 +101,7 @@ const GITHUB_REPOS = [
   {
     owner: "backslashxx",
     repo: "KernelSU",
-    branch: "master"
+    branch: "staging"
   }
 ];
 
