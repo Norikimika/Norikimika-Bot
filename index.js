@@ -654,7 +654,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
       };
 
       if (fs.existsSync(thumbFile)) {
-        audioOptions.thumbnail = {
+        audioOptions.thumb = {
           source: fs.createReadStream(
             thumbFile
           ),
