@@ -34,22 +34,26 @@ CONFIG = {
         "com.macrovideo.v380pro": {
             "name": "V380 Pro",
             "topic_id": int(os.getenv("TOPIC_ID_V380", 15208)),
-            "keywords": []
+            "keywords": [],
+            "tts_enabled": False
         },
         "com.tuya.smart": {
             "name": "Tuya",
             "topic_id": int(os.getenv("TOPIC_ID_TUYA", 15208)),
-            "keywords": []
+            "keywords": [],
+            "tts_enabled": False
         },
         "com.gojek.gopaymerchant": {
             "name": "GoPay Merchant",
             "topic_id": int(os.getenv("TOPIC_ID_GOPAY", 15210)),
-            "keywords": []
+            "keywords": [],
+            "tts_enabled": True
         },
         "com.andi.alquran.id": {
             "name": "Al-Qur'an Indonesia",
             "topic_id": int(os.getenv("TOPIC_ID_GOPAY", 34084)),
-            "keywords": []
+            "keywords": [],
+            "tts_enabled": False
         }
     },
     "check_interval": int(os.getenv("CHECK_INTERVAL", 2)),
@@ -382,6 +386,20 @@ class NotificationMonitor:
             f"💬 Text: {notif_data['text']}</blockquote>"
         )
 
+    def speak_notification(self, title, text):
+        try:
+            speech = f"{title}. {text}"
+
+            logger.info(f"TTS: {speech}")
+
+            subprocess.run([
+                "termux-tts-speak",
+                "-l", "id",
+                speech
+            ])
+        except Exception as e:
+            logger.error(f"TTS error: {e}")
+
     # -------------------------
     # Main loop
     # -------------------------
@@ -426,6 +444,8 @@ class NotificationMonitor:
                         message = self.format_message(n, app_name)
                         if self.send_telegram_message(message, topic_id):
                             self.mark_notification_sent(pkg, n["title"], n["text"], n["timestamp"])
+                        if self.config["monitored_packages"][pkg].get("tts_enabled", False):
+                            self.speak_notification(n["title"], n["text"])
                             logger.info("Sent & marked")
                         else:
                             logger.warning("Failed to send to Telegram")
