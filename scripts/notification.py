@@ -7,6 +7,7 @@ import requests
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
+import tempfile
 
 # -------------------------
 # Configuration / ENV path
@@ -400,6 +401,46 @@ class NotificationMonitor:
         except Exception as e:
             logger.error(f"TTS error: {e}")
 
+    def speak_notification_edge(self, title, text):
+        try:
+            speech = f"{title}. {text}"
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".mp3",
+                delete=False
+            ) as f:
+                mp3_file = f.name
+
+            subprocess.run([
+                "edge-tts",
+                "--voice", "id-ID-GadisNeural",
+                "--text", speech,
+                "--write-media", mp3_file
+            ], check=True)
+
+            subprocess.run([
+                "termux-media-player",
+                "play",
+                mp3_file
+            ])
+
+            while True:
+                result = subprocess.run(
+                    ["termux-media-player", "info"],
+                    capture_output=True,
+                    text=True
+                )
+
+                if "Playing" not in result.stdout:
+                    break
+
+                time.sleep(0.5)
+
+            os.remove(mp3_file)
+
+        except Exception as e:
+            logger.error(f"Edge TTS error: {e}")
+
     # -------------------------
     # Main loop
     # -------------------------
@@ -445,7 +486,7 @@ class NotificationMonitor:
                         if self.send_telegram_message(message, topic_id):
                             self.mark_notification_sent(pkg, n["title"], n["text"], n["timestamp"])
                         if self.config["monitored_packages"][pkg].get("tts_enabled", False):
-                            self.speak_notification(n["title"], n["text"])
+                            self.speak_notification_edge(n["title"], n["text"])
                             logger.info("Sent & marked")
                         else:
                             logger.warning("Failed to send to Telegram")
