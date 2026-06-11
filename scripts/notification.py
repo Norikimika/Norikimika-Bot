@@ -486,7 +486,7 @@ class NotificationMonitor:
                         if self.send_telegram_message(message, topic_id):
                             self.mark_notification_sent(pkg, n["title"], n["text"], n["timestamp"])
                         if self.config["monitored_packages"][pkg].get("tts_enabled", False):
-                            self.speak_notification_edge(n["title"], n["text"])
+                            self.speak_notification(n["title"], n["text"])
                             logger.info("Sent & marked")
                         else:
                             logger.warning("Failed to send to Telegram")
