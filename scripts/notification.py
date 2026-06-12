@@ -47,7 +47,9 @@ CONFIG = {
         "com.gojek.gopaymerchant": {
             "name": "GoPay Merchant",
             "topic_id": int(os.getenv("TOPIC_ID_GOPAY", 15210)),
-            "keywords": [],
+            "keywords": [
+                "Norikimika"
+            ],
             "tts_enabled": True
         },
         "com.andi.alquran.id": {
@@ -321,6 +323,18 @@ class NotificationMonitor:
             text_m = re.search(r'text=([^\n\r]+)', blk)
             text = self.clean_text(text_m.group(1).strip()) if text_m else ""
 
+            # Filter keyword
+            keywords = self.config["monitored_packages"][pkg].get("keywords", [])
+
+            if keywords:
+                combined_text = f"{title} {text}".lower()
+
+                if not any(
+                    keyword.lower() in combined_text
+                    for keyword in keywords
+                ):
+                    continue
+
             when_m = re.search(r'when=(\d+)', blk)
             timestamp = int(when_m.group(1)) if when_m else now_ms
 
@@ -484,9 +498,20 @@ class NotificationMonitor:
                         logger.info(f"Sending: {app_name} - {n['title']}")
                         message = self.format_message(n, app_name)
                         if self.send_telegram_message(message, topic_id):
-                            self.mark_notification_sent(pkg, n["title"], n["text"], n["timestamp"])
-                        if self.config["monitored_packages"][pkg].get("tts_enabled", False):
-                            self.speak_notification(n["title"], n["text"])
+                            self.mark_notification_sent(
+                                pkg,
+                                n["title"],
+                                n["text"],
+                                n["timestamp"]
+                            )
+                            if self.config["monitored_packages"][pkg].get(
+                                "tts_enabled",
+                                False
+                            ):
+                                self.speak_notification(
+                                    n["title"],
+                                    n["text"]
+                                )
                             logger.info("Sent & marked")
                         else:
                             logger.warning("Failed to send to Telegram")
