@@ -736,6 +736,94 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   }
 });
 
+// ================== VOLUME ==================
+bot.hears(/^\/volume(?:\s+(\w+)\s+(\d+))?$/i, topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+
+  exec("termux-volume", async (error, stdout) => {
+    if (error) {
+      appendLogLine(`Volume info failed: ${error.message}`);
+
+      return safeReply(ctx, "❌ Failed to get volume information", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    try {
+      const volumes = JSON.parse(stdout);
+
+      const stream = ctx.match[1];
+      const value = ctx.match[2];
+
+      if (!stream || value === undefined) {
+        const text =
+          "<b>🔊 Volume Status</b>\n<blockquote>" +
+          volumes
+            .map(v => `<b>Stream</b>\n-> <code>${v.stream}</code>\n<b>Current</b>\n-> ${v.volume}\n<b>Maximum</b>\n-> ${v.max_volume}\n`)
+            .join("\n") +
+          "</blockquote>";
+
+        return safeReply(ctx, text, {
+          parse_mode: "HTML",
+          reply_to_message_id: ctx.message?.message_id,
+          message_thread_id: threadId,
+        });
+      }
+
+      const target = volumes.find(
+        v => v.stream.toLowerCase() === stream.toLowerCase()
+      );
+
+      if (!target) {
+        return safeReply(
+          ctx,
+          `❌ Invalid stream\n\nAvailable streams:\n${volumes
+            .map(v => v.stream)
+            .join("\n")}`,
+          {
+            reply_to_message_id: ctx.message?.message_id,
+            message_thread_id: threadId,
+          }
+        );
+      }
+
+      const newVolume = Math.min(
+        target.max_volume,
+        Math.max(0, parseInt(value, 10))
+      );
+
+      exec(`termux-volume ${target.stream} ${newVolume}`, async (err) => {
+        if (err) {
+          appendLogLine(`Volume set failed: ${err.message}`);
+
+          return safeReply(ctx, "❌ Failed to set volume", {
+            reply_to_message_id: ctx.message?.message_id,
+            message_thread_id: threadId,
+          });
+        }
+
+        return safeReply(
+          ctx,
+          `<b>🔊 Volume Updated</b>\n<blockquote><b>Stream</b>\n-> <code>${target.stream}</code>\n<b>Previous</b>\n-> <code>${target.volume}</code>\n<b>Current</b>\n-> <code>${newVolume}</code>\n<b>Maximum</b>\n-> <code>${target.max_volume}</code></blockquote>`,
+          {
+            parse_mode: "HTML",
+            reply_to_message_id: ctx.message?.message_id,
+            message_thread_id: threadId,
+          }
+        );
+      });
+    } catch (err) {
+      appendLogLine(`Volume parse failed: ${err.message}`);
+
+      return safeReply(ctx, "❌ Failed to parse volume information", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+  });
+});
+
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
@@ -745,17 +833,19 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
   return safeReply(
     ctx,
       "<b>✹ Ask AI</b>\n" +
-      "-> <code>/ask prompt</code>\n" +
+      "-> <code>/ask [prompt]</code>\n" +
       "<b>✹ Battery Status (admin)</b>\n" +
       "-> /battery\n" +
       "<b>✹ Download Music (admin)</b>\n" +
-      "-> <code>/music tittle</code>\n" +
+      "-> <code>/music [tittle]</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
       "-> /usage\n" +
       "<b>✹ Reboot Device (admin)</b>\n" +
       "-> /reboot\n" +
       "<b>✹ Speed Test (admin)</b>\n" +
-      "-> /speed",
+      "-> /speed\n" +
+      "<b>✹ Volume Control (admin)</b>\n" +
+      "-> <code>/volume [stream] [value]</code>",
     { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
   );
 });
