@@ -54,7 +54,7 @@ CONFIG = {
         },
         "com.andi.alquran.id": {
             "name": "Al-Qur'an Indonesia",
-            "topic_id": int(os.getenv("TOPIC_ID_GOPAY", 34084)),
+            "topic_id": int(os.getenv("TOPIC_ID_AL-QUR'AN", 34084)),
             "keywords": [],
             "tts_enabled": False
         }
