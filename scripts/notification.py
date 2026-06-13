@@ -455,6 +455,26 @@ class NotificationMonitor:
         except Exception as e:
             logger.error(f"Edge TTS error: {e}")
 
+    def stop_media_playback(self):
+        try:
+            subprocess.run([
+                "cmd",
+                "media_session",
+                "dispatch",
+                "pause"
+            ], capture_output=True)
+
+            # subprocess.run([
+                # "input",
+                # "keyevent",
+                # "127"
+            # ], capture_output=True)
+
+            logger.info("Media playback paused")
+
+        except Exception as e:
+            logger.error(f"Failed to stop media playback: {e}")
+
     # -------------------------
     # Main loop
     # -------------------------
@@ -508,6 +528,8 @@ class NotificationMonitor:
                                 "tts_enabled",
                                 False
                             ):
+                                self.stop_media_playback()
+
                                 self.speak_notification(
                                     n["title"],
                                     n["text"]
