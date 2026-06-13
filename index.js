@@ -736,8 +736,35 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   }
 });
 
-// ================== VOLUME ==================
-bot.hears(/^\/volume(?:@\w+)?$/i, topicOnly, adminOnly, async (ctx) => {
+// ================== HELPERS ==================
+function buildVolumeText(target) {
+  return `<b>🔊 Playback Control</b>\n<blockquote><b>Stream</b>\n-> ${target.stream}\n<b>Current</b>\n-> ${target.volume}\n<b>Maximum</b>\n-> ${target.max_volume}</blockquote>`;
+}
+
+function buildVolumeKeyboard(stream, target) {
+  return [
+    [
+      { text: "➖5", callback_data: `volume_set_${stream}_${Math.max(0, target.volume - 5)}` },
+      { text: "➖1", callback_data: `volume_set_${stream}_${Math.max(0, target.volume - 1)}` },
+      { text: "➕1", callback_data: `volume_set_${stream}_${Math.min(target.max_volume, target.volume + 1)}` },
+      { text: "➕5", callback_data: `volume_set_${stream}_${Math.min(target.max_volume, target.volume + 5)}` },
+    ],
+    [
+      { text: "🔇 Mute", callback_data: `volume_set_${stream}_0` },
+      { text: "🔊 Max",  callback_data: `volume_set_${stream}_${target.max_volume}` },
+    ],
+    [
+      { text: "⏮️", callback_data: "media_previous" },
+      { text: "▶️",  callback_data: "media_play" },
+      { text: "⏹️", callback_data: "media_stop" },
+      { text: "⏭️", callback_data: "media_next" },
+    ],
+    [{ text: "⬅️ Back", callback_data: "volume_home" }],
+  ];
+}
+
+// ================== PLAYBACK ==================
+bot.hears(/^\/playback(?:@\w+)?$/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
   exec("termux-volume", async (error, stdout) => {
@@ -752,30 +779,24 @@ bot.hears(/^\/volume(?:@\w+)?$/i, topicOnly, adminOnly, async (ctx) => {
       const volumes = JSON.parse(stdout);
 
       const text =
-        "<b>🔊 Volume Control</b>\n<blockquote>" +
+        "<b>🔊 Playback Control</b>\n<blockquote>" +
         volumes
           .map((v) => `<b>Stream</b>\n-> ${v.stream}\n<b>Current</b>\n-> ${v.volume}\n<b>Maximum</b>\n-> ${v.max_volume}\n`)
           .join("\n") +
         "</blockquote>";
 
       const keyboard = volumes.map((v) => [
-        {
-          text: `${v.stream}`,
-          callback_data: `volume_select_${v.stream}`,
-        },
+        { text: v.stream, callback_data: `volume_select_${v.stream}` },
       ]);
 
       return safeReply(ctx, text, {
         parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: keyboard,
-        },
+        reply_markup: { inline_keyboard: keyboard },
         reply_to_message_id: ctx.message?.message_id,
         message_thread_id: threadId,
       });
     } catch (err) {
       appendLogLine(`Volume parse failed: ${err.message}`);
-
       return safeReply(ctx, "❌ Failed to parse volume information", {
         reply_to_message_id: ctx.message?.message_id,
         message_thread_id: threadId,
@@ -789,88 +810,22 @@ bot.action(/^volume_select_(.+)$/i, topicOnly, adminOnly, async (ctx) => {
   const stream = ctx.match[1];
 
   exec("termux-volume", async (error, stdout) => {
-    if (error) {
-      return safeAnswerCbQuery(ctx, "Failed to get volume information", {
-        show_alert: true,
-      });
-    }
+    if (error) return safeAnswerCbQuery(ctx, "Failed to get volume information", { show_alert: true });
 
     try {
       const volumes = JSON.parse(stdout);
+      const target = volumes.find((v) => v.stream.toLowerCase() === stream.toLowerCase());
 
-      const target = volumes.find(
-        (v) => v.stream.toLowerCase() === stream.toLowerCase()
-      );
+      if (!target) return safeAnswerCbQuery(ctx, "Invalid stream", { show_alert: true });
 
-      if (!target) {
-        return safeAnswerCbQuery(ctx, "Invalid stream", {
-          show_alert: true,
-        });
-      }
-
-      await safeEditMessageText(
-        ctx,
-        `<b>🔊 Volume Control</b>\n<blockquote><b>Stream</b>\n-> ${target.stream}\n<b>Current</b>\n-> ${target.volume}\n<b>Maximum</b>\n-> ${target.max_volume}</blockquote>`,
-        {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: "➖5",
-                  callback_data: `volume_set_${stream}_${Math.max(
-                    0,
-                    target.volume - 5
-                  )}`,
-                },
-                {
-                  text: "➖1",
-                  callback_data: `volume_set_${stream}_${Math.max(
-                    0,
-                    target.volume - 1
-                  )}`,
-                },
-                {
-                  text: "➕1",
-                  callback_data: `volume_set_${stream}_${Math.min(
-                    target.max_volume,
-                    target.volume + 1
-                  )}`,
-                },
-                {
-                  text: "➕5",
-                  callback_data: `volume_set_${stream}_${Math.min(
-                    target.max_volume,
-                    target.volume + 5
-                  )}`,
-                },
-              ],
-              [
-                {
-                  text: "🔇 Mute",
-                  callback_data: `volume_set_${stream}_0`,
-                },
-                {
-                  text: "🔊 Max",
-                  callback_data: `volume_set_${stream}_${target.max_volume}`,
-                },
-              ],
-              [
-                {
-                  text: "⬅️ Back",
-                  callback_data: "volume_home",
-                },
-              ],
-            ],
-          },
-        }
-      );
+      await safeEditMessageText(ctx, buildVolumeText(target), {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: buildVolumeKeyboard(stream, target) },
+      });
 
       await safeAnswerCbQuery(ctx);
     } catch {
-      await safeAnswerCbQuery(ctx, "Failed", {
-        show_alert: true,
-      });
+      await safeAnswerCbQuery(ctx, "Failed", { show_alert: true });
     }
   });
 });
@@ -878,103 +833,31 @@ bot.action(/^volume_select_(.+)$/i, topicOnly, adminOnly, async (ctx) => {
 // ================== VOLUME SET ==================
 bot.action(/^volume_set_(.+)_(\d+)$/i, topicOnly, adminOnly, async (ctx) => {
   const stream = ctx.match[1];
-  const value = parseInt(ctx.match[2], 10);
+  const value  = parseInt(ctx.match[2], 10);
 
   exec(`termux-volume "${stream}" ${value}`, async (error) => {
     if (error) {
       appendLogLine(`Volume set failed: ${error.message}`);
-
-      return safeAnswerCbQuery(ctx, "Failed to set volume", {
-        show_alert: true,
-      });
+      return safeAnswerCbQuery(ctx, "Failed to set volume", { show_alert: true });
     }
 
     exec("termux-volume", async (error, stdout) => {
-      if (error) {
-        return safeAnswerCbQuery(ctx, "Failed to refresh volume", {
-          show_alert: true,
-        });
-      }
+      if (error) return safeAnswerCbQuery(ctx, "Failed to refresh volume", { show_alert: true });
 
       try {
         const volumes = JSON.parse(stdout);
+        const target = volumes.find((v) => v.stream.toLowerCase() === stream.toLowerCase());
 
-        const target = volumes.find(
-          (v) => v.stream.toLowerCase() === stream.toLowerCase()
-        );
+        if (!target) return safeAnswerCbQuery(ctx, "Invalid stream", { show_alert: true });
 
-        if (!target) {
-          return safeAnswerCbQuery(ctx, "Invalid stream", {
-            show_alert: true,
-          });
-        }
-
-        await safeEditMessageText(
-          ctx,
-          `<b>🔊 Volume Control</b>\n<blockquote><b>Stream</b>\n-> ${target.stream}\n<b>Current</b>\n-> ${target.volume}\n<b>Maximum</b>\n-> ${target.max_volume}</blockquote>`,
-          {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: "➖5",
-                    callback_data: `volume_set_${stream}_${Math.max(
-                      0,
-                      target.volume - 5
-                    )}`,
-                  },
-                  {
-                    text: "➖1",
-                    callback_data: `volume_set_${stream}_${Math.max(
-                      0,
-                      target.volume - 1
-                    )}`,
-                  },
-                  {
-                    text: "➕1",
-                    callback_data: `volume_set_${stream}_${Math.min(
-                      target.max_volume,
-                      target.volume + 1
-                    )}`,
-                  },
-                  {
-                    text: "➕5",
-                    callback_data: `volume_set_${stream}_${Math.min(
-                      target.max_volume,
-                      target.volume + 5
-                    )}`,
-                  },
-                ],
-                [
-                  {
-                    text: "🔇 Mute",
-                    callback_data: `volume_set_${stream}_0`,
-                  },
-                  {
-                    text: "🔊 Max",
-                    callback_data: `volume_set_${stream}_${target.max_volume}`,
-                  },
-                ],
-                [
-                  {
-                    text: "⬅️ Back",
-                    callback_data: "volume_home",
-                  },
-                ],
-              ],
-            },
-          }
-        );
-
-        await safeAnswerCbQuery(
-          ctx,
-          `${target.stream}: ${target.volume}/${target.max_volume}`
-        );
-      } catch {
-        await safeAnswerCbQuery(ctx, "Failed", {
-          show_alert: true,
+        await safeEditMessageText(ctx, buildVolumeText(target), {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: buildVolumeKeyboard(stream, target) },
         });
+
+        await safeAnswerCbQuery(ctx, `${target.stream}: ${target.volume}/${target.max_volume}`);
+      } catch {
+        await safeAnswerCbQuery(ctx, "Failed", { show_alert: true });
       }
     });
   });
@@ -983,77 +866,40 @@ bot.action(/^volume_set_(.+)_(\d+)$/i, topicOnly, adminOnly, async (ctx) => {
 // ================== VOLUME HOME ==================
 bot.action("volume_home", topicOnly, adminOnly, async (ctx) => {
   exec("termux-volume", async (error, stdout) => {
-    if (error) {
-      return safeAnswerCbQuery(ctx, "Failed", {
-        show_alert: true,
-      });
-    }
+    if (error) return safeAnswerCbQuery(ctx, "Failed", { show_alert: true });
 
     try {
       const volumes = JSON.parse(stdout);
 
       const text =
-        "<b>🔊 Volume Control</b>\n<blockquote>" +
+        "<b>🔊 Playback Control</b>\n<blockquote>" +
         volumes
           .map((v) => `<b>Stream</b>\n-> ${v.stream}\n<b>Current</b>\n-> ${v.volume}\n<b>Maximum</b>\n-> ${v.max_volume}\n`)
           .join("\n") +
         "</blockquote>";
 
       const keyboard = volumes.map((v) => [
-        {
-          text: `${v.stream}`,
-          callback_data: `volume_select_${v.stream}`,
-        },
+        { text: v.stream, callback_data: `volume_select_${v.stream}` },
       ]);
 
       await safeEditMessageText(ctx, text, {
         parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: keyboard,
-        },
+        reply_markup: { inline_keyboard: keyboard },
       });
 
       await safeAnswerCbQuery(ctx);
     } catch {
-      await safeAnswerCbQuery(ctx, "Failed", {
-        show_alert: true,
-      });
+      await safeAnswerCbQuery(ctx, "Failed", { show_alert: true });
     }
   });
 });
 
-// ================== MEDIA ==================
-bot.hears(/^\/media/i, topicOnly, adminOnly, async (ctx) => {
-  return safeReply(
-    ctx,
-    "🎵 Media Controller",
-    {
-      reply_markup: {
-        inline_keyboard: [
-            [
-              { text: "⏮️", callback_data: "media_previous" },
-              { text: "▶️", callback_data: "media_play" },
-              { text: "⏹️", callback_data: "media_stop" },
-              { text: "⏭️", callback_data: "media_next" }
-            ]
-          ]
-      },
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: ctx.message?.message_thread_id,
-    }
-  );
-});
-
+// ================== MEDIA ACTIONS ==================
 bot.action(/^media_(play|next|previous|stop)$/i, topicOnly, adminOnly, async (ctx) => {
   const action = ctx.match[1];
 
   exec(`cmd media_session dispatch ${action}`, async (error) => {
-    if (error) {
-      return safeAnswerCbQuery(ctx, `Failed: ${action}`, {
-        show_alert: true,
-      });
-    }
-
+    if (error) return safeAnswerCbQuery(ctx, `Failed: ${action}`, { show_alert: true });
     await safeAnswerCbQuery(ctx, `${action} executed`);
   });
 });
@@ -1074,14 +920,12 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> <code>/music [tittle]</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
       "-> /usage\n" +
-      "<b>✹ Media Controller (admin)</b>\n" +
-      "-> /media\n" +
+      "<b>✹ Playback Controller (admin)</b>\n" +
+      "-> /playback\n" +
       "<b>✹ Reboot Device (admin)</b>\n" +
       "-> /reboot\n" +
       "<b>✹ Speed Test (admin)</b>\n" +
-      "-> /speed\n" +
-      "<b>✹ Volume Control (admin)</b>\n" +
-      "-> /volume",
+      "-> /speed",
     { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
   );
 });
