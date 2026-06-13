@@ -737,7 +737,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== VOLUME ==================
-bot.hears(/^\/volume(?:\s+(\w+)\s+(\d+))?$/i, topicOnly, adminOnly, async (ctx) => {
+bot.hears(/^\/volume/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
   exec("termux-volume", async (error, stdout) => {
@@ -824,6 +824,42 @@ bot.hears(/^\/volume(?:\s+(\w+)\s+(\d+))?$/i, topicOnly, adminOnly, async (ctx) 
   });
 });
 
+// ================== MEDIA ==================
+bot.hears(/^\/media/i, topicOnly, adminOnly, async (ctx) => {
+  return safeReply(
+    ctx,
+    "🎵 Media Controller",
+    {
+      reply_markup: {
+        inline_keyboard: [
+            [
+              { text: "⏮️", callback_data: "media_previous" },
+              { text: "▶️", callback_data: "media_play" },
+              { text: "⏹️", callback_data: "media_stop" },
+              { text: "⏭️", callback_data: "media_next" }
+            ]
+          ]
+      },
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: ctx.message?.message_thread_id,
+    }
+  );
+});
+
+bot.action(/^media_(play|next|previous|stop)$/i, async (ctx) => {
+  const action = ctx.match[1];
+
+  exec(`cmd media_session dispatch ${action}`, async (error) => {
+    if (error) {
+      return safeAnswerCbQuery(ctx, `Failed: ${action}`, {
+        show_alert: true,
+      });
+    }
+
+    await safeAnswerCbQuery(ctx, `${action} executed`);
+  });
+});
+
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
@@ -840,6 +876,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> <code>/music [tittle]</code>\n" +
       "<b>✹ Data Usage (admin)</b>\n" +
       "-> /usage\n" +
+      "<b>✹ Media Controller (admin)</b>\n" +
+      "-> /media\n" +
       "<b>✹ Reboot Device (admin)</b>\n" +
       "-> /reboot\n" +
       "<b>✹ Speed Test (admin)</b>\n" +
