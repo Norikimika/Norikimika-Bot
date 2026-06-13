@@ -907,25 +907,26 @@ bot.action(/^media_(play|next|previous|stop)$/i, topicOnly, adminOnly, async (ct
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-  const cmd = ctx.match[1].toLowerCase();
   if (threadId !== ALLOWED_TOPIC_ID) return;
 
   return safeReply(
     ctx,
-      "<b>✹ Ask AI</b>\n" +
-      "-> <code>/ask [prompt]</code>\n" +
-      "<b>✹ Battery Status (admin)</b>\n" +
-      "-> /battery\n" +
-      "<b>✹ Download Music (admin)</b>\n" +
-      "-> <code>/music [tittle]</code>\n" +
-      "<b>✹ Data Usage (admin)</b>\n" +
-      "-> /usage\n" +
-      "<b>✹ Playback Controller (admin)</b>\n" +
-      "-> /playback\n" +
-      "<b>✹ Reboot Device (admin)</b>\n" +
-      "-> /reboot\n" +
-      "<b>✹ Speed Test (admin)</b>\n" +
-      "-> /speed",
+      "<b>🤖 Public Commands</b>\n" +
+      "<blockquote><b>✹ Ask AI</b>\n" +
+      "-> <code>/ask [prompt]</code></blockquote>\n" +
+      "<b>🤖 Admin Commands</b>\n" +
+      "<blockquote><b>✹ Battery Status</b>\n" +
+      "-> /battery</blockquote>\n" +
+      "<blockquote><b>✹ Download Music</b>\n" +
+      "-> <code>/music [title]</code></blockquote>\n" +
+      "<blockquote><b>✹ Data Usage</b>\n" +
+      "-> /usage</blockquote>\n" +
+      "<blockquote><b>✹ Playback Controller</b>\n" +
+      "-> /playback</blockquote>\n" +
+      "<blockquote><b>✹ Reboot Device</b>\n" +
+      "-> /reboot</blockquote>\n" +
+      "<blockquote><b>✹ Speed Test</b>\n" +
+      "-> /speed</blockquote>",
     { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
   );
 });
