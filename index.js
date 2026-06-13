@@ -785,7 +785,7 @@ bot.hears(/^\/volume(?:@\w+)?$/i, topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== VOLUME SELECT ==================
-bot.action(/^volume_select_(.+)$/i, async (ctx) => {
+bot.action(/^volume_select_(.+)$/i, topicOnly, adminOnly, async (ctx) => {
   const stream = ctx.match[1];
 
   exec("termux-volume", async (error, stdout) => {
@@ -876,7 +876,7 @@ bot.action(/^volume_select_(.+)$/i, async (ctx) => {
 });
 
 // ================== VOLUME SET ==================
-bot.action(/^volume_set_(.+)_(\d+)$/i, async (ctx) => {
+bot.action(/^volume_set_(.+)_(\d+)$/i, topicOnly, adminOnly, async (ctx) => {
   const stream = ctx.match[1];
   const value = parseInt(ctx.match[2], 10);
 
@@ -981,7 +981,7 @@ bot.action(/^volume_set_(.+)_(\d+)$/i, async (ctx) => {
 });
 
 // ================== VOLUME HOME ==================
-bot.action("volume_home", async (ctx) => {
+bot.action("volume_home", topicOnly, adminOnly, async (ctx) => {
   exec("termux-volume", async (error, stdout) => {
     if (error) {
       return safeAnswerCbQuery(ctx, "Failed", {
@@ -1044,7 +1044,7 @@ bot.hears(/^\/media/i, topicOnly, adminOnly, async (ctx) => {
   );
 });
 
-bot.action(/^media_(play|next|previous|stop)$/i, async (ctx) => {
+bot.action(/^media_(play|next|previous|stop)$/i, topicOnly, adminOnly, async (ctx) => {
   const action = ctx.match[1];
 
   exec(`cmd media_session dispatch ${action}`, async (error) => {
