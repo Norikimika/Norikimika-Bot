@@ -904,6 +904,343 @@ bot.action(/^media_(play|next|previous|stop)$/i, topicOnly, adminOnly, async (ct
   });
 });
 
+// ================== RECEIPT ==================
+const STORE_NAME = process.env.STORE_NAME || "";
+const STORE_ADDRESS = process.env.STORE_ADDRESS || "";
+const STRUK_FONT = process.env.STRUK_FONT || "";
+const STRUK_FONTSIZE = process.env.STRUK_FONTSIZE || "";
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || "";
+const TOPIC_ID_INTAKE = process.env.TOPIC_ID_INTAKE  ? parseInt(process.env.TOPIC_ID_INTAKE,  10) : 416182;
+const TOPIC_ID_PREVIEW = process.env.TOPIC_ID_PREVIEW ? parseInt(process.env.TOPIC_ID_PREVIEW, 10) : 468585;
+
+function rupiah(num) {
+  return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+function padC(text, W) {
+  if (text.length >= W) return text;
+  return " ".repeat(Math.floor((W - text.length) / 2)) + text;
+}
+
+function padR(label, value, W) {
+  const spaces = W - label.length - value.length;
+  if (spaces <= 0) return label + value;
+  return label + " ".repeat(spaces) + value;
+}
+
+function calcAdmin(nominalStr) {
+  const num = parseInt((nominalStr || "0").replace(/\./g, ""), 10) || 0;
+  if (num <= 500000) return { num: 5000, str: "5.000" };
+  return { num: 10000, str: "10.000" };
+}
+
+function roundTokenNominal(nominalStr) {
+  const num = parseInt((nominalStr || "0").replace(/\./g, ""), 10) || 0;
+  if (num <= 0) return "0";
+
+  const remainder = num % 10000;
+  if (remainder > 0 && remainder <= 5000) {
+    return rupiah(num - remainder);
+  }
+
+  return rupiah(num);
+}
+
+function adjustToWita(timeStr) {
+  if (!timeStr || !timeStr.includes(":")) return "-";
+  try {
+    const parts = timeStr.trim().split(":");
+    let hours = parseInt(parts[0], 10);
+    const minutes = parts[1] || "00";
+    const seconds = parts[2] || "00";
+
+    if (isNaN(hours)) return timeStr;
+
+    hours = (hours + 1) % 24;
+
+    const formattedHours = hours.toString().padStart(2, "0");
+    return `${formattedHours}:${minutes}:${seconds}`;
+  } catch (err) {
+    return timeStr;
+  }
+}
+
+function buildStrukPLN(data) {
+  const W = 32, EQ = "=".repeat(W), DA = "-".repeat(W);
+
+  const roundedNominal = roundTokenNominal(data.nominal);
+  const admin = calcAdmin(roundedNominal);
+  const nom = parseInt((roundedNominal || "0").replace(/\./g, ""), 10) || 0;
+  const tot = rupiah(nom + admin.num);
+
+  const witaTime = adjustToWita(data.waktu);
+
+  const tk = (data.token || "").replace(/[\s\-]/g, "");
+  const gr = tk.match(/.{1,4}/g) || [];
+  const tl1 = gr.slice(0, 3).join(" ");
+  const tl2 = gr.slice(3).join(" ");
+
+  return [
+    padC(STORE_NAME, W),
+    padC(STORE_ADDRESS, W),
+    EQ,
+    padC("STRUK PEMBELIAN TOKEN LISTRIK", W),
+    EQ,
+    padR("TANGGAL", data.tanggal || "-", W),
+    padR("WAKTU", witaTime, W),
+    DA,
+    `ID PEL     : ${data.idPel || "-"}`,
+    `NO METER   : ${data.noMeter || "-"}`,
+    `NAMA       : ${data.nama || "-"}`,
+    `TARIF/DAYA : ${data.tarif || "-"}`,
+    `JML KWH    : ${data.jmlKwh || "-"}`,
+    DA,
+    padC("TOKEN", W),
+    padC(tl1, W),
+    tl2 ? padC(tl2, W) : null,
+    DA,
+    padR("NOMINAL", `Rp ${roundedNominal}`, W),
+    padR("ADMIN", `Rp ${admin.str}`, W),
+    EQ,
+    padR("TOTAL", `Rp ${tot}`, W),
+    EQ,
+    "",
+    padC("** TRANSAKSI BERHASIL **", W),
+    "",
+    padC("TERIMA KASIH", W),
+  ].filter((r) => r !== null).join("\n");
+}
+
+function buildStrukTransfer(data) {
+  const W = 32, EQ = "=".repeat(W), DA = "-".repeat(W);
+  const admin = calcAdmin(data.nominal);
+  const nom = parseInt((data.nominal || "0").replace(/\./g, ""), 10) || 0;
+  const tot = rupiah(nom + admin.num);
+
+  const witaTime = adjustToWita(data.waktu);
+
+  return [
+    padC(STORE_NAME, W),
+    padC(STORE_ADDRESS, W),
+    EQ,
+    padR("TANGGAL", data.tanggal || "-", W),
+    padR("WAKTU", witaTime, W),
+    DA,
+    padC("DATA PENERIMA", W),
+    `TUJUAN   : ${data.bankTujuan || "-"}`,
+    `NOMOR    : ${data.noRekening || "-"}`,
+    `PENERIMA : ${data.penerima || "-"}`,
+    DA,
+    padR("NOMINAL", `Rp ${data.nominal || "0"}`, W),
+    padR("ADMIN", `Rp ${admin.str}`, W),
+    EQ,
+    padR("TOTAL", `Rp ${tot}`, W),
+    EQ,
+    "",
+    padC("** TRANSAKSI BERHASIL **", W),
+    "",
+    padC("TERIMA KASIH", W),
+  ].filter((r) => r !== null).join("\n");
+}
+
+function buildStruk(data) {
+  if (data.type === "transfer") return buildStrukTransfer(data);
+  return buildStrukPLN(data);
+}
+
+async function buildStrukImage(struk) {
+  const id = Date.now();
+  const files = {
+    nameTxt:    `struk_name_${id}.txt`,
+    addrTxt:    `struk_addr_${id}.txt`,
+    bodyTxt:    `struk_body_${id}.txt`,
+    namePng:    `struk_name_${id}.png`,
+    addrPng:    `struk_addr_${id}.png`,
+    bodyPng:    `struk_body_${id}.png`,
+    nameExtPng: `struk_namex_${id}.png`,
+    addrExtPng: `struk_addrx_${id}.png`,
+    outPng:     `struk_${id}.png`,
+  };
+
+  const lines       = struk.split('\n');
+  const nameLine    = (lines[0] || '').trim();
+  const addrLine    = (lines[1] || '').trim();
+  const bodyContent = lines.slice(2).join('\n');
+
+  fs.writeFileSync(files.nameTxt, nameLine);
+  fs.writeFileSync(files.addrTxt, addrLine);
+  fs.writeFileSync(files.bodyTxt, bodyContent);
+
+  const normalSize = parseInt(STRUK_FONTSIZE, 10);
+  const smallSize  = Math.max(9, normalSize - 4);
+  const base       = `-background white -fill black -font "${STRUK_FONT}"`;
+
+  const getDim = async (file, fmt) => {
+    try {
+      const out = await execPromise(`magick "${file}" -format "${fmt}" info:`);
+      return parseInt(out.trim(), 10) || 0;
+    } catch { return 0; }
+  };
+
+  try {
+    await execPromise(`magick ${base} -pointsize ${normalSize} label:@${files.nameTxt} "${files.namePng}"`);
+    await execPromise(`magick ${base} -pointsize ${smallSize}  label:@${files.addrTxt} "${files.addrPng}"`);
+    await execPromise(`magick ${base} -pointsize ${normalSize} label:@${files.bodyTxt} "${files.bodyPng}"`);
+
+    const bodyW = (await getDim(files.bodyPng, '%w')) || 350;
+    const nameH = (await getDim(files.namePng, '%h')) || 40;
+    const addrH = (await getDim(files.addrPng, '%h')) || 30;
+
+    await execPromise(
+      `magick -size ${bodyW}x${nameH} xc:white` +
+      ` "${files.namePng}" -gravity Center -composite "${files.nameExtPng}"`
+    );
+    await execPromise(
+      `magick -size ${bodyW}x${addrH} xc:white` +
+      ` "${files.addrPng}" -gravity Center -composite "${files.addrExtPng}"`
+    );
+
+    await execPromise(
+      `magick "${files.nameExtPng}" "${files.addrExtPng}" "${files.bodyPng}"` +
+      ` -append -bordercolor white -border 25x20 "${files.outPng}"`
+    );
+  } finally {
+    ['nameTxt','addrTxt','bodyTxt','namePng','addrPng','bodyPng','nameExtPng','addrExtPng']
+      .forEach(k => { try { fs.unlinkSync(files[k]); } catch {} });
+  }
+
+  return files.outPng;
+}
+
+bot.on("photo", adminOnly, async (ctx) => {
+  const currentThreadId = ctx.message?.message_thread_id || null;
+
+  if (TOPIC_ID_INTAKE !== null && currentThreadId !== TOPIC_ID_INTAKE) {
+    return;
+  }
+
+  const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+
+  try {
+    const file = await ctx.telegram.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+    const imgRes = await fetch(fileUrl);
+    const base64Image = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+
+    const vRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_VISION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: "image/jpeg", data: base64Image } },
+              {
+                text: `Identify the type of this receipt and extract its data. Return ONLY JSON (no markdown, no explanations).
+
+If it's a Money TRANSFER receipt (DANA, OVO, GoPay, BCA, BRI, etc):
+{
+  "type": "transfer",
+  "tanggal": "YYYY-MM-DD",
+  "waktu": "HH:MM:SS",
+  "bankTujuan": "destination bank/wallet name e.g. DANA",
+  "noRekening": "destination account/phone number",
+  "penerima": "recipient name",
+  "nominal": "nominal with thousands separator e.g. 60.000"
+}
+
+If it's a PLN ELECTRICITY TOKEN receipt:
+{
+  "type": "pln",
+  "tanggal": "YYYY-MM-DD",
+  "waktu": "HH:MM:SS",
+  "idPel": "customer ID number",
+  "noMeter": "meter number",
+  "nama": "customer name",
+  "tarif": "tariff/power e.g. R2/3500VA",
+  "jmlKwh": "kWh total amount",
+  "token": "20 digits token numbers only without space or hyphen",
+  "nominal": "nominal with thousands separator e.g. 101.650"
+}`,
+              },
+            ],
+          }],
+        }),
+      }
+    );
+
+    const vData = await vRes.json();
+    const rawText = vData?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const cleaned = rawText.replace(/```[\w]*\n?|```/g, "").trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr) {
+      appendLogLine(`JSON Parse error: ${parseErr.message}`);
+      return; 
+    }
+
+    const isValid =
+      (parsed.type === "pln" && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
+      (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan));
+
+    if (!isValid) {
+      appendLogLine("Struk validation failed: Image is not recognized as a valid receipt.");
+      return; 
+    }
+
+    const strukLines = buildStruk(parsed);
+    let imgPath = null;
+
+    try {
+      imgPath = await buildStrukImage(strukLines);
+    } catch (imgErr) {
+      appendLogLine(`ImageMagick error: ${imgErr.message}`);
+    }
+
+    if (imgPath) {
+      const imgBuffer = fs.readFileSync(imgPath);
+      const targetThreadId = TOPIC_ID_PREVIEW !== null ? TOPIC_ID_PREVIEW : currentThreadId;
+
+      const sendOptions = targetThreadId ? { message_thread_id: targetThreadId } : {};
+
+      await ctx.telegram.sendPhoto(
+        ctx.chat.id,
+        { source: imgBuffer, filename: "receipt.png" },
+        sendOptions
+      );
+      try { fs.unlinkSync(imgPath); } catch {}
+    }
+
+    const plainText = strukLines + "\n\n\n";
+    const tmpFile = `struk_print_${ctx.message?.message_id}.txt`;
+
+    try {
+      fs.writeFileSync(tmpFile, plainText);
+      const printCmd = process.env.PRINT_CMD;
+      if (!printCmd) {
+        appendLogLine(`Print error: PRINT_CMD is not configured in .env.`);
+        return;
+      }
+
+      exec(`${printCmd} "${tmpFile}"`, (err) => {
+        if (err) appendLogLine(`Print execution error: ${err.message}`);
+      });
+    } catch (err) {
+      appendLogLine(`Print setup error: ${err.message}`);
+    } finally {
+      setTimeout(() => {
+        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
+      }, 1000);
+    }
+
+  } catch (err) {
+    appendLogLine(`Receipt process error: ${err.message}`);
+  }
+});
+
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
