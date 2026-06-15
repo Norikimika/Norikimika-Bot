@@ -157,7 +157,6 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
-
 // ================== TOPIC ONLY MIDDLEWARE ==================
 const topicOnly = (ctx, next) => {
   const threadId = ctx.message?.message_thread_id || ctx.callbackQuery?.message?.message_thread_id;
@@ -931,18 +930,16 @@ function padR(label, value, W) {
 function calcAdmin(nominalStr) {
   const num = parseInt((nominalStr || "0").replace(/\./g, ""), 10) || 0;
 
-  if (num <= 500000)   return { num: 5000,  str: "5.000" };
-  if (num <= 2500000)  return { num: 10000, str: "10.000" };
-  if (num <= 5000000)  return { num: 15000, str: "15.000" };
-  if (num <= 20000000) return { num: 20000, str: "20.000" };
+  if (num <= 500000) {
+    return { num: 5000, str: "5.000" };
+  }
 
-  const extraSteps = Math.ceil((num - 20000000) / 20000000);
-
-  const finalAdmin = 20000 + (extraSteps * 20000);
+  const steps = Math.ceil((num - 500000) / 1000000);
+  const finalAdmin = 5000 + (steps * 5000);
 
   return {
     num: finalAdmin,
-    str: finalAdmin.toLocaleString('id-ID')
+    str: finalAdmin.toLocaleString("id-ID")
   };
 }
 
