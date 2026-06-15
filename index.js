@@ -1055,8 +1055,41 @@ function buildStrukTransfer(data) {
   ].filter((r) => r !== null).join("\n");
 }
 
+function buildStrukPulsa(data) {
+  const W = 32, EQ = "=".repeat(W), DA = "-".repeat(W);
+  const roundedNominal = roundTokenNominal(data.nominal);
+  const admin = { num: 3000, str: "3.000" };
+  const nom = parseInt((roundedNominal || "0").replace(/\./g, ""), 10) || 0;
+  const tot = rupiah(nom + admin.num);
+
+  const witaTime = adjustToWita(data.waktu);
+
+  return [
+    padC(STORE_NAME, W),
+    padC(STORE_ADDRESS, W),
+    EQ,
+    padR("TANGGAL", data.tanggal || "-", W),
+    padR("WAKTU", witaTime, W),
+    DA,
+    padC("DATA PENERIMA", W),
+    `TUJUAN   : ${data.providerTujuan || "-"}`,
+    `NOMOR    : ${data.noProvider || "-"}`,
+    DA,
+    padR("NOMINAL", `Rp ${roundedNominal}`, W),
+    padR("ADMIN", `Rp ${admin.str}`, W),
+    EQ,
+    padR("TOTAL", `Rp ${tot}`, W),
+    EQ,
+    "",
+    padC("** TRANSAKSI BERHASIL **", W),
+    "",
+    padC("TERIMA KASIH", W),
+  ].filter((r) => r !== null).join("\n");
+}
+
 function buildStruk(data) {
   if (data.type === "transfer") return buildStrukTransfer(data);
+  if (data.type === "pulsa") return buildStrukPulsa(data);
   return buildStrukPLN(data);
 }
 
@@ -1174,6 +1207,16 @@ If it's a PLN ELECTRICITY TOKEN receipt:
   "jmlKwh": "kWh total amount",
   "token": "20 digits token numbers only without space or hyphen",
   "nominal": "nominal with thousands separator e.g. 101.650"
+}
+
+If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
+{
+  "type": "pulsa",
+  "tanggal": "YYYY-MM-DD",
+  "waktu": "HH:MM:SS",
+  "providerTujuan": "destination provider/sim name e.g. SIMPATI",
+  "noProvider": "destination account/phone number",
+  "nominal": "nominal with thousands separator e.g. 7.000"
 }`,
               },
             ],
@@ -1196,7 +1239,9 @@ If it's a PLN ELECTRICITY TOKEN receipt:
 
     const isValid =
       (parsed.type === "pln" && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
-      (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan));
+      (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan)) ||
+      (parsed.type === "pulsa" && (parsed.providerTujuan || parsed.noProvider));
+  
 
     if (!isValid) {
       appendLogLine("Struk validation failed: Image is not recognized as a valid receipt.");
