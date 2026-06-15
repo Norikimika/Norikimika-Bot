@@ -1157,32 +1157,7 @@ async function buildStrukImage(struk) {
   return files.outPng;
 }
 
-bot.on("photo", adminOnly, async (ctx) => {
-  const currentThreadId = ctx.message?.message_thread_id || null;
-
-  if (TOPIC_ID_INTAKE !== null && currentThreadId !== TOPIC_ID_INTAKE) {
-    return;
-  }
-
-  const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-
-  try {
-    const file = await ctx.telegram.getFile(fileId);
-    const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-    const imgRes = await fetch(fileUrl);
-    const base64Image = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
-
-    const vRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_VISION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inline_data: { mime_type: "image/jpeg", data: base64Image } },
-              {
-                text: `Identify the type of this receipt and extract its data. Return ONLY JSON (no markdown, no explanations).
+const RECEIPT_PROMPT = `Identify the type of this receipt and extract its data. Return ONLY JSON (no markdown, no explanations).
 
 If it's a Money TRANSFER receipt (DANA, OVO, GoPay, BCA, BRI, etc):
 {
@@ -1217,35 +1192,106 @@ If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
   "providerTujuan": "destination provider/sim name e.g. SIMPATI",
   "noProvider": "destination account/phone number",
   "nominal": "nominal with thousands separator e.g. 7.000"
-}`,
-              },
-            ],
-          }],
-        }),
-      }
-    );
+}`;
 
-    const vData = await vRes.json();
-    const rawText = vData?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-    const cleaned = rawText.replace(/```[\w]*\n?|```/g, "").trim();
+async function analyzeWithGemini(base64Image) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_VISION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inline_data: { mime_type: "image/jpeg", data: base64Image } },
+            { text: RECEIPT_PROMPT },
+          ],
+        }],
+      }),
+    }
+  );
+
+  if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+
+  const data = await res.json();
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+  return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
+}
+
+async function analyzeWithGroq(base64Image) {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: process.env.GROQ_VISION_MODEL ?? "meta-llama/llama-4-scout-17b-16e-instruct",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
+          { type: "text", text: RECEIPT_PROMPT },
+        ],
+      }],
+      max_tokens: 1000,
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
+
+  const data = await res.json();
+  const raw = data?.choices?.[0]?.message?.content ?? "{}";
+  return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
+}
+
+async function analyzeReceipt(base64Image) {
+  try {
+    const result = await analyzeWithGemini(base64Image);
+    appendLogLine("Vision: Gemini OK");
+    return result;
+  } catch (err) {
+    appendLogLine(`Vision: Gemini failed (${err.message}), trying Groq…`);
+  }
+
+  try {
+    const result = await analyzeWithGroq(base64Image);
+    appendLogLine("Vision: Groq OK");
+    return result;
+  } catch (err) {
+    throw new Error(`Both providers failed — Groq: ${err.message}`);
+  }
+}
+
+bot.on("photo", adminOnly, async (ctx) => {
+  const currentThreadId = ctx.message?.message_thread_id ?? null;
+
+  if (TOPIC_ID_INTAKE !== null && currentThreadId !== TOPIC_ID_INTAKE) return;
+
+  const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+
+  try {
+    const file = await ctx.telegram.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+    const imgRes = await fetch(fileUrl);
+    const base64Image = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
 
     let parsed;
     try {
-      parsed = JSON.parse(cleaned);
-    } catch (parseErr) {
-      appendLogLine(`JSON Parse error: ${parseErr.message}`);
-      return; 
+      parsed = await analyzeReceipt(base64Image);
+    } catch (err) {
+      appendLogLine(`Receipt analysis error: ${err.message}`);
+      return;
     }
 
     const isValid =
-      (parsed.type === "pln" && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
+      (parsed.type === "pln"      && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
       (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan)) ||
-      (parsed.type === "pulsa" && (parsed.providerTujuan || parsed.noProvider));
-  
+      (parsed.type === "pulsa"    && (parsed.providerTujuan || parsed.noProvider));
 
     if (!isValid) {
       appendLogLine("Struk validation failed: Image is not recognized as a valid receipt.");
-      return; 
+      return;
     }
 
     const strukLines = buildStruk(parsed);
@@ -1260,7 +1306,6 @@ If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
     if (imgPath) {
       const imgBuffer = fs.readFileSync(imgPath);
       const targetThreadId = TOPIC_ID_PREVIEW !== null ? TOPIC_ID_PREVIEW : currentThreadId;
-
       const sendOptions = targetThreadId ? { message_thread_id: targetThreadId } : {};
 
       await ctx.telegram.sendPhoto(
@@ -1278,10 +1323,9 @@ If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
       fs.writeFileSync(tmpFile, plainText);
       const printCmd = process.env.PRINT_CMD;
       if (!printCmd) {
-        appendLogLine(`Print error: PRINT_CMD is not configured in .env.`);
+        appendLogLine("Print error: PRINT_CMD is not configured in .env.");
         return;
       }
-
       exec(`${printCmd} "${tmpFile}"`, (err) => {
         if (err) appendLogLine(`Print execution error: ${err.message}`);
       });
