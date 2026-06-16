@@ -349,36 +349,88 @@ bot.command("ask", async (ctx) => {
   }
 
   if (!prompt) {
-    return safeReply(
-      ctx,
-      "❌ Please provide a prompt.",
-      {
-        reply_to_message_id: ctx.message?.message_id,
-        parse_mode: "HTML",
-        message_thread_id: threadId,
-      }
-    );
+    return safeReply(ctx, "❌ Please provide a prompt.", {
+      reply_to_message_id: ctx.message?.message_id,
+      parse_mode: "HTML",
+      message_thread_id: threadId,
+    });
   }
 
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_API_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-      }
-    );
+    let rawText;
 
-    const data = await res.json();
-    const rawText =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text || "❌ No response.";
+    try {
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_API_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [{ text: prompt }],
+              },
+            ],
+          }),
+        }
+      );
+
+      if (!geminiRes.ok) {
+        throw new Error(`Gemini HTTP ${geminiRes.status}`);
+      }
+
+      const geminiData = await geminiRes.json();
+
+      rawText =
+        geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+
+      if (!rawText) {
+        throw new Error("Gemini empty response");
+      }
+    } catch (geminiError) {
+      appendLogLine(`Gemini Failed: ${geminiError.message}`);
+
+      const groqRes = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            temperature: 0.7,
+          }),
+        }
+      );
+
+      if (!groqRes.ok) {
+        throw new Error(`Groq HTTP ${groqRes.status}`);
+      }
+
+      const groqData = await groqRes.json();
+
+      rawText =
+        groqData?.choices?.[0]?.message?.content ||
+        "❌ No response from Groq.";
+    }
+
     const MAX_LENGTH = 3500;
     const parts =
       rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
 
-    for (let i = 0; i < parts.length; i++) {
-      const html = convertMarkdownToHTML(parts[i]);
+    for (const part of parts) {
+      const html = convertMarkdownToHTML(part);
+
       await safeReply(ctx, html, {
         reply_to_message_id: ctx.message?.message_id,
         parse_mode: "HTML",
@@ -386,7 +438,8 @@ bot.command("ask", async (ctx) => {
       });
     }
   } catch (err) {
-    appendLogLine(`Gemini Error: ${err.message}`);
+    appendLogLine(`AI Error: ${err.message}`);
+
     await safeReply(ctx, "❌ Failed to process request", {
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
