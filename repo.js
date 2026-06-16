@@ -123,6 +123,14 @@ const ARROW = "_\\-\\>_";
 
 // ====== State File ======
 const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo_state.json');
+const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.log');
+
+function log(msg) {
+  fs.appendFileSync(
+    LOG_FILE,
+    `[${new Date().toLocaleString('id-ID')}] ${msg}\n`
+  );
+}
 
 // ====================== UTILITIES ======================
 function loadState() {
@@ -138,7 +146,7 @@ function loadState() {
     return JSON.parse(raw);
 
   } catch (err) {
-    console.error("⚠️ State file corrupted. Resetting.");
+    log("⚠️ State file corrupted. Resetting.");
 
     try {
       fs.renameSync(
@@ -179,7 +187,7 @@ async function sendToTelegram(message) {
 
   if (!res.ok) {
     const errorText = await res.text();
-    console.error(`❌ Telegram failed: ${errorText}`);
+    log(`❌ Telegram failed: ${errorText}`);
     throw new Error(`Telegram API error: ${res.status} - ${errorText}`);
   }
 
@@ -205,13 +213,13 @@ async function checkGithubUpdates(state) {
     try {
       commitResp = await fetch(commitUrl, { headers });
     } catch (e) {
-      console.error(`❌ Fetch error on ${repo.repo}: ${e.message}`);
+      log(`❌ Fetch error on ${repo.repo}: ${e.message}`);
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }
 
     if (!commitResp.ok) {
-      console.error(`❌ Error on ${repo.repo}: ${await commitResp.text()}`);
+      log(`❌ Error on ${repo.repo}: ${await commitResp.text()}`);
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }
@@ -227,7 +235,7 @@ async function checkGithubUpdates(state) {
     const lastSha = state[lastShaKey];
 
     if (latestSha === lastSha) {
-      console.log(`✅ ${repo.repo} (${repo.branch}): No new commit`);
+      log(`✅ ${repo.repo} (${repo.branch}): No new commit`);
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }
@@ -245,7 +253,7 @@ async function checkGithubUpdates(state) {
         }
       }
     } catch (e) {
-      console.error(`⚠️ Workflow check failed: ${e.message}`);
+      log(`⚠️ Workflow check failed: ${e.message}`);
     }
 
     let releaseText = "";
@@ -264,7 +272,7 @@ async function checkGithubUpdates(state) {
         }
       }
     } catch (e) {
-      console.error(`⚠️ Release check failed: ${e.message}`);
+      log(`⚠️ Release check failed: ${e.message}`);
     }
 
     const message = [
@@ -289,7 +297,7 @@ async function checkGithubUpdates(state) {
       state[lastShaKey] = latestSha;
       if (latestReleaseId) state[releaseIdKey] = latestReleaseId;
       
-      console.log(`📨 Sent update for ${repo.repo} and saved state`);
+      log(`📨 Sent update for ${repo.repo} and saved state`);
     } catch (err) {
       if (err.response?.status === 429) {
         const retryAfter = err.response.data.parameters?.retry_after || 5;
@@ -297,8 +305,8 @@ async function checkGithubUpdates(state) {
         await new Promise(r => setTimeout(r, retryAfter * 1000));
         index--;
       } else {
-        console.error(`❌ Telegram failed for ${repo.repo}: ${err.message}`);
-        console.log(`⚠️ State NOT saved for ${repo.repo} due to Telegram failure`);
+        log(`❌ Telegram failed for ${repo.repo}: ${err.message}`);
+        log(`⚠️ State NOT saved for ${repo.repo} due to Telegram failure`);
       }
     }
 
@@ -323,7 +331,7 @@ async function checkGitlabUpdates(state) {
       const branchesUrl = `https://gitlab.com/api/v4/projects/${encodedPath}/repository/branches`;
       const branchesResponse = await fetch(branchesUrl, { headers });
       if (!branchesResponse.ok) {
-        console.error(`❌ Failed to fetch branches for ${repo.repo}: ${await branchesResponse.text()}`);
+        log(`❌ Failed to fetch branches for ${repo.repo}: ${await branchesResponse.text()}`);
         await new Promise(r => setTimeout(r, 2000));
         continue;
       }
@@ -337,14 +345,14 @@ async function checkGitlabUpdates(state) {
 
       const response = await fetch(commitsUrl, { headers });
       if (!response.ok) {
-        console.error(`❌ GitLab error on ${repo.repo}@${branch}: ${await response.text()}`);
+        log(`❌ GitLab error on ${repo.repo}@${branch}: ${await response.text()}`);
         await new Promise(r => setTimeout(r, 2000));
         continue;
       }
 
       const data = await response.json();
       if (!data || data.length === 0) {
-        console.log(`⚠️ No commits for ${repo.repo}@${branch}`);
+        log(`⚠️ No commits for ${repo.repo}@${branch}`);
         await new Promise(r => setTimeout(r, 2000));
         continue;
       }
@@ -371,19 +379,19 @@ async function checkGitlabUpdates(state) {
           await sendToTelegram(message);
           
           state[lastShaKey] = latestSha;
-          console.log(`📨 Sent GitLab update for ${repo.repo} and saved state`);
+          log(`📨 Sent GitLab update for ${repo.repo} and saved state`);
         } catch (e) {
           if (e.response && e.response.status === 429) {
             const retryAfter = e.response.data.parameters?.retry_after || 1;
             console.warn(`⏳ Rate limited by Telegram. Waiting ${retryAfter} seconds...`);
             await new Promise(r => setTimeout(r, retryAfter * 1000));
           } else {
-            console.error(`❌ Telegram failed for ${repo.repo}: ${e.message}`);
-            console.log(`⚠️ State NOT saved for ${repo.repo} due to Telegram failure`);
+            log(`❌ Telegram failed for ${repo.repo}: ${e.message}`);
+            log(`⚠️ State NOT saved for ${repo.repo} due to Telegram failure`);
           }
         }
       } else {
-        console.log(`✅ GitLab ${repo.repo} (${branch}): No new commit`);
+        log(`✅ GitLab ${repo.repo} (${branch}): No new commit`);
       }
 
       await new Promise(r => setTimeout(r, 2000));

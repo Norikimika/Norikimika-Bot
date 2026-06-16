@@ -79,7 +79,7 @@ for r in REQUIRED:
 # -------------------------
 # Logging
 # -------------------------
-log_dir = os.path.join(home_dir, "SERVER/LogError404Bot")
+log_dir = os.path.join(home_dir, "SERVER/Backup")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "notification.log")
 logging.basicConfig(

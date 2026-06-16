@@ -8,10 +8,11 @@ const escapeHTML = require("escape-html");
 const https = require("https");
 const dns = require("dns");
 const path = require("path");
+const os = require('os');
 
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
-const LOG_FILE = "bot.log";
+const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'bot.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
 
 function appendLogLine(line) {
@@ -153,7 +154,7 @@ bot.use(async (ctx, next) => {
   const user = ctx.from?.username || ctx.from?.id || "unknown";
   const msg = ctx.message?.text || "<non-text>";
   const line = `From ${user}: ${msg}`;
-  logStream.write(`[${new Date().toISOString()}] ${line}\n`);
+  logStream.write(`[${new Date().toLocaleString('id-ID')}] ${line}\n`);
   await next();
 });
 
