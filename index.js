@@ -1291,6 +1291,14 @@ bot.on("photo", adminOnly, async (ctx) => {
       return;
     }
 
+    if (parsed.penerima) {
+      parsed.penerima = parsed.penerima
+        .replace(/\bDana\b/g, '')
+        .replace(/\bDnid\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
     const strukLines = buildStruk(parsed);
     let imgPath = null;
 
