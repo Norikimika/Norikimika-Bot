@@ -1,7 +1,7 @@
 import os
 import re
 import time
-import sqlite3
+import json
 import subprocess
 import requests
 import logging
@@ -9,18 +9,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 import tempfile
 
-# -------------------------
-# Configuration / ENV path
-# -------------------------
 home_dir = os.path.expanduser("~")
 env_path = os.path.join(home_dir, "SERVER/LogError404Bot/.env")
-db_path = os.path.join(home_dir, "SERVER/Backup/notification_history.db")
+json_path = os.path.join(home_dir, "SERVER/Backup/notification.json")
 
-# Load .env (fail early if missing)
 if not os.path.exists(env_path):
     raise SystemExit(f".env not found: {env_path}")
 
-# ensure .env not world-readable
 try:
     os.chmod(env_path, 0o600)
 except Exception:
@@ -62,23 +57,18 @@ CONFIG = {
     "check_interval": int(os.getenv("CHECK_INTERVAL", 2)),
     "max_notifications": int(os.getenv("MAX_NOTIFICATIONS", 49)),
     "auto_clear_enabled": os.getenv("AUTO_CLEAR_ENABLED", "True").lower() in ("1", "true", "yes"),
-    # performance / safety tuning
-    "db_cleanup_cycles": int(os.getenv("DB_CLEANUP_CYCLES", 180)),   # default: every 180 cycles (~6min if interval=2s)
-    "db_retention_seconds": int(os.getenv("DB_RETENTION_SECONDS", 24 * 3600)),  # keep entries 24h
-    "pkill_throttle_seconds": int(os.getenv("PKILL_THROTTLE_SECONDS", 300)),  # don't pkill more often than 5min
+    "db_cleanup_cycles": int(os.getenv("DB_CLEANUP_CYCLES", 180)),
+    "db_retention_seconds": int(os.getenv("DB_RETENTION_SECONDS", 24 * 3600)), 
+    "pkill_throttle_seconds": int(os.getenv("PKILL_THROTTLE_SECONDS", 300)),
     "telegram_retry": 3,
-    "telegram_retry_backoff": 2  # exponential base
+    "telegram_retry_backoff": 2
 }
 
-# Quick env validation
 REQUIRED = ["telegram_bot_token", "telegram_chat_id"]
 for r in REQUIRED:
     if not CONFIG[r]:
         raise SystemExit(f"Missing required config: {r}")
 
-# -------------------------
-# Logging
-# -------------------------
 log_dir = os.path.join(home_dir, "SERVER/Backup")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "notification.log")
@@ -92,100 +82,106 @@ logging.basicConfig(
 )
 logger = logging.getLogger("notif-monitor")
 
-# -------------------------
-# NotificationMonitor Class
-# -------------------------
 class NotificationMonitor:
-    def __init__(self, config, db_path):
+    def __init__(self, config, json_path):
         self.config = config
-        self.db_path = db_path
+        self.json_path = json_path
         self.last_clear_kill = 0
         self.last_clear_time = 0
-        self.su_available = None  # cached
+        self.su_available = None
         self.validate_config()
-        self.setup_database()
+        self.setup_storage()
 
-    # -------------------------
-    # Config
-    # -------------------------
     def validate_config(self):
         logger.info("Validating configuration")
-        # check token length minimally
         if len(self.config["telegram_bot_token"]) < 10:
             raise SystemExit("Telegram bot token looks invalid")
         if not self.config["telegram_chat_id"]:
             raise SystemExit("Telegram chat id missing")
         logger.info("Configuration OK")
 
-    # -------------------------
-    # Database
-    # -------------------------
-    def setup_database(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS sent_notifications (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    package_name TEXT,
-                    title TEXT,
-                    message_text TEXT,
-                    notification_time INTEGER,
-                    sent_time INTEGER,
-                    UNIQUE(package_name, title, message_text, notification_time)
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_time ON sent_notifications(sent_time)")
-            conn.commit()
-            logger.info("Database initialized (WAL mode)")
-        finally:
-            conn.close()
+    def setup_storage(self):
+        os.makedirs(os.path.dirname(self.json_path), exist_ok=True)
+        if not os.path.exists(self.json_path):
+            self._write_json([])
+            logger.info("JSON storage initialized (new file)")
+        else:
+            try:
+                data = self._read_json()
+                if not isinstance(data, list):
+                    raise ValueError("Expected a list")
+                logger.info(f"JSON storage loaded ({len(data)} entries)")
+            except Exception as e:
+                logger.warning(f"JSON file invalid ({e}), resetting.")
+                self._write_json([])
+
+    def _read_json(self):
+        with open(self.json_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write_json(self, data):
+        dir_name = os.path.dirname(self.json_path)
+        with tempfile.NamedTemporaryFile(
+            "w", dir=dir_name, delete=False,
+            suffix=".tmp", encoding="utf-8"
+        ) as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp_path = f.name
+        os.replace(tmp_path, self.json_path)
 
     def is_notification_sent(self, package, title, text, notif_time):
-        conn = sqlite3.connect(self.db_path, timeout=30)
         try:
-            cur = conn.execute('''
-                SELECT 1 FROM sent_notifications 
-                WHERE package_name=? AND title=? AND message_text=? AND notification_time=?
-                LIMIT 1
-            ''', (package, title, text, notif_time))
-            return cur.fetchone() is not None
-        finally:
-            conn.close()
+            data = self._read_json()
+            return any(
+                n.get("package_name") == package
+                and n.get("title") == title
+                and n.get("message_text") == text
+                and n.get("notification_time") == notif_time
+                for n in data
+            )
+        except Exception:
+            logger.exception("is_notification_sent error")
+            return False
 
     def mark_notification_sent(self, package, title, text, notif_time):
-        conn = sqlite3.connect(self.db_path, timeout=30)
         try:
-            conn.execute('''
-                INSERT OR IGNORE INTO sent_notifications
-                (package_name, title, message_text, notification_time, sent_time)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (package, title, text, notif_time, int(time.time())))
-            conn.commit()
-        finally:
-            conn.close()
+            data = self._read_json()
+            already_exists = any(
+                n.get("package_name") == package
+                and n.get("title") == title
+                and n.get("message_text") == text
+                and n.get("notification_time") == notif_time
+                for n in data
+            )
+            if not already_exists:
+                data.append({
+                    "package_name": package,
+                    "title": title,
+                    "message_text": text,
+                    "notification_time": notif_time,
+                    "sent_time": int(time.time())
+                })
+                self._write_json(data)
+        except Exception:
+            logger.exception("mark_notification_sent error")
 
     def cleanup_old_notifications(self):
         now = int(time.time())
         cutoff = now - self.config["db_retention_seconds"]
-        conn = sqlite3.connect(self.db_path, timeout=30)
         try:
-            cur = conn.execute('DELETE FROM sent_notifications WHERE sent_time < ?', (cutoff,))
-            deleted = cur.rowcount
-            conn.commit()
-            if deleted and deleted > 0:
+            data = self._read_json()
+            before = len(data)
+            data = [n for n in data if n.get("sent_time", 0) >= cutoff]
+            deleted = before - len(data)
+            if deleted > 0:
+                self._write_json(data)
                 logger.info(f"Cleaned up {deleted} old notifications")
-        finally:
-            conn.close()
+        except Exception:
+            logger.exception("cleanup_old_notifications error")
 
-    # -------------------------
-    # Root command helper
-    # -------------------------
     def check_su(self):
         if self.su_available is not None:
             return self.su_available
-        # try 'which su' or 'su -c id'
         try:
             res = subprocess.run(['su', '-c', 'id'], capture_output=True, text=True, timeout=5)
             ok = res.returncode == 0 and 'uid' in res.stdout.lower()
@@ -199,14 +195,11 @@ class NotificationMonitor:
     def execute_root_command(self, command, timeout=10):
         try:
             if self.check_su():
-                # use su -c and avoid shell=True where possible
                 proc = subprocess.run(['su', '-c', command], capture_output=True, text=True, timeout=timeout)
             else:
-                # fallback to trying to run command directly (if script runs under adb shell root)
                 proc = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
             out = proc.stdout or ""
             if proc.stderr:
-                # keep but don't spam
                 logger.debug(f"Cmd stderr: {proc.stderr.strip()}")
             return out
         except subprocess.TimeoutExpired:
@@ -216,14 +209,10 @@ class NotificationMonitor:
             logger.exception(f"Command execution error: {e}")
             return ""
 
-    # -------------------------
-    # Notification count and clear
-    # -------------------------
     def get_notification_count(self):
         out = self.execute_root_command("dumpsys notification 2>/dev/null | grep -c 'NotificationRecord'")
         if out and out.strip().isdigit():
             return int(out.strip())
-        # fallback: run dumpsys and count occurrences
         out2 = self.execute_root_command("dumpsys notification 2>/dev/null")
         if out2:
             return out2.count("NotificationRecord")
@@ -232,7 +221,7 @@ class NotificationMonitor:
     def clear_all_notifications(self):
         logger.info("Attempting to clear notifications (safe mode)")
         before = self.get_notification_count()
-        # method 1
+
         self.execute_root_command("cmd notification remove_all")
         time.sleep(0.8)
         after = self.get_notification_count()
@@ -240,7 +229,6 @@ class NotificationMonitor:
             logger.info("Cleared notifications via 'cmd notification remove_all'")
             return True
 
-        # method 2
         self.execute_root_command("service call notification 1")
         time.sleep(0.8)
         after2 = self.get_notification_count()
@@ -248,7 +236,6 @@ class NotificationMonitor:
             logger.info("Cleared notifications via 'service call notification 1'")
             return True
 
-        # method 3: very last resort, throttle pkill
         now = time.time()
         if now - self.last_clear_kill < self.config["pkill_throttle_seconds"]:
             logger.warning("Skipping pkill (throttled). Will not kill SystemUI frequently.")
@@ -276,22 +263,17 @@ class NotificationMonitor:
                 logger.warning(
                     f"Threshold reached ({current_count} >= {self.config['max_notifications']}). Auto-clearing..."
                 )
-                success = self.clear_all_notifications()
-                new_count = self.get_notification_count()
-                return new_count
+                self.clear_all_notifications()
+                return self.get_notification_count()
             return current_count
         except Exception:
             logger.exception("check_and_clear_notifications error")
             return 0
 
-    # -------------------------
-    # Parsing notifications (incremental)
-    # -------------------------
     def get_new_notifications(self):
         out = self.execute_root_command("dumpsys notification --noredact 2>/dev/null")
         if not out:
             return []
-        # split into blocks by NotificationRecord header
         blocks = []
         current = []
         for line in out.splitlines():
@@ -323,22 +305,15 @@ class NotificationMonitor:
             text_m = re.search(r'text=([^\n\r]+)', blk)
             text = self.clean_text(text_m.group(1).strip()) if text_m else ""
 
-            # Filter keyword
             keywords = self.config["monitored_packages"][pkg].get("keywords", [])
-
             if keywords:
                 combined_text = f"{title} {text}".lower()
-
-                if not any(
-                    keyword.lower() in combined_text
-                    for keyword in keywords
-                ):
+                if not any(keyword.lower() in combined_text for keyword in keywords):
                     continue
 
             when_m = re.search(r'when=(\d+)', blk)
             timestamp = int(when_m.group(1)) if when_m else now_ms
 
-            # rely on DB uniqueness rather than timing window
             if self.is_notification_sent(pkg, title, text, timestamp):
                 continue
 
@@ -347,7 +322,7 @@ class NotificationMonitor:
                 "title": title,
                 "text": text,
                 "timestamp": timestamp,
-                "time_str": datetime.fromtimestamp(timestamp/1000).strftime("%Y-%m-%d %H:%M:%S")
+                "time_str": datetime.fromtimestamp(timestamp / 1000).strftime("%Y-%m-%d %H:%M:%S")
             })
         return results
 
@@ -357,9 +332,6 @@ class NotificationMonitor:
         text = re.sub(r'String\s*\(([^)]+)\)', r'\1', text)
         return text.strip()
 
-    # -------------------------
-    # Telegram send with retry
-    # -------------------------
     def send_telegram_message(self, message, topic_id=None):
         url = f"https://api.telegram.org/bot{self.config['telegram_bot_token']}/sendMessage"
         data = {
@@ -379,13 +351,11 @@ class NotificationMonitor:
                 if r.status_code == 200:
                     return True
                 if r.status_code == 429:
-                    # rate limited -> respect Retry-After if provided
                     retry_after = int(r.headers.get("Retry-After", "5"))
                     logger.warning(f"Telegram rate limited. Retry after {retry_after}s")
                     time.sleep(retry_after)
                 else:
                     logger.warning(f"Telegram send failed (status {r.status_code}): {r.text}")
-                    # exponential backoff then retry
                     time.sleep(backoff ** attempt)
             except requests.RequestException as e:
                 logger.warning(f"Telegram request error: {e}. Backing off.")
@@ -404,9 +374,7 @@ class NotificationMonitor:
     def speak_notification(self, title, text):
         try:
             speech = f"{title}. {text}"
-
             logger.info(f"TTS: {speech}")
-
             subprocess.run([
                 "termux-tts-speak",
                 "-l", "id",
@@ -418,11 +386,7 @@ class NotificationMonitor:
     def speak_notification_edge(self, title, text):
         try:
             speech = f"{title}. {text}"
-
-            with tempfile.NamedTemporaryFile(
-                suffix=".mp3",
-                delete=False
-            ) as f:
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                 mp3_file = f.name
 
             subprocess.run([
@@ -432,11 +396,7 @@ class NotificationMonitor:
                 "--write-media", mp3_file
             ], check=True)
 
-            subprocess.run([
-                "termux-media-player",
-                "play",
-                mp3_file
-            ])
+            subprocess.run(["termux-media-player", "play", mp3_file])
 
             while True:
                 result = subprocess.run(
@@ -444,47 +404,30 @@ class NotificationMonitor:
                     capture_output=True,
                     text=True
                 )
-
                 if "Playing" not in result.stdout:
                     break
-
                 time.sleep(0.5)
 
             os.remove(mp3_file)
-
         except Exception as e:
             logger.error(f"Edge TTS error: {e}")
 
     def stop_media_playback(self):
         try:
-            subprocess.run([
-                "cmd",
-                "media_session",
-                "dispatch",
-                "pause"
-            ], capture_output=True)
-
-            # subprocess.run([
-                # "input",
-                # "keyevent",
-                # "127"
-            # ], capture_output=True)
-
+            subprocess.run(
+                ["cmd", "media_session", "dispatch", "pause"],
+                capture_output=True
+            )
             logger.info("Media playback paused")
-
         except Exception as e:
             logger.error(f"Failed to stop media playback: {e}")
 
-    # -------------------------
-    # Main loop
-    # -------------------------
     def monitor(self):
         logger.info("Notification Monitor Started")
         logger.info(f"Auto-clear: {self.config['auto_clear_enabled']} (threshold {self.config['max_notifications']})")
         for pkg, c in self.config["monitored_packages"].items():
             logger.info(f"  • {c['name']} ({pkg}) - topic {c['topic_id']}")
 
-        # check if we can run root commands at all
         self.check_su()
 
         cycle = 0
@@ -494,12 +437,10 @@ class NotificationMonitor:
             while True:
                 cycle += 1
 
-                # Periodic DB cleanup
                 if cycle % max(1, self.config["db_cleanup_cycles"]) == 0:
                     self.cleanup_old_notifications()
                     last_db_cleanup = time.time()
 
-                # Periodic auto-clear checks (throttle by time as well)
                 current_time = time.time()
                 if cycle % 10 == 0 or (self.config["auto_clear_enabled"] and current_time - self.last_clear_time > 30):
                     notification_count = self.check_and_clear_notifications()
@@ -524,16 +465,9 @@ class NotificationMonitor:
                                 n["text"],
                                 n["timestamp"]
                             )
-                            if self.config["monitored_packages"][pkg].get(
-                                "tts_enabled",
-                                False
-                            ):
+                            if self.config["monitored_packages"][pkg].get("tts_enabled", False):
                                 self.stop_media_playback()
-
-                                self.speak_notification(
-                                    n["title"],
-                                    n["text"]
-                                )
+                                self.speak_notification(n["title"], n["text"])
                             logger.info("Sent & marked")
                         else:
                             logger.warning("Failed to send to Telegram")
@@ -541,15 +475,10 @@ class NotificationMonitor:
                     logger.debug("No new notifications")
 
                 time.sleep(self.config["check_interval"])
-        except KeyboardInterrupt:
-            logger.info("Monitor interrupted by user")
-        except Exception:
-            logger.exception("Unexpected error in monitor loop")
-            time.sleep(5)
 
-# -------------------------
-# Entrypoint
-# -------------------------
+        except KeyboardInterrupt:
+            logger.info("Monitor stopped by user.")
+
 if __name__ == "__main__":
-    monitor = NotificationMonitor(CONFIG, db_path)
+    monitor = NotificationMonitor(CONFIG, json_path)
     monitor.monitor()

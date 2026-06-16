@@ -122,7 +122,7 @@ const GITLAB_TOKEN = process.env.GITLAB_TOKEN;
 const ARROW = "_\\-\\>_";
 
 // ====== State File ======
-const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo_state.json');
+const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.json');
 const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.log');
 
 function log(msg) {
