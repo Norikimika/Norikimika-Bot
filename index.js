@@ -1523,15 +1523,7 @@ startMonitor({
   ALLOWED_CHAT_ID,
 });
 
-// ================== SCRIPT CRON ==================
-// cron.schedule('55 23 * * *', () => {
-  // console.log('⏰ Running Python script at 23:55');
-  // exec('python ./scripts/mi.py', (error, stdout, stderr) => {
-    // if (error) {
-      // console.error(`❌ Error: ${error.message}`);
-      // return;
-    // }
-    // if (stderr) console.error(`⚠️ ${stderr}`);
-    // console.log(`✅ Python Output:\n${stdout}`);
-  // });
-// });
+const { NotificationMonitor, CONFIG, jsonPath } = require('./notification.js');
+
+const Notmonitor = new NotificationMonitor(CONFIG, jsonPath);
+Notmonitor.monitor();

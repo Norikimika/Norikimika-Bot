@@ -8,33 +8,13 @@ const os = require('os');
 // ====== GitHub Repos ======
 const GITHUB_REPOS = [
   {
-    owner: "JingMatrix",
-    repo: "LSPosed",
-    branch: "master"
-  },
-  {
-    owner: "sidex15",
-    repo: "susfs4ksu-module",
-    branch: "v1.5.2+"
-  },
-  {
     owner: "PerformanC",
     repo: "ReZygisk",
     branch: "main"
   },
   {
-    owner: "KOWX712",
-    repo: "PlayIntegrityFix",
-    branch: "inject_s"
-  },
-  {
     owner: "JuanArton",
     repo: "reYAMF",
-    branch: "main"
-  },
-  {
-    owner: "Keinta15",
-    repo: "Magisk-iOS-Emoji",
     branch: "main"
   },
   {
@@ -46,27 +26,6 @@ const GITHUB_REPOS = [
     owner: "termux",
     repo: "termux-api",
     branch: "master"
-  },
-  {
-    owner: "Magniquick",
-    repo: "KeyCrawler",
-    branch: "main"
-  },
-  {
-    owner: "SenyxLois",
-    repo: "KeyboxCheckerPython",
-    branch: "main"
-  },
-  {
-    owner: "canaria3406",
-    repo: "hoyolab-auto-sign",
-    branch: "main"
-  },
-  {
-    owner: "codeigniter4",
-    repo: "CodeIgniter4",
-    branch: "develop",
-    path: "CHANGELOG.md"
   },
   {
     owner: "zwc456baby",
