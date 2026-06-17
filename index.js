@@ -1218,7 +1218,7 @@ If it's a Money TRANSFER receipt (DANA, OVO, GoPay, BCA, BRI, etc):
   "bankTujuan": "destination bank/wallet name e.g. DANA",
   "noRekening": "destination account/phone number",
   "penerima": "recipient name",
-  "nominal": "nominal with thousands separator e.g. 60.000"
+  "nominal": "amount transferred excluding admin fee"
 }
 
 If it's a PLN ELECTRICITY TOKEN receipt:
@@ -1232,7 +1232,7 @@ If it's a PLN ELECTRICITY TOKEN receipt:
   "tarif": "tariff/power e.g. R2/3500VA",
   "jmlKwh": "kWh total amount",
   "token": "20 digits token numbers only without space or hyphen",
-  "nominal": "nominal with thousands separator e.g. 101.650"
+  "nominal": "total payment paid by customer with thousands separator"
 }
 
 If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
@@ -1242,7 +1242,7 @@ If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
   "waktu": "HH:MM:SS",
   "providerTujuan": "destination provider/sim name e.g. SIMPATI",
   "noProvider": "destination account/phone number",
-  "nominal": "nominal with thousands separator e.g. 7.000"
+  "nominal": "amount transferred excluding admin fee"
 }`;
 
 async function analyzeWithGemini(base64Image) {
@@ -1351,6 +1351,12 @@ bot.on("photo", adminOnly, async (ctx) => {
         .replace(/\bDnid\b/g, '')
         .replace(/\s+/g, ' ')
         .trim();
+    }
+
+    if (parsed.nominal) {
+      parsed.nominal = Number(
+        parsed.nominal.replace(/[^\d]/g, '')
+      ).toLocaleString('id-ID');
     }
 
     const strukLines = buildStruk(parsed);
