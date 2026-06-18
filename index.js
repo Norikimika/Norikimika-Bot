@@ -364,64 +364,70 @@ bot.command("ask", async (ctx) => {
         `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_API_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [
-              {
-                parts: [{ text: prompt }],
-              },
-            ],
+            contents: [{ parts: [{ text: prompt }] }],
           }),
         }
       );
 
-      if (!geminiRes.ok) {
-        throw new Error(`Gemini HTTP ${geminiRes.status}`);
-      }
+      if (!geminiRes.ok) throw new Error(`Gemini HTTP ${geminiRes.status}`);
 
       const geminiData = await geminiRes.json();
+      rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
 
-      rawText =
-        geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-
-      if (!rawText) {
-        throw new Error("Gemini empty response");
-      }
+      if (!rawText) throw new Error("Gemini empty response");
     } catch (geminiError) {
       appendLogLine(`Gemini Failed: ${geminiError.message}`);
 
-      const groqRes = await fetch(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
-            messages: [
-              {
-                role: "user",
-                content: prompt,
-              },
-            ],
-            temperature: 0.7,
-          }),
-        }
-      );
+      try {
+        const groqRes = await fetch(
+          "https://api.groq.com/openai/v1/chat/completions",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0.7,
+            }),
+          }
+        );
 
-      if (!groqRes.ok) {
-        throw new Error(`Groq HTTP ${groqRes.status}`);
+        if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
+
+        const groqData = await groqRes.json();
+        rawText = groqData?.choices?.[0]?.message?.content || null;
+
+        if (!rawText) throw new Error("Groq empty response");
+      } catch (groqError) {
+        appendLogLine(`Groq Failed: ${groqError.message}`);
+
+        const nvidiaRes = await fetch(
+          "https://integrate.api.nvidia.com/v1/chat/completions",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: process.env.NVIDIA_API_MODEL || "openai/gpt-oss-120b",
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0.7,
+              max_tokens: 1024,
+            }),
+          }
+        );
+
+        if (!nvidiaRes.ok) throw new Error(`NVIDIA HTTP ${nvidiaRes.status}`);
+
+        const nvidiaData = await nvidiaRes.json();
+        rawText = nvidiaData?.choices?.[0]?.message?.content || null;
       }
-
-      const groqData = await groqRes.json();
-
-      rawText =
-        groqData?.choices?.[0]?.message?.content ||
-        "❌ No response from Groq.";
     }
 
     const MAX_LENGTH = 3500;
@@ -430,7 +436,6 @@ bot.command("ask", async (ctx) => {
 
     for (const part of parts) {
       const html = convertMarkdownToHTML(part);
-
       await safeReply(ctx, html, {
         reply_to_message_id: ctx.message?.message_id,
         parse_mode: "HTML",
@@ -439,7 +444,6 @@ bot.command("ask", async (ctx) => {
     }
   } catch (err) {
     appendLogLine(`AI Error: ${err.message}`);
-
     await safeReply(ctx, "❌ Failed to process request", {
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
