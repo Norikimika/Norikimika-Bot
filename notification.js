@@ -14,9 +14,7 @@ if (!fs.existsSync(envPath)) {
 
 try {
     fs.chmodSync(envPath, 0o600);
-} catch (e) {
-    
-}
+} catch (e) {}
 
 require('dotenv').config({ path: envPath });
 
@@ -82,7 +80,6 @@ const logger = {
 function log(level, message) {
     const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
     const formatted = `${ts} [${level}] ${message}`;
-    // console.log(formatted);
     fs.appendFileSync(logFile, formatted + '\n', 'utf8');
 }
 
@@ -144,7 +141,7 @@ class NotificationMonitor {
     is_notification_sent(package_name, title, text, notif_time) {
         try {
             const data = this._read_json();
-            return data.some(n => 
+            return data.some(n =>
                 n.package_name === package_name &&
                 n.title === title &&
                 n.message_text === text &&
@@ -159,7 +156,7 @@ class NotificationMonitor {
     mark_notification_sent(package_name, title, text, notif_time) {
         try {
             const data = this._read_json();
-            const already_exists = data.some(n => 
+            const already_exists = data.some(n =>
                 n.package_name === package_name &&
                 n.title === title &&
                 n.message_text === text &&
@@ -440,28 +437,6 @@ class NotificationMonitor {
         }
     }
 
-    async speak_notification_edge(title, text) {
-        try {
-            const speech = `${title}. ${text}`;
-            const tmpMp3 = path.join(os.tmpdir(), `edge_tts_${Date.now()}.mp3`);
-
-            execSync(`edge-tts --voice id-ID-GadisNeural --text "${speech.replace(/"/g, '\\"')}" --write-media "${tmpMp3}"`);
-            execSync(`termux-media-player play "${tmpMp3}"`);
-
-            while (true) {
-                const info = execSync("termux-media-player info", { encoding: 'utf8' });
-                if (!info.includes("Playing")) {
-                    break;
-                }
-                await sleep(500);
-            }
-
-            fs.unlinkSync(tmpMp3);
-        } catch (e) {
-            logger.error(`Edge TTS error: ${e.message}`);
-        }
-    }
-
     stop_media_playback() {
         try {
             execSync("cmd media_session dispatch pause", { stdio: 'ignore' });
@@ -474,17 +449,16 @@ class NotificationMonitor {
     async monitor() {
         logger.info("Notification Monitor Started");
         logger.info(`Auto-clear: ${this.config.auto_clear_enabled} (threshold ${this.config.max_notifications})`);
-        
+
         for (const [pkg, c] of Object.entries(this.config.monitored_packages)) {
-            logger.info(`  • ${c.name} (${pkg}) - topic ${c.topic_id}`);
+            logger.info(`${c.name} (${pkg}) - topic ${c.topic_id}`);
         }
 
         this.check_su();
 
         let cycle = 0;
-        let last_db_cleanup = 0;
-
         let running = true;
+
         process.on('SIGINT', () => {
             logger.info("Monitor stopped by user.");
             running = false;
@@ -496,7 +470,6 @@ class NotificationMonitor {
 
             if (cycle % Math.max(1, this.config.db_cleanup_cycles) === 0) {
                 this.cleanup_old_notifications();
-                last_db_cleanup = Date.now() / 1000;
             }
 
             const current_time = Date.now() / 1000;
@@ -518,11 +491,11 @@ class NotificationMonitor {
 
                     logger.info(`Sending: ${app_name} - ${n.title}`);
                     const message = this.format_message(n, app_name);
-                    
+
                     const successfully_sent = await this.send_telegram_message(message, topic_id);
                     if (successfully_sent) {
                         this.mark_notification_sent(pkg, n.title, n.text, n.timestamp);
-                        
+
                         if (this.config.monitored_packages[pkg].tts_enabled) {
                             this.stop_media_playback();
                             this.speak_notification(n.title, n.text);
