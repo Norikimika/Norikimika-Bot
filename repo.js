@@ -234,6 +234,12 @@ async function checkGithubUpdates(state) {
       log(`⚠️ Release check failed: ${e.message}`);
     }
 
+    const MAX_COMMIT_LENGTH = 150;
+    let commitMessage = latestCommit.commit.message;
+    if (commitMessage.length > MAX_COMMIT_LENGTH) {
+      commitMessage = commitMessage.substring(0, MAX_COMMIT_LENGTH) + "...";
+    }
+
     const message = [
       "*🎉 GitHub Update Detected*",
       "*✹ Username*",
@@ -244,7 +250,7 @@ async function checkGithubUpdates(state) {
       `${ARROW} _${escapeMarkdownV2(repo.branch)}_`,
       repo.path ? "*✹ Path*\n" + ARROW + " _" + escapeMarkdownV2(repo.path) + "_" : "",
       "*✹ Commit*",
-      "```\n" + escapeMarkdownV2(latestCommit.commit.message) + "```",
+      "```\n" + escapeMarkdownV2(commitMessage) + "```",
       `${ARROW} _[View](${latestCommit.html_url})_`,
       actionsText,
       releaseText,
@@ -320,6 +326,12 @@ async function checkGitlabUpdates(state) {
       const latestSha = latestCommit.id;
       const lastSha = state[lastShaKey];
 
+      const MAX_COMMIT_LENGTH = 150;
+      let commitMessage = latestCommit.title;
+      if (commitMessage.length > MAX_COMMIT_LENGTH) {
+        commitMessage = commitMessage.substring(0, MAX_COMMIT_LENGTH) + "...";
+      }
+
       if (latestSha !== lastSha) {
         const commitUrl = latestCommit.web_url || `https://gitlab.com/${repo.owner}/${repo.repo}/-/commit/${latestSha}`;
         const message =
@@ -331,7 +343,7 @@ async function checkGitlabUpdates(state) {
           "*✹ Branch*\n" +
           ARROW + " _" + escapeMarkdownV2(branch) + "_\n" +
           "*✹ Commit*\n" +
-          "```\n" + escapeMarkdownV2(latestCommit.title) + "\n```" +
+          "```\n" + escapeMarkdownV2(commitMessage) + "\n```" +
           ARROW + ` _[View](${commitUrl})_`;
 
         try {
