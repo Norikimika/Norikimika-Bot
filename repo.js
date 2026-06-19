@@ -61,6 +61,16 @@ const GITHUB_REPOS = [
     owner: "backslashxx",
     repo: "KernelSU",
     branch: "staging"
+  },
+  {
+    owner: "KernelSU-Next",
+    repo: "KernelSU-Next",
+    branch: "dev"
+  },
+  {
+    owner: "tiann",
+    repo: "KernelSU",
+    branch: "main"
   }
 ];
 
