@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, execFile } = require('child_process');
 
 const homeDir = os.homedir();
 const envPath = path.join(homeDir, "SERVER/LogError404Bot/.env");
@@ -428,13 +428,22 @@ class NotificationMonitor {
     }
 
     speak_notification(title, text) {
-        try {
+        return new Promise((resolve, reject) => {
             const speech = `${title}. ${text}`;
             logger.info(`TTS: ${speech}`);
-            execSync(`termux-tts-speak -l id "${speech.replace(/"/g, '\\"')}"`);
-        } catch (e) {
-            logger.error(`TTS error: ${e.message}`);
-        }
+            execFile(
+                "termux-tts-speak",
+                ["-l", "id", speech],
+                (error, stdout, stderr) => {
+                    if (error) {
+                        logger.error(`TTS error: ${error.message}`);
+                        reject(error);
+                        return;
+                    }
+                    resolve(true);
+                }
+            );
+        });
     }
 
     stop_media_playback() {
@@ -497,8 +506,8 @@ class NotificationMonitor {
                         this.mark_notification_sent(pkg, n.title, n.text, n.timestamp);
 
                         if (this.config.monitored_packages[pkg].tts_enabled) {
-                            this.stop_media_playback();
-                            this.speak_notification(n.title, n.text);
+                            // this.stop_media_playback();
+                            await this.speak_notification(n.title, n.text);
                         }
                         logger.info("Sent & marked");
                     } else {
