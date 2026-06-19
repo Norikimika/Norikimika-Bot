@@ -1411,6 +1411,104 @@ bot.on("photo", adminOnly, async (ctx) => {
   }
 });
 
+// ================== PRICE ==================
+async function fetchPriceList() {
+  const url = `https://docs.google.com/spreadsheets/d/${process.env.SHEETS_ID}/export?format=csv&gid=${process.env.SHEETS_GID || "0"}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Sheets HTTP ${res.status}`);
+  const csv = await res.text();
+
+  return csv
+    .split("\n")
+    .map((row) => {
+      const fields = [];
+      let field = "";
+      let inQuotes = false;
+      for (const ch of row) {
+        if (ch === '"') {
+          inQuotes = !inQuotes;
+        } else if (ch === "," && !inQuotes) {
+          fields.push(field.trim());
+          field = "";
+        } else {
+          field += ch;
+        }
+      }
+      fields.push(field.trim());
+      return fields;
+    })
+    .filter((row) => row.some((cell) => cell.replace(/\r/, "")));
+}
+
+bot.hears(/^\/price(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+  const keyword = (ctx.match[1] || "").trim().toLowerCase();
+
+  try {
+    const rows = await fetchPriceList();
+    const dataRows = rows.slice(1).filter((row) => row[0]?.replace(/\r/, ""));
+
+    if (!dataRows.length) {
+      return safeReply(ctx, "❌ Price list is empty.", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    const filtered = keyword
+      ? dataRows.filter((row) =>
+          (row[0] || "").toLowerCase().includes(keyword) ||
+          (row[1] || "").toLowerCase().includes(keyword)
+        )
+      : dataRows;
+
+    if (!filtered.length) {
+      return safeReply(ctx, `❌ No items found matching "<b>${escapeHTML(keyword)}</b>".`, {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+
+    const header = keyword
+      ? `<b>💰 Norikimika Price</b>\n`
+      : `<b>💰 Norikimika Price</b>\n`;
+
+    const chunks = [];
+    let current = header;
+
+    for (const row of filtered) {
+      const name = escapeHTML((row[0] || "-").replace(/\r/, ""));
+      const contents = escapeHTML((row[1] || "-").replace(/\r/, ""));
+      const price = escapeHTML((row[2] || "-").replace(/\r/, ""));
+
+      const item = `<blockquote>Name : ${name}\nContents : ${contents}\nPrice : ${price}</blockquote>\n`;
+
+      if (current.length + item.length > 3800) {
+        chunks.push(current.trim());
+        current = item;
+      } else {
+        current += item;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+
+    for (const chunk of chunks) {
+      await safeReply(ctx, chunk, {
+        parse_mode: "HTML",
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+  } catch (err) {
+    appendLogLine(`Price fetch error: ${err.message}`);
+    return safeReply(ctx, "❌ Failed to fetch price list.", {
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+});
+
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
@@ -1430,6 +1528,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> /usage</blockquote>\n" +
       "<blockquote><b>✹ Playback Controller</b>\n" +
       "-> /playback</blockquote>\n" +
+      "<blockquote><b>✹ Price List</b>\n" +
+      "-> <code>/price [name]</code></blockquote>\n" +
       "<blockquote><b>✹ Reboot Device</b>\n" +
       "-> /reboot</blockquote>\n" +
       "<blockquote><b>✹ Speed Test</b>\n" +
