@@ -1444,6 +1444,14 @@ bot.hears(/^\/price(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) =
   const threadId = ctx.message?.message_thread_id;
   const keyword = (ctx.match[1] || "").trim().toLowerCase();
 
+  if (!keyword) {
+    return safeReply(ctx, "❌ Please provide an item name.", {
+      parse_mode: "HTML",
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+
   try {
     const rows = await fetchPriceList();
     const dataRows = rows.slice(1).filter((row) => row[0]?.replace(/\r/, ""));
@@ -1455,12 +1463,10 @@ bot.hears(/^\/price(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) =
       });
     }
 
-    const filtered = keyword
-      ? dataRows.filter((row) =>
-          (row[0] || "").toLowerCase().includes(keyword) ||
-          (row[1] || "").toLowerCase().includes(keyword)
-        )
-      : dataRows;
+    const filtered = dataRows.filter((row) =>
+      (row[0] || "").toLowerCase().includes(keyword) ||
+      (row[1] || "").toLowerCase().includes(keyword)
+    );
 
     if (!filtered.length) {
       return safeReply(ctx, `❌ No items found matching "<b>${escapeHTML(keyword)}</b>".`, {
@@ -1470,12 +1476,8 @@ bot.hears(/^\/price(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) =
       });
     }
 
-    const header = keyword
-      ? `<b>💰 Norikimika Price</b>\n`
-      : `<b>💰 Norikimika Price</b>\n`;
-
     const chunks = [];
-    let current = header;
+    let current = `<b>💰 Norikimika Price</b>\n`;
 
     for (const row of filtered) {
       const name = escapeHTML((row[0] || "-").replace(/\r/, ""));
