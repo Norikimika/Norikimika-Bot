@@ -101,6 +101,19 @@ async function safeAnswerCbQuery(ctx, text, options = {}, retries = DEFAULT_RETR
   return false;
 }
 
+async function safeReplyWithAudio(ctx, getAudio, options = {}, retries = DEFAULT_RETRIES) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const audio = typeof getAudio === "function" ? getAudio() : getAudio;
+      return await ctx.replyWithAudio(audio, options);
+    } catch (err) {
+      appendLogLine(`safeReplyWithAudio error (chat ${ctx.chat?.id || "unknown"}): ${err && (err.stack || err.message)}`);
+      if (i < retries) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+    }
+  }
+  return false;
+}
+
 // ================== ADMIN CHECK ==================
 bot.use(async (ctx, next) => {
   const user = ctx.from?.username || ctx.from?.id || "unknown";
@@ -541,54 +554,41 @@ function execPromise(command) {
   });
 }
 
-async function updateMusicStatus(
-  ctx,
-  messageId,
-  {
-    title,
-    performer,
-    duration,
-    status,
+async function updateMusicStatus(ctx, messageId, { title, performer, duration, status }) {
+  for (let i = 0; i <= DEFAULT_RETRIES; i++) {
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        messageId,
+        undefined,
+        `<b>🎵 Music Info</b>\n` +
+          `<blockquote>` +
+          `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
+          `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
+          `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
+          `<b>📦 Status:</b>\n-> <code>${status}</code>` +
+          `</blockquote>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    } catch (err) {
+      appendLogLine(`updateMusicStatus error: ${err.message}`);
+      if (i < DEFAULT_RETRIES) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+    }
   }
-) {
-  try {
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      messageId,
-      undefined,
-      `<b>🎵 Music Info</b>\n` +
-        `<blockquote>` +
-        `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
-        `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
-        `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
-        `<b>📦 Status:</b>\n-> <code>${status}</code>` +
-        `</blockquote>`,
-      {
-        parse_mode: "HTML",
-      }
-    );
-  } catch {}
 }
 
 bot.command("music", topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
 
-  if (threadId !== ALLOWED_TOPIC_ID) return;
-
   const text = ctx.message.text?.trim() || "";
-
-  const query = text
-    .replace(/^\/music(@\w+)?\s*/i, "")
-    .trim();
+  const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
 
   if (!query) {
-    return ctx.reply(
-      "❌ Please provide a song title or YouTube link.",
-      {
-        reply_to_message_id: ctx.message?.message_id,
-        message_thread_id: threadId,
-      }
-    );
+    return safeReply(ctx, "❌ Please provide a song title or YouTube link.", {
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
   }
 
   try {
@@ -597,180 +597,85 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
       : `yt-dlp -f 251 -j "ytsearch1:${query}"`;
 
     const stdout = await execPromise(searchCommand);
-
     const info = JSON.parse(stdout);
 
-    const title =
-      info.track ||
-      info.title ||
-      "Unknown Title";
-
-    const performer =
-      info.artist ||
-      info.uploader ||
-      "Unknown Artist";
-
-    const duration = formatDuration(
-      info.duration
-    );
-
-    const videoUrl = `https://youtu.be/${info.id}`;
-
-    const tempFile = path.join(
-      __dirname,
-      `${info.id}.webm`
-    );
-
-    const thumbBase = path.join(
-      __dirname,
-      info.id
-    );
-
+    const title     = info.track    || info.title    || "Unknown Title";
+    const performer = info.artist   || info.uploader || "Unknown Artist";
+    const duration  = formatDuration(info.duration);
+    const videoUrl  = `https://youtu.be/${info.id}`;
+    const tempFile  = path.join(__dirname, `${info.id}.webm`);
+    const thumbBase = path.join(__dirname, info.id);
     const thumbFile = `${thumbBase}.jpg`;
 
-    const infoMessage = await ctx.reply(
-      `<b>🎵 Music Info</b>\n` +
-        `<blockquote>` +
-        `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
-        `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
-        `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
-        `<b>📦 Status:</b>\n-> <code>Downloading</code>` +
-        `</blockquote>`,
-      {
-        parse_mode: "HTML",
-        reply_to_message_id:
-          ctx.message?.message_id,
-        message_thread_id: threadId,
-      }
-    );
+    let infoMessage;
+    try {
+      infoMessage = await ctx.reply(
+        `<b>🎵 Music Info</b>\n` +
+          `<blockquote>` +
+          `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
+          `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
+          `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
+          `<b>📦 Status:</b>\n-> <code>Downloading</code>` +
+          `</blockquote>`,
+        {
+          parse_mode: "HTML",
+          reply_to_message_id: ctx.message?.message_id,
+          message_thread_id: threadId,
+        }
+      );
+    } catch (err) {
+      appendLogLine(`[MUSIC INFO REPLY ERROR] ${err.message}`);
+      return;
+    }
 
     try {
-      appendLogLine(
-        `[DOWNLOAD AUDIO] ${videoUrl}`
-      );
+      appendLogLine(`[DOWNLOAD AUDIO] ${videoUrl}`);
+      await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Downloading" });
 
-      await updateMusicStatus(
-        ctx,
-        infoMessage.message_id,
-        {
-          title,
-          performer,
-          duration,
-          status: "Downloading"
-        }
-      );
+      await execPromise(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`);
 
-      await execPromise(
-        `yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`
-      );
+      appendLogLine(`[DOWNLOAD THUMBNAIL] ${videoUrl}`);
+      await execPromise(`yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg -o "${thumbBase}" "${videoUrl}"`);
 
-      appendLogLine(
-        `[DOWNLOAD THUMBNAIL] ${videoUrl}`
-      );
-
-      await execPromise(
-        `yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg -o "${thumbBase}" "${videoUrl}"`
-      );
-
-      await updateMusicStatus(
-        ctx,
-        infoMessage.message_id,
-        {
-          title,
-          performer,
-          duration,
-          status: "Sending"
-        }
-      );
+      await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Sending" });
 
       const audioOptions = {
         title,
         performer,
         duration: info.duration,
-        message_thread_id:
-          ALLOWED_TOPIC_ID_MUSIC,
+        message_thread_id: ALLOWED_TOPIC_ID_MUSIC,
       };
 
       if (fs.existsSync(thumbFile)) {
-        audioOptions.thumb = {
-          source: fs.createReadStream(
-            thumbFile
-          ),
-        };
+        audioOptions.thumb = { source: fs.createReadStream(thumbFile) };
       }
 
-      appendLogLine(
-        `[SEND AUDIO] ${tempFile}`
-      );
+      appendLogLine(`[SEND AUDIO] ${tempFile}`);
 
-      await ctx.replyWithAudio(
-        {
-          source: fs.createReadStream(
-            tempFile
-          ),
-        },
+      await safeReplyWithAudio(
+        ctx,
+        () => ({ source: fs.createReadStream(tempFile) }),
         audioOptions
       );
 
-      appendLogLine(
-        `[SEND AUDIO SUCCESS] ${tempFile}`
-      );
-
-      await updateMusicStatus(
-        ctx,
-        infoMessage.message_id,
-        {
-          title,
-          performer,
-          duration,
-          status: "Success"
-        }
-      );
+      appendLogLine(`[SEND AUDIO SUCCESS] ${tempFile}`);
+      await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Success" });
 
     } catch (e) {
-      appendLogLine(
-        `[SEND AUDIO ERROR] ${
-          e.stack || e.message
-        }`
-      );
-
-      await updateMusicStatus(
-        ctx,
-        infoMessage.message_id,
-        {
-          title,
-          performer,
-          duration,
-          status: "Failed"
-        }
-      );
+      appendLogLine(`[SEND AUDIO ERROR] ${e.stack || e.message}`);
+      await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Failed" });
     } finally {
-      [tempFile, thumbFile].forEach(
-        (file) => {
-          if (
-            file &&
-            fs.existsSync(file)
-          ) {
-            fs.unlink(file, () => {});
-          }
-        }
-      );
+      [tempFile, thumbFile].forEach((file) => {
+        if (file && fs.existsSync(file)) fs.unlink(file, () => {});
+      });
     }
-  } catch (e) {
-    appendLogLine(
-      `[MUSIC ERROR] ${
-        e.stack || e.message
-      }`
-    );
 
-    return ctx.reply(
-      "❌ Failed to fetch music.",
-      {
-        reply_to_message_id:
-          ctx.message?.message_id,
-        message_thread_id: threadId,
-      }
-    );
+  } catch (e) {
+    appendLogLine(`[MUSIC ERROR] ${e.stack || e.message}`);
+    return safeReply(ctx, "❌ Failed to fetch music.", {
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
   }
 });
 
