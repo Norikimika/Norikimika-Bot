@@ -42,54 +42,6 @@ const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE);
 const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC);
 const ALLOWED_TOPIC_ID_STATUS = parseInt(process.env.ALLOWED_TOPIC_ID_STATUS);
 
-function convertMarkdownToHTML(mdText) {
-  if (!mdText) return '';
-
-  const fenceRe = /```([a-zA-Z0-9+-]*)\n([\s\S]*?)```/g;
-
-  let lastIndex = 0;
-  let parts = [];
-  let match;
-
-  while ((match = fenceRe.exec(mdText)) !== null) {
-    const idx = match.index;
-    const lang = match[1] || '';
-    const code = match[2];
-
-    if (idx > lastIndex) {
-      let preceding = mdText.slice(lastIndex, idx);
-
-      preceding = preceding.replace(/^(\s*\d+)\.\s{2,}/gm, '$1. ');
-
-      preceding = escapeHTML(preceding)
-        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
-        .replace(/\*([^*]+)\*/g, '<i>$1</i>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>');
-      parts.push(preceding);
-    }
-
-    const escapedCode = escapeHTML(code);
-    const classAttr = lang ? ` class="language-${escapeHTML(lang)}"` : '';
-    parts.push(`<pre><code${classAttr}>${escapedCode}</code></pre>`);
-
-    lastIndex = fenceRe.lastIndex;
-  }
-
-  if (lastIndex < mdText.length) {
-    let trailing = mdText.slice(lastIndex);
-
-    trailing = trailing.replace(/^(\s*\d+)\.\s{2,}/gm, '$1. ');
-
-    trailing = escapeHTML(trailing)
-      .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')   
-      .replace(/\*([^*]+)\*/g, '<i>$1</i>')     
-      .replace(/`([^`]+)`/g, '<code>$1</code>'); 
-    parts.push(trailing);
-  }
-
-  return parts.join('');
-}
-
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
 
@@ -338,26 +290,59 @@ bot.command("ask", async (ctx) => {
   let argPrompt = text.replace(/^\/ask(@\w+)?\s*/i, "").trim();
   let replyText = ctx.message.reply_to_message?.text?.trim();
 
-  let prompt = "";
+  const useSearch = /^-s\b/i.test(argPrompt);
+  if (useSearch) argPrompt = argPrompt.replace(/^-s\s*/i, "").trim();
 
-  if (argPrompt && replyText) {
-    prompt = `${argPrompt}: ${replyText}`;
-  } else if (argPrompt) {
-    prompt = argPrompt;
-  } else if (replyText) {
-    prompt = replyText;
-  }
+  let prompt = "";
+  if (argPrompt && replyText) prompt = `${argPrompt}: ${replyText}`;
+  else if (argPrompt) prompt = argPrompt;
+  else if (replyText) prompt = replyText;
 
   if (!prompt) {
     return safeReply(ctx, "❌ Please provide a prompt.", {
       reply_to_message_id: ctx.message?.message_id,
-      parse_mode: "HTML",
       message_thread_id: threadId,
     });
   }
 
+  async function fetchSearchContext(query) {
+    if (!process.env.TAVILY_API_KEY) return null;
+    try {
+      const res = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: process.env.TAVILY_API_KEY,
+          query,
+          max_results: 5,
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data?.results?.length) return null;
+      return data.results
+        .map((r, i) => `[${i + 1}] ${r.title}\n${r.content}\nURL: ${r.url}`)
+        .join("\n\n");
+    } catch {
+      return null;
+    }
+  }
+
+  function buildSearchPrompt(userPrompt, searchContext) {
+    if (!searchContext) return userPrompt;
+    return (
+      `You are a helpful assistant with access to recent web search results.\n\n` +
+      `Search Results:\n${searchContext}\n\n` +
+      `User Question: ${userPrompt}\n\n` +
+      `Answer based on the search results above. Cite sources where relevant.`
+    );
+  }
+
   try {
     let rawText;
+
+    const searchContext = useSearch ? await fetchSearchContext(prompt) : null;
+    const enhancedPrompt = buildSearchPrompt(prompt, searchContext);
 
     try {
       const geminiRes = await fetch(
@@ -366,17 +351,17 @@ bot.command("ask", async (ctx) => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
+            contents: [{ parts: [{ text: enhancedPrompt }] }],
+            ...(useSearch && { tools: [{ google_search: {} }] }),
           }),
         }
       );
 
       if (!geminiRes.ok) throw new Error(`Gemini HTTP ${geminiRes.status}`);
-
       const geminiData = await geminiRes.json();
       rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-
       if (!rawText) throw new Error("Gemini empty response");
+
     } catch (geminiError) {
       appendLogLine(`Gemini Failed: ${geminiError.message}`);
 
@@ -391,18 +376,17 @@ bot.command("ask", async (ctx) => {
             },
             body: JSON.stringify({
               model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
-              messages: [{ role: "user", content: prompt }],
+              messages: [{ role: "user", content: enhancedPrompt }],
               temperature: 0.7,
             }),
           }
         );
 
         if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
-
         const groqData = await groqRes.json();
         rawText = groqData?.choices?.[0]?.message?.content || null;
-
         if (!rawText) throw new Error("Groq empty response");
+
       } catch (groqError) {
         appendLogLine(`Groq Failed: ${groqError.message}`);
 
@@ -416,7 +400,7 @@ bot.command("ask", async (ctx) => {
             },
             body: JSON.stringify({
               model: process.env.NVIDIA_API_MODEL || "openai/gpt-oss-120b",
-              messages: [{ role: "user", content: prompt }],
+              messages: [{ role: "user", content: enhancedPrompt }],
               temperature: 0.7,
               max_tokens: 1024,
             }),
@@ -424,24 +408,21 @@ bot.command("ask", async (ctx) => {
         );
 
         if (!nvidiaRes.ok) throw new Error(`NVIDIA HTTP ${nvidiaRes.status}`);
-
         const nvidiaData = await nvidiaRes.json();
         rawText = nvidiaData?.choices?.[0]?.message?.content || null;
       }
     }
 
     const MAX_LENGTH = 3500;
-    const parts =
-      rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
+    const parts = rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
 
     for (const part of parts) {
-      const html = convertMarkdownToHTML(part);
       await safeReply(ctx, part, {
         reply_to_message_id: ctx.message?.message_id,
-        parse_mode: "HTML",
         message_thread_id: threadId,
       });
     }
+
   } catch (err) {
     appendLogLine(`AI Error: ${err.message}`);
     await safeReply(ctx, "❌ Failed to process request", {
