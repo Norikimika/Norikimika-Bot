@@ -436,7 +436,7 @@ bot.command("ask", async (ctx) => {
 
     for (const part of parts) {
       const html = convertMarkdownToHTML(part);
-      await safeReply(ctx, html, {
+      await safeReply(ctx, part, {
         reply_to_message_id: ctx.message?.message_id,
         parse_mode: "HTML",
         message_thread_id: threadId,
