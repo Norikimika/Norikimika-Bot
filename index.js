@@ -3,12 +3,14 @@ require("dotenv").config();
 const fs = require("fs");
 const { Telegraf } = require("telegraf");
 const cron = require("node-cron");
-const { spawn, exec } = require("child_process");
+const { spawn, exec, execFile } = require("child_process");
 const escapeHTML = require("escape-html");
 const https = require("https");
 const dns = require("dns");
 const path = require("path");
 const os = require('os');
+const util = require("util");
+const execFilePromise = util.promisify(execFile);
 
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
@@ -130,30 +132,42 @@ const topicOnly = (ctx, next) => {
   return next();
 };
 
+const adminCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
+
+async function isUserAdmin(ctx, chatId, userId) {
+
+  const cacheKey = `${chatId}_${userId}`;
+  const now = Date.now();
+
+  if (adminCache.has(cacheKey) && (now - adminCache.get(cacheKey).timestamp < CACHE_TTL)) {
+    return adminCache.get(cacheKey).isAdmin;
+  }
+
+  try {
+    const admins = await ctx.telegram.getChatAdministrators(chatId);
+    const isAdmin = admins.some((admin) => admin.user.id === userId);
+    adminCache.set(cacheKey, { isAdmin, timestamp: now });
+    return isAdmin;
+  } catch (err) {
+    return false;
+  }
+}
+
 const adminOnly = async (ctx, next) => {
   try {
     const userId = ctx.from?.id;
-    const firstName = ctx.from?.first_name || "User";
-    const chatId =
-      ctx.chat?.id ||
-      ctx.message?.chat?.id ||
-      ctx.callbackQuery?.message?.chat?.id;
-
-    const replyToMsgId =
-      ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
+    const chatId = ctx.chat?.id || ctx.message?.chat?.id || ctx.callbackQuery?.message?.chat?.id;
+    const replyToMsgId = ctx.message?.message_id || ctx.callbackQuery?.message?.message_id;
 
     if (!userId || !chatId) {
-      return safeReply(ctx, "❌ Permission error", {
-        reply_to_message_id: replyToMsgId,
-      });
+      return safeReply(ctx, "❌ Permission error", { reply_to_message_id: replyToMsgId });
     }
 
-    const admins = await ctx.telegram.getChatAdministrators(chatId);
-    const isAdmin = admins.some((admin) => admin.user.id === userId);
+    const isAdmin = await isUserAdmin(ctx, chatId, userId);
 
     if (!isAdmin) {
       const untilDate = Math.floor(Date.now() / 1000) + 5 * 60;
-
       try {
         await ctx.telegram.restrictChatMember(chatId, userId, {
           permissions: { can_send_messages: false },
@@ -164,11 +178,7 @@ const adminOnly = async (ctx, next) => {
       }
 
       if (ctx.callbackQuery) {
-        await ctx.answerCbQuery(
-          "⛔ Not authorized. You are muted for 5 minutes.",
-          { show_alert: true }
-        );
-        return;
+        return safeAnswerCbQuery(ctx, "⛔ Not authorized. You are muted for 5 minutes.", { show_alert: true });
       }
 
       return safeReply(ctx, "⛔ Not authorized. You are muted for 5 minutes.", {
@@ -179,10 +189,7 @@ const adminOnly = async (ctx, next) => {
     return next();
   } catch (err) {
     appendLogLine(`adminOnly error: ${err.message}`);
-    return safeReply(ctx, "⚠️ Permission check failed.", {
-      reply_to_message_id:
-        ctx.message?.message_id || ctx.callbackQuery?.message?.message_id,
-    });
+    return safeReply(ctx, "⚠️ Permission check failed.");
   }
 };
 
@@ -572,6 +579,9 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
       );
       return;
     } catch (err) {
+      if (err.description && err.description.includes("message is not modified")) {
+        return; 
+      }
       appendLogLine(`updateMusicStatus error: ${err.message}`);
       if (i < DEFAULT_RETRIES) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
     }
@@ -580,7 +590,6 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
 
 bot.command("music", topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-
   const text = ctx.message.text?.trim() || "";
   const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
 
@@ -592,50 +601,30 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   }
 
   try {
-    const searchCommand = query.startsWith("http")
-      ? `yt-dlp -f 251 -j "${query}"`
-      : `yt-dlp -f 251 -j "ytsearch1:${query}"`;
-
-    const stdout = await execPromise(searchCommand);
+    const ytArgs = ["-f", "251", "-j", query.startsWith("http") ? query : `ytsearch1:${query}`];
+    const { stdout } = await execFilePromise("yt-dlp", ytArgs);
+    
     const info = JSON.parse(stdout);
 
-    const title     = info.track    || info.title    || "Unknown Title";
-    const performer = info.artist   || info.uploader || "Unknown Artist";
-    const duration  = formatDuration(info.duration);
-    const videoUrl  = `https://youtu.be/${info.id}`;
-    const tempFile  = path.join(__dirname, `${info.id}.webm`);
+    const title = info.track || info.title || "Unknown Title";
+    const performer = info.artist || info.uploader || "Unknown Artist";
+    const duration = formatDuration(info.duration);
+    const videoUrl = `https://youtu.be/${info.id}`;
+    const tempFile = path.join(__dirname, `${info.id}.webm`);
     const thumbBase = path.join(__dirname, info.id);
     const thumbFile = `${thumbBase}.jpg`;
 
     let infoMessage;
     try {
       infoMessage = await ctx.reply(
-        `<b>🎵 Music Info</b>\n` +
-          `<blockquote>` +
-          `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
-          `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
-          `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
-          `<b>📦 Status:</b>\n-> <code>Downloading</code>` +
-          `</blockquote>`,
-        {
-          parse_mode: "HTML",
-          reply_to_message_id: ctx.message?.message_id,
-          message_thread_id: threadId,
-        }
+        `<b>🎵 Music Info</b>\n<blockquote><b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>\n<b>👤 Artist:</b>\n-> <code>${escapeHTML(performer)}</code>\n<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n<b>📦 Status:</b>\n-> <code>Downloading</code></blockquote>`,
+        { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
       );
-    } catch (err) {
-      appendLogLine(`[MUSIC INFO REPLY ERROR] ${err.message}`);
-      return;
-    }
+    } catch (err) { return; }
 
     try {
-      appendLogLine(`[DOWNLOAD AUDIO] ${videoUrl}`);
-      await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Downloading" });
-
-      await execPromise(`yt-dlp -f 251 -o "${tempFile}" "${videoUrl}"`);
-
-      appendLogLine(`[DOWNLOAD THUMBNAIL] ${videoUrl}`);
-      await execPromise(`yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg -o "${thumbBase}" "${videoUrl}"`);
+      await execFilePromise("yt-dlp", ["-f", "251", "-o", tempFile, videoUrl]);
+      await execFilePromise("yt-dlp", ["--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "-o", thumbBase, videoUrl]);
 
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Sending" });
 
@@ -650,32 +639,19 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         audioOptions.thumb = { source: fs.createReadStream(thumbFile) };
       }
 
-      appendLogLine(`[SEND AUDIO] ${tempFile}`);
-
-      await safeReplyWithAudio(
-        ctx,
-        () => ({ source: fs.createReadStream(tempFile) }),
-        audioOptions
-      );
-
-      appendLogLine(`[SEND AUDIO SUCCESS] ${tempFile}`);
+      await safeReplyWithAudio(ctx, () => ({ source: fs.createReadStream(tempFile) }), audioOptions);
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Success" });
 
     } catch (e) {
       appendLogLine(`[SEND AUDIO ERROR] ${e.stack || e.message}`);
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Failed" });
     } finally {
-      [tempFile, thumbFile].forEach((file) => {
-        if (file && fs.existsSync(file)) fs.unlink(file, () => {});
-      });
+      try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch {}
+      try { if (fs.existsSync(thumbFile)) fs.unlinkSync(thumbFile); } catch {}
+      try { if (fs.existsSync(thumbBase + ".webp")) fs.unlinkSync(thumbBase + ".webp"); } catch {}
     }
-
   } catch (e) {
-    appendLogLine(`[MUSIC ERROR] ${e.stack || e.message}`);
-    return safeReply(ctx, "❌ Failed to fetch music.", {
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
-    });
+    return safeReply(ctx, "❌ Failed to fetch music.");
   }
 });
 
@@ -774,11 +750,11 @@ bot.action(/^volume_select_(.+)$/i, topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== VOLUME SET ==================
-bot.action(/^volume_set_(.+)_(\d+)$/i, topicOnly, adminOnly, async (ctx) => {
+bot.action(/^volume_set_([a-zA-Z0-9]+)_(\d+)$/i, topicOnly, adminOnly, async (ctx) => {
   const stream = ctx.match[1];
   const value  = parseInt(ctx.match[2], 10);
 
-  exec(`termux-volume "${stream}" ${value}`, async (error) => {
+  execFile("termux-volume", [stream, value.toString()], async (error) => {
     if (error) {
       appendLogLine(`Volume set failed: ${error.message}`);
       return safeAnswerCbQuery(ctx, "Failed to set volume", { show_alert: true });
@@ -841,7 +817,7 @@ bot.action("volume_home", topicOnly, adminOnly, async (ctx) => {
 bot.action(/^media_(play|next|previous|stop)$/i, topicOnly, adminOnly, async (ctx) => {
   const action = ctx.match[1];
 
-  exec(`cmd media_session dispatch ${action}`, async (error) => {
+  execFile("cmd", ["media_session", "dispatch", action], async (error) => {
     if (error) return safeAnswerCbQuery(ctx, `Failed: ${action}`, { show_alert: true });
     await safeAnswerCbQuery(ctx, `${action} executed`);
   });
@@ -1497,8 +1473,9 @@ async function loop() {
     await runRepo();
   } catch (err) {
     console.error(`❌ Error: ${err.message}`);
+    appendLogLine(`Repo Error: ${err.message}`);
   }
-  loop();
+  setTimeout(loop, 10000);
 }
 
 loop();
