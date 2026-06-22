@@ -1302,7 +1302,7 @@ async function fetchPriceList() {
     .filter((row) => row.some((cell) => cell.replace(/\r/, "")));
 }
 
-bot.hears(/^\/price(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) => {
+bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const keyword = (ctx.match[1] || "").trim().toLowerCase();
 
@@ -1382,7 +1382,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
     ctx,
       "<b>🤖 Public Commands</b>\n" +
       "<blockquote><b>✹ Ask AI</b>\n" +
-      "-> <code>/ask [prompt]</code></blockquote>\n" +
+      "-> <code>/ask [prompt]</code>\n" +
+      "-> <code>/ask -s [prompt]</code></blockquote>\n" +
       "<b>🤖 Admin Commands</b>\n" +
       "<blockquote><b>✹ Battery Status</b>\n" +
       "-> /battery</blockquote>\n" +
@@ -1393,7 +1394,7 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "<blockquote><b>✹ Playback Controller</b>\n" +
       "-> /playback</blockquote>\n" +
       "<blockquote><b>✹ Price List</b>\n" +
-      "-> <code>/price [name]</code></blockquote>\n" +
+      "-> <code>/p [name]</code></blockquote>\n" +
       "<blockquote><b>✹ Reboot Device</b>\n" +
       "-> /reboot</blockquote>\n" +
       "<blockquote><b>✹ Speed Test</b>\n" +
