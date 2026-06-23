@@ -38,11 +38,11 @@ process.on("unhandledRejection", (reason) => {
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-const ALLOWED_CHAT_ID = parseInt(process.env.ALLOWED_CHAT_ID);
-const ALLOWED_TOPIC_ID = parseInt(process.env.ALLOWED_TOPIC_ID);
-const ALLOWED_TOPIC_ID_USAGE = parseInt(process.env.ALLOWED_TOPIC_ID_USAGE);
-const ALLOWED_TOPIC_ID_MUSIC = parseInt(process.env.ALLOWED_TOPIC_ID_MUSIC);
-const ALLOWED_TOPIC_ID_STATUS = parseInt(process.env.ALLOWED_TOPIC_ID_STATUS);
+const CHAT_ID = parseInt(process.env.CHAT_ID);
+const TOPIC_ID = parseInt(process.env.TOPIC_ID);
+const TOPIC_ID_USAGE = parseInt(process.env.TOPIC_ID_USAGE);
+const TOPIC_ID_MUSIC = parseInt(process.env.TOPIC_ID_MUSIC);
+const TOPIC_ID_STATUS = parseInt(process.env.TOPIC_ID_STATUS);
 
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
@@ -128,7 +128,7 @@ bot.use(async (ctx, next) => {
 // ================== TOPIC ONLY MIDDLEWARE ==================
 const topicOnly = (ctx, next) => {
   const threadId = ctx.message?.message_thread_id || ctx.callbackQuery?.message?.message_thread_id;
-  if (threadId !== ALLOWED_TOPIC_ID) return;
+  if (threadId !== TOPIC_ID) return;
   return next();
 };
 
@@ -304,7 +304,7 @@ bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
 // ================== AI ==================
 bot.command("ask", async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-  if (threadId !== ALLOWED_TOPIC_ID) return;
+  if (threadId !== TOPIC_ID) return;
 
   const text = ctx.message.text?.trim();
   let argPrompt = text.replace(/^\/ask(@\w+)?\s*/i, "").trim();
@@ -632,7 +632,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         title,
         performer,
         duration: info.duration,
-        message_thread_id: ALLOWED_TOPIC_ID_MUSIC,
+        message_thread_id: TOPIC_ID_MUSIC,
       };
 
       if (fs.existsSync(thumbFile)) {
@@ -1376,7 +1376,7 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) => {
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-  if (threadId !== ALLOWED_TOPIC_ID) return;
+  if (threadId !== TOPIC_ID) return;
 
   return safeReply(
     ctx,
@@ -1410,7 +1410,7 @@ bot.on("text", async (ctx, next) => {
   const chatId = ctx.chat?.id;
   const userId = ctx.from?.id;
 
-  if (threadId !== ALLOWED_TOPIC_ID) return next();
+  if (threadId !== TOPIC_ID) return next();
 
   const session = buySessions[chatId];
   if (session && session.process) {
@@ -1488,9 +1488,9 @@ startMonitor({
   bot,
   safeSend,
   appendLogLine,
-  ALLOWED_TOPIC_ID_USAGE,
-  ALLOWED_TOPIC_ID_STATUS,
-  ALLOWED_CHAT_ID,
+  TOPIC_ID_USAGE,
+  TOPIC_ID_STATUS,
+  CHAT_ID,
 });
 
 const { NotificationMonitor, CONFIG, jsonPath } = require('./notification.js');

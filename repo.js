@@ -84,8 +84,8 @@ const GITLAB_REPOS = [
 
 // ====== Tokens & IDs ======
 const TELEGRAM_BOT_TOKEN = process.env.BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.ALLOWED_CHAT_ID;
-const TELEGRAM_TOPIC_ID = process.env.ALLOWED_TOPIC_ID_UPDATE;
+const TELEGRAM_CHAT_ID = process.env.CHAT_ID;
+const TELEGRAM_TOPIC_ID = process.env.TOPIC_ID_UPDATE;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITLAB_TOKEN = process.env.GITLAB_TOKEN;
 const ARROW = "_\\-\\>_";

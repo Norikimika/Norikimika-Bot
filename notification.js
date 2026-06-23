@@ -20,7 +20,7 @@ require('dotenv').config({ path: envPath });
 
 const CONFIG = {
     telegram_bot_token: process.env.BOT_TOKEN,
-    telegram_chat_id: process.env.ALLOWED_CHAT_ID,
+    telegram_chat_id: process.env.CHAT_ID,
     monitored_packages: {
         "com.macrovideo.v380pro": {
             name: "V380 Pro",

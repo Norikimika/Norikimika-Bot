@@ -5,9 +5,9 @@ module.exports = function ({
   bot,
   safeSend,
   appendLogLine,
-  ALLOWED_TOPIC_ID_USAGE,
-  ALLOWED_TOPIC_ID_STATUS,
-  ALLOWED_CHAT_ID,
+  TOPIC_ID_USAGE,
+  TOPIC_ID_STATUS,
+  CHAT_ID,
 }) {
   async function sendUsageReport() {
     return new Promise((resolve) => {
@@ -32,10 +32,10 @@ module.exports = function ({
 
           await safeSend(
             bot,
-            ALLOWED_CHAT_ID,
+            CHAT_ID,
             "❌ Failed to get daily usage",
             {
-              message_thread_id: ALLOWED_TOPIC_ID_USAGE,
+              message_thread_id: TOPIC_ID_USAGE,
             }
           );
 
@@ -86,9 +86,9 @@ module.exports = function ({
               : "No data") +
             `</blockquote>`;
 
-          await safeSend(bot, ALLOWED_CHAT_ID, usageReport, {
+          await safeSend(bot, CHAT_ID, usageReport, {
             parse_mode: "HTML",
-            message_thread_id: ALLOWED_TOPIC_ID_USAGE,
+            message_thread_id: TOPIC_ID_USAGE,
           });
         } catch (err) {
           appendLogLine(`Daily usage parse failed: ${err.message}`);
@@ -124,11 +124,11 @@ module.exports = function ({
 
           await safeSend(
             bot,
-            ALLOWED_CHAT_ID,
+            CHAT_ID,
             `<b>🔋 Battery Fully Charged</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
             {
               parse_mode: "HTML",
-              message_thread_id: ALLOWED_TOPIC_ID_STATUS,
+              message_thread_id: TOPIC_ID_STATUS,
             }
           );
         }
@@ -138,11 +138,11 @@ module.exports = function ({
 
           await safeSend(
             bot,
-            ALLOWED_CHAT_ID,
+            CHAT_ID,
             `<b>🪫 Low Battery Warning</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
             {
               parse_mode: "HTML",
-              message_thread_id: ALLOWED_TOPIC_ID_STATUS,
+              message_thread_id: TOPIC_ID_STATUS,
             }
           );
         }
