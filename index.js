@@ -1013,20 +1013,20 @@ function buildStruk(data) {
 async function buildStrukImage(struk) {
   const id = Date.now();
   const files = {
-    nameTxt:    `struk_name_${id}.txt`,
-    addrTxt:    `struk_addr_${id}.txt`,
-    bodyTxt:    `struk_body_${id}.txt`,
-    namePng:    `struk_name_${id}.png`,
-    addrPng:    `struk_addr_${id}.png`,
-    bodyPng:    `struk_body_${id}.png`,
+    nameTxt: `struk_name_${id}.txt`,
+    addrTxt: `struk_addr_${id}.txt`,
+    bodyTxt: `struk_body_${id}.txt`,
+    namePng: `struk_name_${id}.png`,
+    addrPng: `struk_addr_${id}.png`,
+    bodyPng: `struk_body_${id}.png`,
     nameExtPng: `struk_namex_${id}.png`,
     addrExtPng: `struk_addrx_${id}.png`,
-    outPng:     `struk_${id}.png`,
+    outPng: `struk_${id}.png`,
   };
 
-  const lines       = struk.split('\n');
-  const nameLine    = (lines[0] || '').trim();
-  const addrLine    = (lines[1] || '').trim();
+  const lines = struk.split('\n');
+  const nameLine = (lines[0] || '').trim();
+  const addrLine = (lines[1] || '').trim();
   const bodyContent = lines.slice(2).join('\n');
 
   fs.writeFileSync(files.nameTxt, nameLine);
@@ -1034,8 +1034,8 @@ async function buildStrukImage(struk) {
   fs.writeFileSync(files.bodyTxt, bodyContent);
 
   const normalSize = parseInt(STRUK_FONTSIZE, 10);
-  const smallSize  = Math.max(9, normalSize - 4);
-  const base       = `-background white -fill black -font "${STRUK_FONT}"`;
+  const smallSize = Math.max(9, normalSize - 4);
+  const base = `-background white -fill black -font "${STRUK_FONT}"`;
 
   const getDim = async (file, fmt) => {
     try {
@@ -1202,9 +1202,9 @@ bot.on("photo", adminOnly, async (ctx) => {
     }
 
     const isValid =
-      (parsed.type === "pln"      && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
+      (parsed.type === "pln" && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
       (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan)) ||
-      (parsed.type === "pulsa"    && (parsed.providerTujuan || parsed.noProvider));
+      (parsed.type === "pulsa" && (parsed.providerTujuan || parsed.noProvider));
 
     if (!isValid) {
       appendLogLine("Struk validation failed: Image is not recognized as a valid receipt.");
@@ -1239,35 +1239,29 @@ bot.on("photo", adminOnly, async (ctx) => {
       const targetThreadId = TOPIC_ID_PREVIEW !== null ? TOPIC_ID_PREVIEW : currentThreadId;
       const sendOptions = targetThreadId ? { message_thread_id: targetThreadId } : {};
 
-      await ctx.telegram.sendPhoto(
-        ctx.chat.id,
-        { source: imgBuffer, filename: "receipt.png" },
-        sendOptions
-      );
-      try { fs.unlinkSync(imgPath); } catch {}
-    }
+      try {
+        await ctx.telegram.sendPhoto(
+          ctx.chat.id,
+          { source: imgBuffer, filename: "receipt.png" },
+          sendOptions
+        );
+      } catch (photoErr) {
+        appendLogLine(`Failed to send receipt to Telegram: ${photoErr.message}`);
+      }
 
-    const plainText = strukLines + "\n\n\n";
-    const tmpFile = `struk_print_${ctx.message?.message_id}.txt`;
-
-    try {
-      fs.writeFileSync(tmpFile, plainText);
       const printCmd = process.env.PRINT_CMD;
       if (!printCmd) {
         appendLogLine("Print error: PRINT_CMD is not configured in .env.");
-        return;
+        try { fs.unlinkSync(imgPath); } catch {}
+      } else {
+        exec(`${printCmd} "${imgPath}"`, (err) => {
+          if (err) appendLogLine(`Print execution error: ${err.message}`);
+          setTimeout(() => {
+            try { if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath); } catch {}
+          }, 3000);
+        });
       }
-      exec(`${printCmd} "${tmpFile}"`, (err) => {
-        if (err) appendLogLine(`Print execution error: ${err.message}`);
-      });
-    } catch (err) {
-      appendLogLine(`Print setup error: ${err.message}`);
-    } finally {
-      setTimeout(() => {
-        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
-      }, 1000);
     }
-
   } catch (err) {
     appendLogLine(`Receipt process error: ${err.message}`);
   }
