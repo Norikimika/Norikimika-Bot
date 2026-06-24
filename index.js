@@ -1163,6 +1163,35 @@ async function analyzeWithGroq(base64Image) {
   return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
 }
 
+async function analyzeWithOpenRouter(base64Image) {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      "HTTP-Referer": process.env.OPENROUTER_SITE_URL ?? "",
+      "X-Title": process.env.OPENROUTER_SITE_NAME ?? "",
+    },
+    body: JSON.stringify({
+      model: process.env.OPENROUTER_VISION_MODEL ?? "openrouter/auto",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
+          { type: "text", text: RECEIPT_PROMPT },
+        ],
+      }],
+      max_tokens: 1000,
+    }),
+  });
+
+  if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}`);
+
+  const data = await res.json();
+  const raw = data?.choices?.[0]?.message?.content ?? "{}";
+  return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
+}
+
 async function analyzeReceipt(base64Image) {
   try {
     const result = await analyzeWithGemini(base64Image);
@@ -1177,7 +1206,15 @@ async function analyzeReceipt(base64Image) {
     appendLogLine("Vision: Groq OK");
     return result;
   } catch (err) {
-    throw new Error(`Both providers failed — Groq: ${err.message}`);
+    appendLogLine(`Vision: Groq failed (${err.message}), trying OpenRouter…`);
+  }
+
+  try {
+    const result = await analyzeWithOpenRouter(base64Image);
+    appendLogLine("Vision: OpenRouter OK");
+    return result;
+  } catch (err) {
+    throw new Error(`All providers failed — OpenRouter: ${err.message}`);
   }
 }
 
