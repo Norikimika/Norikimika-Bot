@@ -1,5 +1,6 @@
 const cron = require("node-cron");
 const { exec, spawn } = require("child_process");
+const escapeHTML = require("escape-html");
 
 module.exports = function ({
   bot,
@@ -7,8 +8,11 @@ module.exports = function ({
   appendLogLine,
   TOPIC_ID_USAGE,
   TOPIC_ID_STATUS,
+  TOPIC_ID_SPEED,
   CHAT_ID,
 }) {
+  
+  // ================== USAGE REPORT ==================
   async function sendUsageReport() {
     return new Promise((resolve) => {
       const vnstat = spawn("vnstat", ["--json"]);
@@ -99,6 +103,7 @@ module.exports = function ({
     });
   }
 
+  // ================== BATTERY LEVEL ==================
   let battery80Sent = false;
   let battery20Sent = false;
 
@@ -152,6 +157,44 @@ module.exports = function ({
     });
   }
 
-  cron.schedule("0 0 * * *", sendUsageReport);
+  // ================== AUTO SPEEDTEST ==================
+  async function runAutoSpeedtest() {
+    exec("speedtest-go --json", async (error, stdout) => {
+      if (error) {
+        appendLogLine(`Scheduled speedtest failed: ${error.message}`);
+        return;
+      }
+
+      try {
+        const result = JSON.parse(stdout);
+
+        const isp = result.user_info?.Isp || "Unknown";
+        const server = result.servers?.[0]?.name || "Unknown";
+        const country = result.servers?.[0]?.country || "-";
+        const sponsor = result.servers?.[0]?.sponsor || "Unknown";
+        const latency = (result.servers?.[0]?.latency || 0) / 1e6;
+        const download = (result.servers?.[0]?.dl_speed || 0) / 125000;
+        const upload = (result.servers?.[0]?.ul_speed || 0) / 125000;
+
+        const summary = `<b>⚡ Speed Test Result</b>\n<blockquote>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(sponsor)}\nCountry : ${escapeHTML(server)} ${escapeHTML(country)}\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</blockquote>`;
+
+        await safeSend(bot, CHAT_ID, summary.trim(), {
+          parse_mode: "HTML",
+          message_thread_id: TOPIC_ID_SPEED,
+        });
+
+      } catch (e) {
+        appendLogLine(`Scheduled speedtest JSON parse failed: ${e.message}`);
+      }
+    });
+  }
+
+  // ================== SCHEDULER ==================
+  cron.schedule("0 0 * * *", sendUsageReport, {
+    scheduled: true
+  });
+  cron.schedule("0 0,12 * * *", runAutoSpeedtest, {
+    scheduled: true
+  });
   cron.schedule("* * * * *", checkBatteryLevel);
 };

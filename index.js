@@ -43,6 +43,7 @@ const TOPIC_ID = parseInt(process.env.TOPIC_ID);
 const TOPIC_ID_USAGE = parseInt(process.env.TOPIC_ID_USAGE);
 const TOPIC_ID_MUSIC = parseInt(process.env.TOPIC_ID_MUSIC);
 const TOPIC_ID_STATUS = parseInt(process.env.TOPIC_ID_STATUS);
+const TOPIC_ID_SPEED = parseInt(process.env.TOPIC_ID_SPEED);
 
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
@@ -1484,6 +1485,7 @@ startMonitor({
   appendLogLine,
   TOPIC_ID_USAGE,
   TOPIC_ID_STATUS,
+  TOPIC_ID_SPEED,
   CHAT_ID,
 });
 
