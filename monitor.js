@@ -14,6 +14,8 @@ module.exports = function ({
   
   // ================== USAGE REPORT ==================
   async function sendUsageReport() {
+    appendLogLine("Running scheduled daily usage...");
+
     return new Promise((resolve) => {
       const vnstat = spawn("vnstat", ["--json"]);
 
@@ -159,6 +161,8 @@ module.exports = function ({
 
   // ================== AUTO SPEEDTEST ==================
   async function runAutoSpeedtest() {
+    appendLogLine("Running scheduled speedtest...");
+
     exec("speedtest-go --json", async (error, stdout) => {
       if (error) {
         appendLogLine(`Scheduled speedtest failed: ${error.message}`);
