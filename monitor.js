@@ -109,6 +109,20 @@ module.exports = function ({
   let battery80Sent = false;
   let battery20Sent = false;
 
+  let lastStatus = "UNKNOWN";
+  let chargeStartTime = Date.now(); 
+  let useStartTime = Date.now(); 
+
+  function formatDuration(startTime) {
+    if (!startTime) return "0h 0m 0s";
+    const diffMs = Date.now() - startTime;
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+
   async function checkBatteryLevel() {
     exec("termux-battery-status", async (error, stdout) => {
       if (error) {
@@ -120,19 +134,34 @@ module.exports = function ({
         const data = JSON.parse(stdout);
 
         const level = data.percentage;
-        const status = data.status;
+        const status = data.status.toUpperCase();
         const temperature = Math.round(data.temperature);
+
+        if (status === "CHARGING" || status === "FULL") {
+          if (lastStatus === "DISCHARGING" || lastStatus === "NOT_CHARGING") {
+            chargeStartTime = Date.now();
+          }
+        } else if (status === "DISCHARGING" || status === "NOT_CHARGING") {
+          if (lastStatus === "CHARGING" || lastStatus === "FULL") {
+            useStartTime = Date.now();
+          }
+        }
+
+        if (status !== "UNKNOWN") {
+          lastStatus = status;
+        }
 
         if (level < 80) battery80Sent = false;
         if (level > 20) battery20Sent = false;
 
         if (level >= 80 && !battery80Sent) {
           battery80Sent = true;
+          const chargeDuration = formatDuration(chargeStartTime);
 
           await safeSend(
             bot,
             CHAT_ID,
-            `<b>🔋 Battery Fully Charged</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
+            `<b>🔋 Battery Fully Charged</b>\n<blockquote>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C\nDuration : ${chargeDuration}</blockquote>`,
             {
               parse_mode: "HTML",
               message_thread_id: TOPIC_ID_STATUS,
@@ -142,11 +171,12 @@ module.exports = function ({
 
         if (level <= 20 && !battery20Sent) {
           battery20Sent = true;
+          const usageDuration = formatDuration(useStartTime);
 
           await safeSend(
             bot,
             CHAT_ID,
-            `<b>🪫 Low Battery Warning</b>\n<pre>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C</pre>`,
+            `<b>🪫 Low Battery Warning</b>\n<blockquote>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C\nDuration : ${usageDuration}</blockquote>`,
             {
               parse_mode: "HTML",
               message_thread_id: TOPIC_ID_STATUS,
