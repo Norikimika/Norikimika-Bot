@@ -1036,6 +1036,7 @@ async function buildStrukImage(struk) {
 
   const normalSize = parseInt(STRUK_FONTSIZE, 10);
   const smallSize = Math.max(9, normalSize - 4);
+  const largeSize = normalSize + 8;
   const base = `-background white -fill black -font "${STRUK_FONT}"`;
 
   const getDim = async (file, fmt) => {
@@ -1046,7 +1047,7 @@ async function buildStrukImage(struk) {
   };
 
   try {
-    await execPromise(`magick ${base} -pointsize ${normalSize} label:@${files.nameTxt} "${files.namePng}"`);
+    await execPromise(`magick ${base} -pointsize ${largeSize} label:@${files.nameTxt} "${files.namePng}"`);
     await execPromise(`magick ${base} -pointsize ${smallSize}  label:@${files.addrTxt} "${files.addrPng}"`);
     await execPromise(`magick ${base} -pointsize ${normalSize} label:@${files.bodyTxt} "${files.bodyPng}"`);
 
@@ -1054,22 +1055,28 @@ async function buildStrukImage(struk) {
     const nameH = (await getDim(files.namePng, '%h')) || 40;
     const addrH = (await getDim(files.addrPng, '%h')) || 30;
 
+    const nameW = await getDim(files.namePng, '%w');
+    const canvasW = Math.max(bodyW, nameW + 20); 
+
     await execPromise(
-      `magick -size ${bodyW}x${nameH} xc:white` +
+      `magick -size ${canvasW}x${nameH} xc:white` +
       ` "${files.namePng}" -gravity Center -composite "${files.nameExtPng}"`
     );
     await execPromise(
-      `magick -size ${bodyW}x${addrH} xc:white` +
+      `magick -size ${canvasW}x${addrH} xc:white` +
       ` "${files.addrPng}" -gravity Center -composite "${files.addrExtPng}"`
     );
-
     await execPromise(
-      `magick "${files.nameExtPng}" "${files.addrExtPng}" "${files.bodyPng}"` +
+      `magick -size ${canvasW}x${await getDim(files.bodyPng, '%h')} xc:white` +
+      ` "${files.bodyPng}" -gravity Center -composite "body_centered_${id}.png"`
+    );
+    await execPromise(
+      `magick "${files.nameExtPng}" "${files.addrExtPng}" "body_centered_${id}.png"` +
       ` -append -bordercolor white -border 25x20 "${files.outPng}"`
     );
   } finally {
-    ['nameTxt','addrTxt','bodyTxt','namePng','addrPng','bodyPng','nameExtPng','addrExtPng']
-      .forEach(k => { try { fs.unlinkSync(files[k]); } catch {} });
+    ['nameTxt','addrTxt','bodyTxt','namePng','addrPng','bodyPng','nameExtPng','addrExtPng', `body_centered_${id}.png`]
+      .forEach(k => { try { fs.unlinkSync(files[k] || k); } catch {} });
   }
 
   return files.outPng;
