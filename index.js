@@ -1512,7 +1512,6 @@ async function loop() {
   try {
     await runRepo();
   } catch (err) {
-    console.error(`❌ Error: ${err.message}`);
     appendLogLine(`Repo Error: ${err.message}`);
   }
   setTimeout(loop, 10000);
