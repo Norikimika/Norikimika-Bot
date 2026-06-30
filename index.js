@@ -40,10 +40,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 const CHAT_ID = parseInt(process.env.CHAT_ID);
 const TOPIC_ID = parseInt(process.env.TOPIC_ID);
-const TOPIC_ID_USAGE = parseInt(process.env.TOPIC_ID_USAGE);
 const TOPIC_ID_MUSIC = parseInt(process.env.TOPIC_ID_MUSIC);
-const TOPIC_ID_STATUS = parseInt(process.env.TOPIC_ID_STATUS);
-const TOPIC_ID_SPEED = parseInt(process.env.TOPIC_ID_SPEED);
 
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
@@ -1505,8 +1502,10 @@ bot.launch()
     appendLogLine(`Failed to launch bot: ${err.message}`);
   });
 
-// ================== REPOSITORY UPDATE ==================
+// ================== EXPORT ==================
 const runRepo = require('./repo.js');
+const runMonitor = require('./monitor.js');
+const runNotification = require('./notification.js');
 
 async function loop() {
   try {
@@ -1514,25 +1513,9 @@ async function loop() {
   } catch (err) {
     appendLogLine(`Repo Error: ${err.message}`);
   }
-  setTimeout(loop, 10000);
+  setTimeout(loop, 300000);
 }
 
 loop();
-
-// ================== MONITOR STAT ==================
-const startMonitor = require("./monitor.js");
-
-startMonitor({
-  bot,
-  safeSend,
-  appendLogLine,
-  TOPIC_ID_USAGE,
-  TOPIC_ID_STATUS,
-  TOPIC_ID_SPEED,
-  CHAT_ID,
-});
-
-const { NotificationMonitor, CONFIG, jsonPath } = require('./notification.js');
-
-const Notmonitor = new NotificationMonitor(CONFIG, jsonPath);
-Notmonitor.monitor();
+runMonitor();
+runNotification();

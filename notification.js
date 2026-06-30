@@ -1,12 +1,19 @@
+// ====================== CONFIG ======================
+require('dotenv').config();
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync, execFile } = require('child_process');
 
+// ====== Paths ======
 const homeDir = os.homedir();
 const envPath = path.join(homeDir, "SERVER/LogError404Bot/.env");
 const jsonPath = path.join(homeDir, "SERVER/Backup/notification.json");
+const logDir = path.join(homeDir, "SERVER/Backup");
+const logFile = path.join(logDir, "notification.log");
 
+// ====== Env Setup ======
 if (!fs.existsSync(envPath)) {
     console.error(`.env not found: ${envPath}`);
     process.exit(1);
@@ -18,6 +25,7 @@ try {
 
 require('dotenv').config({ path: envPath });
 
+// ====== Configuration ======
 const CONFIG = {
     telegram_bot_token: process.env.BOT_TOKEN,
     telegram_chat_id: process.env.CHAT_ID,
@@ -57,6 +65,7 @@ const CONFIG = {
     telegram_retry_backoff: 2
 };
 
+// Validate Required Configs
 const REQUIRED = ["telegram_bot_token", "telegram_chat_id"];
 for (const r of REQUIRED) {
     if (!CONFIG[r]) {
@@ -65,9 +74,18 @@ for (const r of REQUIRED) {
     }
 }
 
-const logDir = path.join(homeDir, "SERVER/Backup");
+// ====== Logger ======
 fs.mkdirSync(logDir, { recursive: true });
-const logFile = path.join(logDir, "notification.log");
+
+function log(level, message) {
+    const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const formatted = `${ts} [${level}] ${message}`;
+    try {
+        fs.appendFileSync(logFile, formatted + '\n', 'utf8');
+    } catch (err) {
+        console.error("Failed to write log:", err.message);
+    }
+}
 
 const logger = {
     info: (msg) => log("INFO", msg),
@@ -77,14 +95,9 @@ const logger = {
     exception: (msg, err) => log("ERROR", `${msg} ${err ? err.stack || err.message : ""}`)
 };
 
-function log(level, message) {
-    const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const formatted = `${ts} [${level}] ${message}`;
-    fs.appendFileSync(logFile, formatted + '\n', 'utf8');
-}
-
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ====================== MONITOR CLASS ======================
 class NotificationMonitor {
     constructor(config, jsonPath) {
         this.config = config;
@@ -499,7 +512,7 @@ class NotificationMonitor {
                         this.mark_notification_sent(pkg, n.title, n.text, n.timestamp);
 
                         if (this.config.monitored_packages[pkg].tts_enabled) {
-                            // this.stop_media_playback();
+                            this.stop_media_playback();
                             await this.speak_notification(n.title, n.text);
                         }
                         logger.info("Sent & marked");
@@ -523,8 +536,14 @@ class NotificationMonitor {
     }
 }
 
-module.exports = {
-    NotificationMonitor,
-    CONFIG,
-    jsonPath
-};
+// ====================== MAIN EXPORT ======================
+function startNotificationMonitor() {
+    logger.info("Initializing Notification Monitor Service...");
+    const monitorInstance = new NotificationMonitor(CONFIG, jsonPath);
+
+    monitorInstance.monitor().catch(err => {
+        logger.error(`Monitor service encountered a fatal error: ${err.message}`);
+    });
+}
+
+module.exports = startNotificationMonitor;
