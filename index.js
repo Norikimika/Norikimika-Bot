@@ -88,14 +88,35 @@ async function safeEditMessageText(ctx, text, options = {}, retries = DEFAULT_RE
   return false;
 }
 
-async function safeAnswerCbQuery(ctx, text, options = {}, retries = DEFAULT_RETRIES) {
+async function safeAnswerCbQuery(
+  ctx,
+  text = "",
+  options = {},
+  retries = DEFAULT_RETRIES
+) {
+  if (!ctx?.callbackQuery?.id) return false;
   for (let i = 0; i <= retries; i++) {
     try {
       await ctx.answerCbQuery(text, options);
       return true;
     } catch (err) {
-      appendLogLine(`safeAnswerCbQuery error (chat ${ctx.chat?.id || "unknown"}): ${err && (err.stack || err.message)}`);
-      if (i < retries) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+      const desc = err?.description || err?.message || "";
+      if (
+        desc.includes("query is too old") ||
+        desc.includes("query ID is invalid")
+      ) {
+        return false;
+      }
+      appendLogLine(
+        `safeAnswerCbQuery error (chat ${
+          ctx.chat?.id || "unknown"
+        }): ${err.stack || err.message}`
+      );
+      if (i < retries) {
+        await new Promise((r) =>
+          setTimeout(r, DEFAULT_RETRY_DELAY)
+        );
+      }
     }
   }
   return false;
