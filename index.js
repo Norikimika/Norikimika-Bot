@@ -1430,6 +1430,32 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, adminOnly, async (ctx) => {
   }
 });
 
+// ================== APPROVE ==================
+bot.hears(/^\/approve/i, topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+
+  exec(
+    "su -c \"input tap 150 1260 && sleep 2 && input tap 880 1435\"",
+    async (error, stdout, stderr) => {
+      if (stdout) appendLogLine(stdout);
+      if (stderr) appendLogLine(stderr);
+
+      if (error) {
+        appendLogLine(`Approve failed: ${error.message}`);
+        return safeReply(ctx, "❌ Failed to run approve", {
+          reply_to_message_id: ctx.message?.message_id,
+          message_thread_id: threadId,
+        });
+      }
+
+      return safeReply(ctx, "✅ Approve executed", {
+        reply_to_message_id: ctx.message?.message_id,
+        message_thread_id: threadId,
+      });
+    }
+  );
+});
+
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
@@ -1442,6 +1468,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> <code>/ask [prompt]</code>\n" +
       "-> <code>/ask -s [prompt]</code></blockquote>\n" +
       "<b>🤖 Admin Commands</b>\n" +
+      "<blockquote><b>✹ Approve</b>\n" +
+      "-> /approve</blockquote>\n" +
       "<blockquote><b>✹ Battery Status</b>\n" +
       "-> /battery</blockquote>\n" +
       "<blockquote><b>✹ Download Music</b>\n" +
