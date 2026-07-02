@@ -71,6 +71,21 @@ const GITHUB_REPOS = [
     owner: "tiann",
     repo: "KernelSU",
     branch: "main"
+  },
+  {
+    owner: "canaria3406",
+    repo: "hoyolab-auto-sign",
+    branch: "main"
+  },
+  {
+    owner: "5ec1cff",
+    repo: "TrickyStore",
+    branch: "release"
+  },
+  {
+    owner: "KOWX712",
+    repo: "PlayIntegrityFix",
+    branch: "inject_s"
   }
 ];
 
@@ -88,7 +103,7 @@ const TELEGRAM_CHAT_ID = process.env.CHAT_ID;
 const TELEGRAM_TOPIC_ID = process.env.TOPIC_ID_UPDATE;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITLAB_TOKEN = process.env.GITLAB_TOKEN;
-const ARROW = "_\\-\\>_";
+const ARROW = "<i>-&gt;</i>";
 
 // ====== State File ======
 const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.json');
@@ -134,8 +149,12 @@ function saveState(state) {
   fs.renameSync(tmp, STATE_FILE);
 }
 
-function escapeMarkdownV2(text) {
-  return text.replace(/([_*\[\]()~`>#+\-=\|{}.!])/g, '\\$1');
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 async function sendToTelegram(message) {
@@ -143,7 +162,7 @@ async function sendToTelegram(message) {
   const payload = {
     chat_id: TELEGRAM_CHAT_ID,
     text: message,
-    parse_mode: "MarkdownV2",
+    parse_mode: "HTML",
     message_thread_id: TELEGRAM_TOPIC_ID,
     disable_web_page_preview: true
   };
@@ -218,7 +237,7 @@ async function checkGithubUpdates(state) {
         const actionsData = await actionsResp.json();
         const run = actionsData.workflow_runs.find(r => r.head_sha === latestSha);
         if (run) {
-          actionsText = "*✹ Workflow*\n" + ARROW + ` _[Run](${run.html_url})_`;
+          actionsText = "<b>✹ Workflow</b>\n" + ARROW + ` <i><a href="${escapeHtml(run.html_url)}">Run</a></i>`;
         }
       }
     } catch (e) {
@@ -236,8 +255,8 @@ async function checkGithubUpdates(state) {
         const lastReleaseId = state[releaseIdKey];
 
         if (latestReleaseId && latestReleaseId !== lastReleaseId) {
-          const name = escapeMarkdownV2(releaseData.name || releaseData.tag_name);
-          releaseText = "*✹ Release*\n" + ARROW + ` _[${name}](${releaseData.html_url})_`;
+          const name = escapeHtml(releaseData.name || releaseData.tag_name);
+          releaseText = "<b>✹ Release</b>\n" + ARROW + ` <i><a href="${escapeHtml(releaseData.html_url)}">${name}</a></i>`;
         }
       }
     } catch (e) {
@@ -251,17 +270,17 @@ async function checkGithubUpdates(state) {
     }
 
     const message = [
-      "*🎉 GitHub Update Detected*",
-      "*✹ Username*",
-      `${ARROW} _${escapeMarkdownV2(repo.owner)}_`,
-      "*✹ Repository*",
-      `${ARROW} _${escapeMarkdownV2(repo.repo)}_`,
-      "*✹ Branch*",
-      `${ARROW} _${escapeMarkdownV2(repo.branch)}_`,
-      repo.path ? "*✹ Path*\n" + ARROW + " _" + escapeMarkdownV2(repo.path) + "_" : "",
-      "*✹ Commit*",
-      "```\n" + escapeMarkdownV2(commitMessage) + "```",
-      `${ARROW} _[View](${latestCommit.html_url})_`,
+      "<b>🎉 GitHub Update Detected</b>",
+      "<b>✹ Username</b>",
+      `${ARROW} <i>${escapeHtml(repo.owner)}</i>`,
+      "<b>✹ Repository</b>",
+      `${ARROW} <i><a href="${escapeHtml(`https://github.com/${repo.owner}/${repo.repo}`)}">${escapeHtml(repo.repo)}</a></i>`,
+      "<b>✹ Branch</b>",
+      `${ARROW} <i>${escapeHtml(repo.branch)}</i>`,
+      repo.path ? "<b>✹ Path</b>\n" + ARROW + " <i>" + escapeHtml(repo.path) + "</i>" : "",
+      "<b>✹ Commit</b>",
+      "<blockquote>" + escapeHtml(commitMessage) + "</blockquote>",
+      `${ARROW} <i><a href="${escapeHtml(latestCommit.html_url)}">View</a></i>`,
       actionsText,
       releaseText,
     ].filter(Boolean).join("\n");
@@ -345,16 +364,16 @@ async function checkGitlabUpdates(state) {
       if (latestSha !== lastSha) {
         const commitUrl = latestCommit.web_url || `https://gitlab.com/${repo.owner}/${repo.repo}/-/commit/${latestSha}`;
         const message =
-          "*🎉 GitLab Update Detected*\n" +
-          "*✹ Username*\n" +
-          ARROW + " _" + escapeMarkdownV2(repo.owner) + "_\n" +
-          "*✹ Repository*\n" +
-          ARROW + " _" + escapeMarkdownV2(repo.repo) + "_\n" +
-          "*✹ Branch*\n" +
-          ARROW + " _" + escapeMarkdownV2(branch) + "_\n" +
-          "*✹ Commit*\n" +
-          "```\n" + escapeMarkdownV2(commitMessage) + "\n```" +
-          ARROW + ` _[View](${commitUrl})_`;
+          "<b>🎉 GitLab Update Detected</b>\n" +
+          "<b>✹ Username</b>\n" +
+          ARROW + " <i>" + escapeHtml(repo.owner) + "</i>\n" +
+          "<b>✹ Repository</b>\n" +
+          ARROW + ` <i><a href="${escapeHtml(`https://gitlab.com/${repo.owner}/${repo.repo}`)}">${escapeHtml(repo.repo)}</a></i>\n` +
+          "<b>✹ Branch</b>\n" +
+          ARROW + " <i>" + escapeHtml(branch) + "</i>\n" +
+          "<b>✹ Commit</b>\n" +
+          "<blockquote>" + escapeHtml(commitMessage) + "</blockquote>" +
+          ARROW + ` <i><a href="${escapeHtml(commitUrl)}">View</a></i>`;
 
         try {
           await sendToTelegram(message);
