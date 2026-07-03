@@ -1284,7 +1284,7 @@ bot.on("photo", adminOnly, async (ctx) => {
 
     if (parsed.nominal) {
       parsed.nominal = Number(
-        parsed.nominal.replace(/[^\d]/g, '')
+        String(parsed.nominal).replace(/[^\d]/g, '')
       ).toLocaleString('id-ID');
     }
 
