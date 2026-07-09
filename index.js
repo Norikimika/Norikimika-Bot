@@ -1497,26 +1497,6 @@ bot.on("text", async (ctx, next) => {
 
   if (threadId !== TOPIC_ID) return next();
 
-  const session = buySessions[chatId];
-  if (session && session.process) {
-    const replied = ctx.message?.reply_to_message;
-    if (replied && replied.from?.id === ctx.botInfo.id) {
-      try {
-        const admins = await ctx.telegram.getChatAdministrators(chatId);
-        const isAdmin = admins.some((a) => a.user.id === userId);
-        if (!isAdmin) return;
-
-        if (text && !text.startsWith("/")) {
-          session.process.stdin.write(text + "\n");
-          resetTimeout(chatId, ctx);
-          return;
-        }
-      } catch (err) {
-        console.error("buy-forwarder error:", err);
-      }
-    }
-  }
-
   if (!text.startsWith("/")) {
     try {
       const admins = await ctx.telegram.getChatAdministrators(chatId);
@@ -1538,6 +1518,11 @@ bot.on("text", async (ctx, next) => {
     }
   }
   return next();
+});
+
+// ================== GLOBAL ERROR HANDLER ==================
+bot.catch((err, ctx) => {
+  appendLogLine(`Bot error for update ${ctx.update?.update_id}: ${err && (err.stack || err.message)}`);
 });
 
 // ================== LAUNCH BOT ==================
