@@ -321,12 +321,12 @@ bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== AI ==================
-bot.command("ask", async (ctx) => {
+bot.command("a", async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   if (threadId !== TOPIC_ID) return;
 
   const text = ctx.message.text?.trim();
-  let argPrompt = text.replace(/^\/ask(@\w+)?\s*/i, "").trim();
+  let argPrompt = text.replace(/^\/a(@\w+)?\s*/i, "").trim();
   let replyText = ctx.message.reply_to_message?.text?.trim();
 
   const useSearch = /^-s\b/i.test(argPrompt);
@@ -1465,8 +1465,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
     ctx,
       "<b>🤖 Public Commands</b>\n" +
       "<blockquote><b>✹ Ask AI</b>\n" +
-      "-> <code>/ask [prompt]</code>\n" +
-      "-> <code>/ask -s [prompt]</code></blockquote>\n" +
+      "-> <code>/a [prompt]</code>\n" +
+      "-> <code>/a -s [prompt]</code></blockquote>\n" +
       "<blockquote><b>✹ Price List</b>\n" +
       "-> <code>/p [name]</code></blockquote>\n" +
       "<b>⚠️ Admin Commands</b>\n" +
