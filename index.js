@@ -41,6 +41,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const CHAT_ID = parseInt(process.env.CHAT_ID);
 const TOPIC_ID = parseInt(process.env.TOPIC_ID);
 const TOPIC_ID_MUSIC = parseInt(process.env.TOPIC_ID_MUSIC);
+const TOPIC_ID_MUSIC2 = parseInt(process.env.TOPIC_ID_MUSIC2);
 
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
@@ -599,7 +600,7 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
       return;
     } catch (err) {
       if (err.description && err.description.includes("message is not modified")) {
-        return; 
+        return;
       }
       appendLogLine(`updateMusicStatus error: ${err.message}`);
       if (i < DEFAULT_RETRIES) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
@@ -607,10 +608,10 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
   }
 }
 
-bot.command("music", topicOnly, adminOnly, async (ctx) => {
+async function handleMusicCommand(ctx, targetTopicId) {
   const threadId = ctx.message?.message_thread_id;
   const text = ctx.message.text?.trim() || "";
-  const query = text.replace(/^\/music(@\w+)?\s*/i, "").trim();
+  const query = text.replace(/^\/music2?(@\w+)?\s*/i, "").trim();
 
   if (!query) {
     return safeReply(ctx, "❌ Please provide a song title or YouTube link.", {
@@ -622,7 +623,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   try {
     const ytArgs = ["-f", "251", "-j", query.startsWith("http") ? query : `ytsearch1:${query}`];
     const { stdout } = await execFilePromise("yt-dlp", ytArgs);
-    
+
     const info = JSON.parse(stdout);
 
     const title = info.track || info.title || "Unknown Title";
@@ -651,7 +652,7 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
         title,
         performer,
         duration: info.duration,
-        message_thread_id: TOPIC_ID_MUSIC,
+        message_thread_id: targetTopicId,
       };
 
       if (fs.existsSync(thumbFile)) {
@@ -672,7 +673,10 @@ bot.command("music", topicOnly, adminOnly, async (ctx) => {
   } catch (e) {
     return safeReply(ctx, "❌ Failed to fetch music.");
   }
-});
+}
+
+bot.command("music", topicOnly, adminOnly, (ctx) => handleMusicCommand(ctx, TOPIC_ID_MUSIC));
+bot.command("music2", topicOnly, adminOnly, (ctx) => handleMusicCommand(ctx, TOPIC_ID_MUSIC2));
 
 // ================== HELPERS ==================
 function buildVolumeText(target) {
@@ -1475,7 +1479,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "<blockquote><b>✹ Battery Status</b>\n" +
       "-> /battery</blockquote>\n" +
       "<blockquote><b>✹ Download Music</b>\n" +
-      "-> <code>/music [title]</code></blockquote>\n" +
+      "-> <code>/music [title]</code>\n" +
+      "-> <code>/music2 [title]</code></blockquote>\n" +
       "<blockquote><b>✹ Data Usage</b>\n" +
       "-> /usage</blockquote>\n" +
       "<blockquote><b>✹ Playback Controller</b>\n" +
