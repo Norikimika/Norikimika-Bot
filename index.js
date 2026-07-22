@@ -1192,33 +1192,48 @@ async function analyzeWithGroq(base64Image) {
   return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
 }
 
-async function analyzeWithOpenRouter(base64Image) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+async function analyzeWithNVIDIA(base64Image) {
+  const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      "HTTP-Referer": process.env.OPENROUTER_SITE_URL ?? "",
-      "X-Title": process.env.OPENROUTER_SITE_NAME ?? "",
+      Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
     },
     body: JSON.stringify({
-      model: process.env.OPENROUTER_VISION_MODEL ?? "openrouter/auto",
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
-          { type: "text", text: RECEIPT_PROMPT },
-        ],
-      }],
+      model: process.env.NVIDIA_VISION_MODEL ?? "meta/llama-3.2-90b-vision-instruct",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+              },
+            },
+            {
+              type: "text",
+              text: RECEIPT_PROMPT,
+            },
+          ],
+        },
+      ],
       max_tokens: 1000,
+      temperature: 0,
     }),
   });
 
-  if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`NVIDIA HTTP ${res.status}: ${err}`);
+  }
 
   const data = await res.json();
   const raw = data?.choices?.[0]?.message?.content ?? "{}";
-  return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
+
+  return JSON.parse(
+    raw.replace(/```(?:json)?\n?|```/g, "").trim()
+  );
 }
 
 async function analyzeReceipt(base64Image) {
@@ -1235,15 +1250,15 @@ async function analyzeReceipt(base64Image) {
     appendLogLine("Vision: Groq OK");
     return result;
   } catch (err) {
-    appendLogLine(`Vision: Groq failed (${err.message}), trying OpenRouter…`);
+    appendLogLine(`Vision: Groq failed (${err.message}), trying NVIDIA…`);
   }
 
   try {
-    const result = await analyzeWithOpenRouter(base64Image);
-    appendLogLine("Vision: OpenRouter OK");
+    const result = await analyzeWithNVIDIA(base64Image);
+    appendLogLine("Vision: NVIDIA OK");
     return result;
   } catch (err) {
-    throw new Error(`All providers failed — OpenRouter: ${err.message}`);
+    throw new Error(`All providers failed — NVIDIA: ${err.message}`);
   }
 }
 
