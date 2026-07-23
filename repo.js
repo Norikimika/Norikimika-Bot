@@ -86,6 +86,11 @@ const GITHUB_REPOS = [
     owner: "KOWX712",
     repo: "PlayIntegrityFix",
     branch: "inject_s"
+  },
+  {
+    owner: "yt-dlp",
+    repo: "yt-dlp",
+    branch: "master"
   }
 ];
 
