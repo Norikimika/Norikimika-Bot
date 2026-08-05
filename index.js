@@ -322,9 +322,145 @@ bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== AI ==================
+const { Client, GatewayIntentBits } = require("discord.js");
+
+const discordClient = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+discordClient.login(process.env.DISCORD_BOT_TOKEN);
+
+function chunkText(text, maxLength) {
+  if (!text) return [];
+  return text.match(new RegExp(`.{1,${maxLength}}`, "gs")) || [text];
+}
+
+async function fetchSearchContext(query) {
+  if (!process.env.TAVILY_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: process.env.TAVILY_API_KEY,
+        query,
+        max_results: 5,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.results?.length) return null;
+    return data.results
+      .map((r, i) => `[${i + 1}] ${r.title}\n${r.content}\nURL: ${r.url}`)
+      .join("\n\n");
+  } catch {
+    return null;
+  }
+}
+
+function buildSearchPrompt(userPrompt, searchContext) {
+  if (!searchContext) return userPrompt;
+  return (
+    `You are a helpful assistant with access to recent web search results.\n\n` +
+    `Search Results:\n${searchContext}\n\n` +
+    `User Question: ${userPrompt}\n\n` +
+    `Answer based on the search results above. Cite sources where relevant.`
+  );
+}
+
+async function processAiRequest(prompt, useSearch) {
+  const searchContext = useSearch ? await fetchSearchContext(prompt) : null;
+  const enhancedPrompt = buildSearchPrompt(prompt, searchContext);
+
+  let rawText = null;
+
+  try {
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_API_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: enhancedPrompt }] }],
+          ...(useSearch && { tools: [{ google_search: {} }] }),
+        }),
+      }
+    );
+
+    if (!geminiRes.ok) throw new Error(`Gemini HTTP ${geminiRes.status}`);
+    const geminiData = await geminiRes.json();
+    rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    if (!rawText) throw new Error("Gemini empty response");
+
+    return rawText;
+  } catch (geminiError) {
+    appendLogLine(`Gemini Failed: ${geminiError.message}`);
+  }
+
+  try {
+    const groqRes = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
+          messages: [{ role: "user", content: enhancedPrompt }],
+          temperature: 0.7,
+        }),
+      }
+    );
+
+    if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
+    const groqData = await groqRes.json();
+    rawText = groqData?.choices?.[0]?.message?.content || null;
+    if (!rawText) throw new Error("Groq empty response");
+
+    return rawText;
+  } catch (groqError) {
+    appendLogLine(`Groq Failed: ${groqError.message}`);
+  }
+
+  try {
+    const nvidiaRes = await fetch(
+      "https://integrate.api.nvidia.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: process.env.NVIDIA_API_MODEL || "openai/gpt-oss-120b",
+          messages: [{ role: "user", content: enhancedPrompt }],
+          temperature: 0.7,
+          max_tokens: 1024,
+        }),
+      }
+    );
+
+    if (!nvidiaRes.ok) throw new Error(`NVIDIA HTTP ${nvidiaRes.status}`);
+    const nvidiaData = await nvidiaRes.json();
+    rawText = nvidiaData?.choices?.[0]?.message?.content || null;
+    if (!rawText) throw new Error("NVIDIA empty response");
+
+    return rawText;
+  } catch (nvidiaError) {
+    appendLogLine(`NVIDIA Failed: ${nvidiaError.message}`);
+    throw new Error("Semua provider AI gagal memproses permintaan.");
+  }
+}
+
 bot.command("a", async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
-  if (threadId !== TOPIC_ID) return;
+  if (TOPIC_ID && threadId !== TOPIC_ID) return;
 
   const text = ctx.message.text?.trim();
   let argPrompt = text.replace(/^\/a(@\w+)?\s*/i, "").trim();
@@ -345,116 +481,9 @@ bot.command("a", async (ctx) => {
     });
   }
 
-  async function fetchSearchContext(query) {
-    if (!process.env.TAVILY_API_KEY) return null;
-    try {
-      const res = await fetch("https://api.tavily.com/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          api_key: process.env.TAVILY_API_KEY,
-          query,
-          max_results: 5,
-        }),
-      });
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (!data?.results?.length) return null;
-      return data.results
-        .map((r, i) => `[${i + 1}] ${r.title}\n${r.content}\nURL: ${r.url}`)
-        .join("\n\n");
-    } catch {
-      return null;
-    }
-  }
-
-  function buildSearchPrompt(userPrompt, searchContext) {
-    if (!searchContext) return userPrompt;
-    return (
-      `You are a helpful assistant with access to recent web search results.\n\n` +
-      `Search Results:\n${searchContext}\n\n` +
-      `User Question: ${userPrompt}\n\n` +
-      `Answer based on the search results above. Cite sources where relevant.`
-    );
-  }
-
   try {
-    let rawText;
-
-    const searchContext = useSearch ? await fetchSearchContext(prompt) : null;
-    const enhancedPrompt = buildSearchPrompt(prompt, searchContext);
-
-    try {
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_API_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: enhancedPrompt }] }],
-            ...(useSearch && { tools: [{ google_search: {} }] }),
-          }),
-        }
-      );
-
-      if (!geminiRes.ok) throw new Error(`Gemini HTTP ${geminiRes.status}`);
-      const geminiData = await geminiRes.json();
-      rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-      if (!rawText) throw new Error("Gemini empty response");
-
-    } catch (geminiError) {
-      appendLogLine(`Gemini Failed: ${geminiError.message}`);
-
-      try {
-        const groqRes = await fetch(
-          "https://api.groq.com/openai/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
-              messages: [{ role: "user", content: enhancedPrompt }],
-              temperature: 0.7,
-            }),
-          }
-        );
-
-        if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
-        const groqData = await groqRes.json();
-        rawText = groqData?.choices?.[0]?.message?.content || null;
-        if (!rawText) throw new Error("Groq empty response");
-
-      } catch (groqError) {
-        appendLogLine(`Groq Failed: ${groqError.message}`);
-
-        const nvidiaRes = await fetch(
-          "https://integrate.api.nvidia.com/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: process.env.NVIDIA_API_MODEL || "openai/gpt-oss-120b",
-              messages: [{ role: "user", content: enhancedPrompt }],
-              temperature: 0.7,
-              max_tokens: 1024,
-            }),
-          }
-        );
-
-        if (!nvidiaRes.ok) throw new Error(`NVIDIA HTTP ${nvidiaRes.status}`);
-        const nvidiaData = await nvidiaRes.json();
-        rawText = nvidiaData?.choices?.[0]?.message?.content || null;
-      }
-    }
-
-    const MAX_LENGTH = 3500;
-    const parts = rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
+    const responseText = await processAiRequest(prompt, useSearch);
+    const parts = chunkText(responseText, 3500);
 
     for (const part of parts) {
       await safeReply(ctx, part, {
@@ -462,13 +491,62 @@ bot.command("a", async (ctx) => {
         message_thread_id: threadId,
       });
     }
-
   } catch (err) {
-    appendLogLine(`AI Error: ${err.message}`);
+    appendLogLine(`Telegram AI Error: ${err.message}`);
     await safeReply(ctx, "❌ Failed to process request", {
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
     });
+  }
+});
+
+const DISCORD_PREFIX = "!a";
+
+discordClient.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+
+  // if (DISCORD_TOPIC_ID && message.channel.id !== DISCORD_TOPIC_ID) return;
+
+  if (!message.content.startsWith(DISCORD_PREFIX)) return;
+
+  appendLogLine(`[Discord] From ${message.author.tag}: ${message.content}`);
+
+  let argPrompt = message.content.slice(DISCORD_PREFIX.length).trim();
+  let replyText = "";
+
+  if (message.reference?.messageId) {
+    try {
+      const referencedMsg = await message.channel.messages.fetch(
+        message.reference.messageId
+      );
+      replyText = referencedMsg?.content?.trim() || "";
+    } catch {
+      
+    }
+  }
+
+  const useSearch = /^-s\b/i.test(argPrompt);
+  if (useSearch) argPrompt = argPrompt.replace(/^-s\s*/i, "").trim();
+
+  let prompt = "";
+  if (argPrompt && replyText) prompt = `${argPrompt}: ${replyText}`;
+  else if (argPrompt) prompt = argPrompt;
+  else if (replyText) prompt = replyText;
+
+  if (!prompt) {
+    return message.reply("❌ Please provide a prompt.");
+  }
+
+  try {
+    const responseText = await processAiRequest(prompt, useSearch);
+    const parts = chunkText(responseText, 1900);
+
+    for (const part of parts) {
+      await message.reply(part);
+    }
+  } catch (err) {
+    appendLogLine(`Discord AI Error: ${err.message}`);
+    await message.reply("❌ Failed to process request");
   }
 });
 
