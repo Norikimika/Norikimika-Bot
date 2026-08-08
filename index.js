@@ -721,7 +721,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
     } catch (err) { return; }
 
     try {
-      await execFilePromise("yt-dlp", ["-f", "251", "-o", tempFile, videoUrl]);
+      await execFilePromise("yt-dlp", ["-f", "bestaudio", "-o", tempFile, videoUrl]);
       await execFilePromise("yt-dlp", ["--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "-o", thumbBase, videoUrl]);
 
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Sending" });
