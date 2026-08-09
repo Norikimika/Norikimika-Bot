@@ -1560,6 +1560,7 @@ bot.launch()
 const runRepo = require('./repo.js');
 const runMonitor = require('./monitor.js');
 const runNotification = require('./notification.js');
+const runDiscord = require('./discord.js');
 
 async function loop() {
   try {
@@ -1573,3 +1574,4 @@ async function loop() {
 loop();
 runMonitor();
 runNotification();
+runDiscord();
