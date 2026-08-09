@@ -1,11 +1,14 @@
 {
   "dependencies": {
+    "@discordjs/voice": "^0.19.2",
     "axios": "^1.19.0",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
     "escape-html": "^1.0.3",
     "node-cron": "^4.6.0",
     "node-fetch": "^3.3.2",
+    "opusscript": "^0.0.8",
+    "play-dl": "^1.9.7",
     "telegraf": "^4.16.3",
     "yt-search": "^2.13.1",
     "ytdl-core": "^4.11.5"
