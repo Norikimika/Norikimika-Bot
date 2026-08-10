@@ -5,7 +5,7 @@ const os = require("os");
 const { spawn, exec } = require("child_process");
 const util = require("util");
 const execPromise = util.promisify(exec);
-const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, PermissionFlagsBits } = require("discord.js");
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -102,6 +102,23 @@ function isSingleSong(video) {
   return !blacklist.some((term) => title.includes(term));
 }
 
+function canControlQueue(message, serverQueue) {
+  if (!serverQueue) return true;
+  const currentSong = serverQueue.songs[0] || serverQueue.lastSong;
+  if (!currentSong || !currentSong.requestedBy) return true;
+
+  if (currentSong.requestedBy.id === message.author.id) return true;
+
+  if (
+    message.member?.permissions?.has(PermissionFlagsBits.Administrator) ||
+    message.member?.permissions?.has(PermissionFlagsBits.ManageChannels)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 async function searchYtMusic(query, limit = 10) {
   try {
     const results = await play.search(query, { limit, source: { youtube: "video" } });
@@ -131,6 +148,7 @@ async function searchYtMusic(query, limit = 10) {
   return new Promise((resolve) => {
     const proc = spawn("yt-dlp", [
       "--flat-playlist",
+      "--no-warnings",
       "-j",
       `ytsearch${limit}:${query}`,
     ]);
@@ -166,6 +184,7 @@ function getPlaylistTracks(playlistUrl) {
 
     const proc = spawn("yt-dlp", [
       "--flat-playlist",
+      "--no-warnings",
       "-j",
       playlistUrl,
     ]);
@@ -204,6 +223,7 @@ function getYtMusicRadioTracks(videoId) {
     
     const proc = spawn("yt-dlp", [
       "--flat-playlist",
+      "--no-warnings",
       "-j",
       radioUrl
     ]);
@@ -240,7 +260,7 @@ async function getDirectAudioUrl(song) {
     try {
       const targetUrl = normalizeUrl(song.url);
       const { stdout } = await execPromise(
-        `yt-dlp -g -f "251/250/249/140/bestaudio/best" --no-playlist --no-video --extractor-args "youtube:player_client=android_vr,android" "${targetUrl}"`
+        `yt-dlp -g -f "251/250/249/140/bestaudio/best" --no-playlist --no-warnings --no-call-home --no-check-certificates --extractor-args "youtube:player_client=android_vr,android" "${targetUrl}"`
       );
       const streamUrl = stdout.trim().split("\n")[0];
       if (!streamUrl || !streamUrl.startsWith("http")) {
@@ -385,6 +405,8 @@ async function getAutoplayCandidate(serverQueue, baseSong) {
   const videoId = baseSong.id || extractVideoId(baseSong.url);
   let nextSong = null;
 
+  const baseArtist = (baseSong.artist || "").toLowerCase().replace(/ - topic$/i, "").trim();
+
   const radioTracks = await getYtMusicRadioTracks(videoId);
   if (radioTracks && radioTracks.length > 0) {
     nextSong = radioTracks.find((s) => {
@@ -392,8 +414,23 @@ async function getAutoplayCandidate(serverQueue, baseSong) {
       const titleKey = getTitleKey(s.title);
       if (serverQueue.playedKeys.has(titleKey)) return false;
       if (serverQueue.playedUrls.has(s.url)) return false;
+
+      const candidateArtist = (s.artist || "").toLowerCase().replace(/ - topic$/i, "").trim();
+      if (baseArtist && candidateArtist && (candidateArtist.includes(baseArtist) || baseArtist.includes(candidateArtist))) {
+        return false;
+      }
       return true;
     });
+
+    if (!nextSong) {
+      nextSong = radioTracks.find((s) => {
+        if (!isSingleSong(s)) return false;
+        const titleKey = getTitleKey(s.title);
+        if (serverQueue.playedKeys.has(titleKey)) return false;
+        if (serverQueue.playedUrls.has(s.url)) return false;
+        return true;
+      });
+    }
   }
 
   if (!nextSong) {
@@ -410,8 +447,23 @@ async function getAutoplayCandidate(serverQueue, baseSong) {
         const titleKey = getTitleKey(s.title);
         if (serverQueue.playedKeys.has(titleKey)) return false;
         if (serverQueue.playedUrls.has(s.url)) return false;
+
+        const candidateArtist = (s.artist || "").toLowerCase().replace(/ - topic$/i, "").trim();
+        if (baseArtist && candidateArtist && (candidateArtist.includes(baseArtist) || baseArtist.includes(candidateArtist))) {
+          return false;
+        }
         return true;
       });
+
+      if (!nextSong) {
+        nextSong = searchResult.find((s) => {
+          if (!isSingleSong(s)) return false;
+          const titleKey = getTitleKey(s.title);
+          if (serverQueue.playedKeys.has(titleKey)) return false;
+          if (serverQueue.playedUrls.has(s.url)) return false;
+          return true;
+        });
+      }
     }
   }
 
@@ -422,6 +474,8 @@ async function getAutoplayCandidate(serverQueue, baseSong) {
     artist: nextSong.artist || "Unknown Artist",
     url: nextSong.url,
     id: nextSong.id || extractVideoId(nextSong.url),
+    requestedBy: baseSong.requestedBy || null,
+    isManual: false,
   };
 }
 
@@ -449,7 +503,7 @@ async function playNextSong(guildId) {
     log(`[Music] Guild ${guildId}: 3 consecutive errors. Stopping playback.`);
     const errEmbed = new EmbedBuilder()
       .setColor("#FF0000")
-      .setDescription("❌ Too many consecutive playback errors.");
+      .setDescription("Too many consecutive playback errors.");
     serverQueue.textChannel.send({ embeds: [errEmbed] });
     serverQueue.connection.destroy();
     queues.delete(guildId);
@@ -501,8 +555,8 @@ async function playNextSong(guildId) {
 
   const song = serverQueue.songs[0];
 
-  if (!isSingleSong(song)) {
-    log(`[Skipping Blacklisted Song]: ${song.title}`);
+  if (!song.isManual && !isSingleSong(song)) {
+    log(`[Skipping Blacklisted Autoplay Song]: ${song.title}`);
     serverQueue.songs.shift();
     return playNextSong(guildId);
   }
@@ -521,16 +575,17 @@ async function playNextSong(guildId) {
 
     if (serverQueue.songs[1]) getDirectAudioUrl(serverQueue.songs[1]).catch(() => {});
     if (serverQueue.songs[2]) getDirectAudioUrl(serverQueue.songs[2]).catch(() => {});
-    if (serverQueue.songs[3]) getDirectAudioUrl(serverQueue.songs[3]).catch(() => {});
 
     const resource = await resourcePromise;
     serverQueue.player.play(resource);
     serverQueue.failCount = 0;
 
     const artistText = song.artist && song.artist !== "Unknown Artist" ? ` by ${song.artist}` : "";
+    const reqText = song.requestedBy ? `\nRequested by: <@${song.requestedBy.id}>` : "";
+    
     const embed = new EmbedBuilder()
       .setColor("#00FF00")
-      .setDescription(`Started playing [${song.title}](${song.url})${artistText}`)
+      .setDescription(`Started playing [${song.title}](${song.url})${artistText}${reqText}`)
       .setThumbnail(`https://img.youtube.com/vi/${song.id}/mqdefault.jpg`);
 
     serverQueue.textChannel.send({ embeds: [embed] });
@@ -542,7 +597,7 @@ async function playNextSong(guildId) {
       .setDescription(`Failed to play: **${song.title}**. Skipping...`);
     serverQueue.textChannel.send({ embeds: [errPlayEmbed] });
     serverQueue.songs.shift();
-    await delay(3000);
+    await delay(2000);
     playNextSong(guildId);
   }
 }
@@ -560,7 +615,7 @@ function runDiscord() {
   });
 
   discordClient.once("clientReady", () => {
-    log(`🤖 Discord Bot online as: ${discordClient.user.tag}`);
+    log(`Discord Bot online as: ${discordClient.user.tag}`);
   });
 
   discordClient.on("messageCreate", async (message) => {
@@ -576,6 +631,40 @@ function runDiscord() {
       const args = content.slice(prefixLen).trim().split(/ +/);
       const command = args.shift()?.toLowerCase();
       const voiceChannel = message.member?.voice?.channel;
+
+      if (command === "help" || command === "h") {
+        const helpEmbed = new EmbedBuilder()
+          .setColor("#0099FF")
+          .setTitle("YouTube Music Bot - Command Manual")
+          .setDescription("Here is the list of available commands:")
+          .addFields(
+            {
+              name: "!play <title/URL> or !p",
+              value: "Play a track or playlist straight from YouTube / YT Music.",
+            },
+            {
+              name: "!skip or !s",
+              value: "Skip the current playing track (Requester or Admin only).",
+            },
+            {
+              name: "!stop / !leave / !l",
+              value: "Stop music and disconnect the bot (Requester or Admin only).",
+            },
+            {
+              name: "!autoplay or !ap",
+              value: "Toggle automatic song recommendations when the queue ends.",
+            },
+            {
+              name: "!help or !h",
+              value: "Display this command list.",
+            }
+          )
+          .setFooter({
+            text: "Note: Skips and stops are restricted to the track requester or admins.",
+          });
+
+        return message.channel.send({ embeds: [helpEmbed] });
+      }
 
       if (command === "play" || command === "p") {
         if (!voiceChannel) {
@@ -597,7 +686,14 @@ function runDiscord() {
           const isPlaylist = query.includes("list=") || query.includes("playlist");
           let songsToAdd = [];
 
-          if (isPlaylist) {
+          const requesterData = {
+            id: message.author.id,
+            tag: message.author.tag,
+          };
+
+          const directVideoId = extractVideoId(query);
+
+          if (isPlaylist && !query.includes("watch?v=")) {
             log(`[Playlist Processing]: ${query}`);
             const playlistTracks = await getPlaylistTracks(query);
 
@@ -607,6 +703,8 @@ function runDiscord() {
                 artist: t.artist || "Unknown Artist",
                 url: t.url,
                 id: t.id || extractVideoId(t.url),
+                requestedBy: requesterData,
+                isManual: true,
               }));
             } else {
               try {
@@ -620,6 +718,8 @@ function runDiscord() {
                     artist: artistName,
                     url: v.url,
                     id: v.id || extractVideoId(v.url),
+                    requestedBy: requesterData,
+                    isManual: true,
                   };
                 });
               } catch (pErr) {
@@ -633,6 +733,56 @@ function runDiscord() {
                 .setDescription("Could not load any tracks from the playlist.");
               return message.channel.send({ embeds: [embed] });
             }
+          } else if (directVideoId) {
+            const normUrl = `https://www.youtube.com/watch?v=${directVideoId}`;
+            let trackInfo = null;
+
+            try {
+              const info = await play.video_basic_info(normUrl);
+              if (info && info.video_details) {
+                const v = info.video_details;
+                let artistName = "Unknown Artist";
+                if (v.channel && v.channel.name) artistName = v.channel.name.replace(/ - Topic$/i, "");
+                trackInfo = {
+                  title: v.title,
+                  artist: artistName,
+                  url: normUrl,
+                  id: directVideoId,
+                  durationInSec: v.durationInSec || 0,
+                  requestedBy: requesterData,
+                  isManual: true,
+                };
+              }
+            } catch (e) {
+              log(`play-dl video_basic_info Error: ${e.message}`);
+            }
+
+            if (!trackInfo) {
+              try {
+                const { stdout } = await execPromise(`yt-dlp -j --no-warnings "${normUrl}"`);
+                const json = JSON.parse(stdout);
+                trackInfo = {
+                  title: json.title,
+                  artist: json.artist || json.uploader || json.channel || "Unknown Artist",
+                  url: normUrl,
+                  id: directVideoId,
+                  durationInSec: json.duration || 0,
+                  requestedBy: requesterData,
+                  isManual: true,
+                };
+              } catch (yErr) {
+                log(`yt-dlp Direct URL Fetch Error: ${yErr.message}`);
+              }
+            }
+
+            if (trackInfo) {
+              songsToAdd.push(trackInfo);
+            } else {
+              const embed = new EmbedBuilder()
+                .setColor("#FF0000")
+                .setDescription("Could not fetch video from the provided URL.");
+              return message.channel.send({ embeds: [embed] });
+            }
           } else {
             const searchResult = await searchYtMusic(query, 10);
 
@@ -643,6 +793,8 @@ function runDiscord() {
                 artist: validVideo.artist || "Unknown Artist",
                 url: validVideo.url,
                 id: validVideo.id || extractVideoId(validVideo.url),
+                requestedBy: requesterData,
+                isManual: true,
               });
             } else {
               const embed = new EmbedBuilder()
@@ -691,11 +843,11 @@ function runDiscord() {
               log(`Audio Player Error: ${err.message}`);
               serverQueue.failCount++;
               serverQueue.songs.shift();
-              await delay(3000);
+              await delay(2000);
               playNextSong(message.guild.id);
             });
 
-            if (isPlaylist) {
+            if (isPlaylist && !query.includes("watch?v=")) {
               const embed = new EmbedBuilder()
                 .setColor("#00FF00")
                 .setDescription(`Added **${songsToAdd.length}** tracks from playlist to queue!`);
@@ -707,7 +859,7 @@ function runDiscord() {
             serverQueue.songs.push(...songsToAdd);
             log(`[Queue Added] Guild: ${message.guild.id} | Added ${songsToAdd.length} tracks.`);
             
-            if (isPlaylist) {
+            if (isPlaylist && !query.includes("watch?v=")) {
               const embed = new EmbedBuilder()
                 .setColor("#00FF00")
                 .setDescription(`Added **${songsToAdd.length}** tracks from playlist to queue!`);
@@ -740,13 +892,20 @@ function runDiscord() {
           return message.channel.send({ embeds: [embed] });
         }
 
+        if (!canControlQueue(message, serverQueue)) {
+          const embed = new EmbedBuilder()
+            .setColor("#FF0000")
+            .setDescription("Only the person who played this song can toggle autoplay.");
+          return message.channel.send({ embeds: [embed] });
+        }
+
         serverQueue.autoplay = !serverQueue.autoplay;
         log(`[Autoplay Toggle] Guild: ${message.guild.id} | Status: ${serverQueue.autoplay}`);
         if (serverQueue.autoplay && serverQueue.lastSong && serverQueue.songs.length === 1 && !serverQueue.autoplayPrefetch) {
           warmAutoplayCandidate(serverQueue, serverQueue.lastSong);
         }
         const embed = new EmbedBuilder()
-          .setColor("#FF0000")
+          .setColor("#00FF00")
           .setDescription(`Autoplay has been **${serverQueue.autoplay ? "enabled" : "disabled"}**`);
         return message.channel.send({ embeds: [embed] });
       }
@@ -759,19 +918,39 @@ function runDiscord() {
             .setDescription("No song is currently playing.");
           return message.channel.send({ embeds: [embed] });
         }
+
+        if (!canControlQueue(message, serverQueue)) {
+          const reqUser = serverQueue.songs[0]?.requestedBy;
+          const reqTag = reqUser ? `<@${reqUser.id}>` : "the requester";
+          const embed = new EmbedBuilder()
+            .setColor("#FF0000")
+            .setDescription(`Only ${reqTag} (or an Admin) can skip this track.`);
+          return message.channel.send({ embeds: [embed] });
+        }
+
         log(`[Skip Command] Guild: ${message.guild.id} | Skipped by: ${message.author.tag}`);
         const currentSong = serverQueue.songs[0];
         const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
         serverQueue.player.stop();
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
-          .setDescription(`**${currentSong.title}**${artistText} has been skipped by ${message.author}`);
+          .setDescription(`**${currentSong.title}**${artistText} was skipped by ${message.author}`);
         return message.channel.send({ embeds: [embed] });
       }
 
       if (command === "stop" || command === "leave" || command === "l") {
         const serverQueue = queues.get(message.guild.id);
+        
         if (serverQueue) {
+          if (!canControlQueue(message, serverQueue)) {
+            const reqUser = serverQueue.songs[0]?.requestedBy;
+            const reqTag = reqUser ? `<@${reqUser.id}>` : "the requester";
+            const embed = new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(`Only ${reqTag} (or an Admin) can stop the player.`);
+            return message.channel.send({ embeds: [embed] });
+          }
+
           log(`[Stop Command] Guild: ${message.guild.id} | Stopped by: ${message.author.tag}`);
           serverQueue.songs = [];
           serverQueue.player.stop();
