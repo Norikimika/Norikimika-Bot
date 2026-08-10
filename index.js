@@ -369,13 +369,18 @@ bot.command("a", async (ctx) => {
   }
 
   function buildSearchPrompt(userPrompt, searchContext) {
-    if (!searchContext) return userPrompt;
-    return (
-      `You are a helpful assistant with access to recent web search results.\n\n` +
-      `Search Results:\n${searchContext}\n\n` +
-      `User Question: ${userPrompt}\n\n` +
-      `Answer based on the search results above. Cite sources where relevant.`
-    );
+    let systemPrompt = "You are Zero Two, a helpful, friendly, and smart AI assistant.";
+    
+    if (searchContext) {
+      return (
+        `${systemPrompt} You have access to recent web search results.\n\n` +
+        `Search Results:\n${searchContext}\n\n` +
+        `User Question: ${userPrompt}\n\n` +
+        `Answer based on the search results above. Cite sources where relevant.`
+      );
+    }
+    
+    return `${systemPrompt}\n\nUser Question: ${userPrompt}`;
   }
 
   try {
