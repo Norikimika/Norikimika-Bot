@@ -260,30 +260,6 @@ function getYtMusicRadioTracks(videoId) {
   });
 }
 
-async function getDirectAudioUrl(song) {
-  if (song.directUrl) return song.directUrl;
-  if (song.fetchingPromise) return song.fetchingPromise;
-
-  song.fetchingPromise = (async () => {
-    try {
-      const targetUrl = normalizeUrl(song.url);
-      const { stdout } = await execPromise(
-        `yt-dlp -g -f "251/250/249/140/bestaudio/best" --no-playlist --no-warnings --no-call-home --no-check-certificates --extractor-args "youtube:player_client=android_vr,android" "${targetUrl}"`
-      );
-      const streamUrl = stdout.trim().split("\n")[0];
-      if (!streamUrl || !streamUrl.startsWith("http")) {
-        throw new Error("Invalid stream URL returned by yt-dlp");
-      }
-      song.directUrl = streamUrl;
-      return streamUrl;
-    } finally {
-      song.fetchingPromise = null;
-    }
-  })();
-
-  return song.fetchingPromise;
-}
-
 const queues = new Map();
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
@@ -318,99 +294,120 @@ async function processOpenRouterRequest(prompt) {
   }
 }
 
-async function createAudioResourceFromSong(song) {
-  try {
-    const directUrl = await getDirectAudioUrl(song);
-    const resource = await new Promise((resolve, reject) => {
-      const ffmpegProcess = spawn(
-        "ffmpeg",
-        [
-          "-loglevel", "error",
-          "-hide_banner",
-          "-reconnect", "1",
-          "-reconnect_streamed", "1",
-          "-reconnect_delay_max", "5",
-          "-analyzeduration", "0",
-          "-probesize", "32k",
-          "-headers", "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)\r\n",
-          "-i", directUrl,
-          "-vn",
-          "-filter:a", "volume=0.95",
-          "-ac", "2",
-          "-ar", "48000",
-          "-c:a", "libopus",
-          "-b:a", "128k",
-          "-f", "ogg",
-          "pipe:1",
-        ],
-        { stdio: ["ignore", "pipe", "pipe"] }
-      );
+function streamWithYtdlp(targetUrl, extraArgs = []) {
+  return new Promise((resolve, reject) => {
+    const ytdlpArgs = [
+      "-o", "-",
+      "-f", "ba/b",
+      "--no-playlist",
+      "--no-warnings",
+      "--no-check-certificates",
+      ...extraArgs,
+      targetUrl,
+    ];
 
-      let settled = false;
-      let stderrBuf = "";
-
-      const fail = (reason) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        try {
-          ffmpegProcess.kill("SIGKILL");
-        } catch {}
-        reject(new Error(reason));
-      };
-
-      const timeoutId = setTimeout(() => fail("Timed out waiting for audio data"), 8000);
-
-      ffmpegProcess.stdout.once("data", (chunk) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        ffmpegProcess.stdout.pause();
-        ffmpegProcess.stdout.unshift(chunk);
-        resolve(
-          createAudioResource(ffmpegProcess.stdout, {
-            inputType: StreamType.OggOpus,
-          })
-        );
-      });
-
-      ffmpegProcess.stderr.on("data", (data) => {
-        const msg = data.toString().trim();
-        if (msg) stderrBuf = `${stderrBuf} ${msg}`.slice(-500);
-        if (
-          msg &&
-          !msg.includes("Connection reset by peer") &&
-          !msg.includes("Broken pipe") &&
-          !msg.includes("Error writing trailer")
-        ) {
-          log(`FFmpeg Error: ${msg}`);
-        }
-      });
-
-      ffmpegProcess.once("error", (err) => fail(err.message));
-
-      ffmpegProcess.once("close", (code) => {
-        if (!settled) {
-          fail(stderrBuf.trim() || `ffmpeg exited (code ${code}) before producing audio`);
-        }
-      });
+    const ytdlpProcess = spawn("yt-dlp", ytdlpArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
-    return resource;
-  } catch (err) {
-    song.directUrl = null;
-    log(`yt-dlp Engine Failed: ${err.message}`);
+    const ffmpegProcess = spawn(
+      "ffmpeg",
+      [
+        "-loglevel", "error",
+        "-hide_banner",
+        "-i", "pipe:0",
+        "-vn",
+        "-filter:a", "volume=0.95",
+        "-ac", "2",
+        "-ar", "48000",
+        "-c:a", "libopus",
+        "-b:a", "128k",
+        "-f", "ogg",
+        "pipe:1",
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+
+    ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
+
+    let settled = false;
+    let stderrBuf = "";
+
+    const fail = (reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      try { ytdlpProcess.kill("SIGKILL"); } catch {}
+      try { ffmpegProcess.kill("SIGKILL"); } catch {}
+      reject(new Error(reason));
+    };
+
+    const timeoutId = setTimeout(() => fail("Timed out waiting for audio data"), 15000);
+
+    ffmpegProcess.stdout.once("data", (chunk) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      ffmpegProcess.stdout.pause();
+      ffmpegProcess.stdout.unshift(chunk);
+      resolve(
+        createAudioResource(ffmpegProcess.stdout, {
+          inputType: StreamType.OggOpus,
+        })
+      );
+    });
+
+    ytdlpProcess.stderr.on("data", (data) => {
+      const msg = data.toString().trim();
+      if (msg && !msg.includes("WARNING")) {
+        stderrBuf = `${stderrBuf} [yt-dlp] ${msg}`.slice(-500);
+      }
+    });
+
+    ffmpegProcess.stderr.on("data", (data) => {
+      const msg = data.toString().trim();
+      if (msg && !msg.includes("Broken pipe") && !msg.includes("Error writing trailer")) {
+        stderrBuf = `${stderrBuf} [ffmpeg] ${msg}`.slice(-500);
+      }
+    });
+
+    ytdlpProcess.once("error", (err) => fail(`yt-dlp process error: ${err.message}`));
+    ffmpegProcess.once("error", (err) => fail(`ffmpeg process error: ${err.message}`));
+
+    ffmpegProcess.once("close", (code) => {
+      if (!settled) {
+        fail(stderrBuf.trim() || `Process exited (code ${code}) before producing audio`);
+      }
+    });
+  });
+}
+
+async function createAudioResourceFromSong(song) {
+  const targetUrl = normalizeUrl(song.url);
+
+  try {
+    return await streamWithYtdlp(targetUrl, []);
+  } catch (err1) {
+    log(`yt-dlp Auto Fallback Failed: ${err1.message}`);
   }
 
   try {
-    const pdlStream = await play.stream(normalizeUrl(song.url), {
+    return await streamWithYtdlp(targetUrl, [
+      "--extractor-args", "youtube:player_client=android,web",
+    ]);
+  } catch (err2) {
+    log(`yt-dlp Android/Web Fallback Failed: ${err2.message}`);
+  }
+
+  try {
+    const pdlStream = await play.stream(targetUrl, {
       discordPlayerCompatibility: true,
     });
     return createAudioResource(pdlStream.stream, {
       inputType: pdlStream.type,
     });
-  } catch (err) {
-    log(`play-dl Engine Failed: ${err.message}`);
+  } catch (err3) {
+    log(`play-dl Engine Failed: ${err3.message}`);
   }
 
   throw new Error("All audio streaming engines failed.");
@@ -499,10 +496,6 @@ function warmAutoplayCandidate(serverQueue, baseSong) {
   serverQueue.autoplayPrefetch = {
     songUrl: baseSong.url,
     promise: getAutoplayCandidate(serverQueue, baseSong)
-      .then((candidate) => {
-        if (candidate) getDirectAudioUrl(candidate).catch(() => {});
-        return candidate;
-      })
       .catch((err) => {
         log(`Autoplay Prefetch Error: ${err.message}`);
         return null;
@@ -545,8 +538,6 @@ async function playNextSong(guildId) {
           serverQueue.playedUrls.add(nextSong.url);
           serverQueue.playedKeys.add(getTitleKey(nextSong.title));
 
-          getDirectAudioUrl(nextSong).catch(() => {});
-
           log(`[Autoplay YTM Picked]: ${nextSong.title} - ${nextSong.artist} (${nextSong.url})`);
         } else {
           throw new Error("No suitable unique YouTube Music radio track found.");
@@ -586,12 +577,8 @@ async function playNextSong(guildId) {
 
   try {
     log(`[Music Stream Start] Guild: ${guildId} | Playing: ${song.title} - ${song.artist}`);
-    const resourcePromise = createAudioResourceFromSong(song);
+    const resource = await createAudioResourceFromSong(song);
 
-    if (serverQueue.songs[1]) getDirectAudioUrl(serverQueue.songs[1]).catch(() => {});
-    if (serverQueue.songs[2]) getDirectAudioUrl(serverQueue.songs[2]).catch(() => {});
-
-    const resource = await resourcePromise;
     serverQueue.player.play(resource);
     serverQueue.failCount = 0;
 
@@ -818,8 +805,6 @@ function runDiscord() {
               return message.channel.send({ embeds: [embed] });
             }
           }
-
-          songsToAdd.forEach(s => getDirectAudioUrl(s).catch(() => {}));
 
           let serverQueue = queues.get(message.guild.id);
 
