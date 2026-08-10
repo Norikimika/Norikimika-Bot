@@ -63,6 +63,14 @@ function getTitleKey(title) {
     .join("");
 }
 
+function cleanAiText(text) {
+  if (!text) return "";
+  return text
+    .replace(/User Safety:\s*\w+/gi, "")
+    .replace(/\[\s*Safety Status:\s*\w+\s*\]/gi, "")
+    .trim();
+}
+
 function isSingleSong(video) {
   if (!video) return false;
 
@@ -289,14 +297,21 @@ async function processOpenRouterRequest(prompt) {
       },
       body: JSON.stringify({
         model: process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free",
-        messages: [{ role: "user", content: prompt }],
+        messages: [
+          {
+            role: "system",
+            content: "You are Zero Two, a Discord AI assistant. STRICTLY DO NOT output safety evaluation logs, moderation tags, or system metadata such as 'User Safety: safe'. Answer directly and naturally.",
+          },
+          { role: "user", content: prompt },
+        ],
         temperature: 0.7,
       }),
     });
 
     if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}`);
     const data = await res.json();
-    return data?.choices?.[0]?.message?.content || null;
+    const rawContent = data?.choices?.[0]?.message?.content || null;
+    return cleanAiText(rawContent);
   } catch (err) {
     log(`OpenRouter Error: ${err.message}`);
     throw err;
@@ -1002,17 +1017,32 @@ function runDiscord() {
 
     log(`[Discord AI Chat] From ${message.author.tag}: ${prompt}`);
 
+    let typingInterval;
     try {
-      const responseText = await processOpenRouterRequest(prompt);
-      if (!responseText) throw new Error("Empty response from OpenRouter");
+      await message.channel.sendTyping();
+      typingInterval = setInterval(() => {
+        message.channel.sendTyping().catch(() => {});
+      }, 5000);
+
+      let responseText = await processOpenRouterRequest(prompt);
+      
+      if (!responseText) {
+        responseText = await processOpenRouterRequest(`${prompt} (Answer directly without any system tags or safety metadata)`);
+      }
+
+      if (!responseText) {
+        responseText = "I could not generate a response. Please try again.";
+      }
 
       const parts = chunkText(responseText, 1900);
-      for (const part of parts) {
-        await message.channel.send(part);
+      for (let i = 0; i < parts.length; i++) {
+        await message.channel.send(parts[i]);
       }
     } catch (err) {
       log(`Discord AI Error: ${err.message}`);
       await message.channel.send("Failed to process request.");
+    } finally {
+      if (typingInterval) clearInterval(typingInterval);
     }
   });
 
