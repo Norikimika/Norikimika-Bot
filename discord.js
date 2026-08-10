@@ -486,7 +486,7 @@ async function getAutoplayCandidate(serverQueue, baseSong) {
     artist: nextSong.artist || "Unknown Artist",
     url: nextSong.url,
     id: nextSong.id || extractVideoId(nextSong.url),
-    requestedBy: null,
+    requestedBy: baseSong.requestedBy || null,
     isManual: false,
   };
 }
@@ -645,6 +645,10 @@ function runDiscord() {
               value: "Play a track or playlist straight from YouTube / YT Music.",
             },
             {
+              name: "!queue or !q",
+              value: "Display the current song queue.",
+            },
+            {
               name: "!skip or !s",
               value: "Skip the current playing track (Requester or Admin only).",
             },
@@ -666,6 +670,45 @@ function runDiscord() {
           });
 
         return message.channel.send({ embeds: [helpEmbed] });
+      }
+
+      if (command === "queue" || command === "q") {
+        const serverQueue = queues.get(message.guild.id);
+        if (!serverQueue || serverQueue.songs.length === 0) {
+          const embed = new EmbedBuilder()
+            .setColor("#FF0000")
+            .setDescription("The queue is currently empty.");
+          return message.channel.send({ embeds: [embed] });
+        }
+
+        const nowPlaying = serverQueue.songs[0];
+        const queuedSongs = serverQueue.songs.slice(1);
+
+        const reqInfo = nowPlaying.isManual && nowPlaying.requestedBy ? ` | Requested by: <@${nowPlaying.requestedBy.id}>` : " | *(Autoplay)*";
+        let description = `**Now Playing:**\n[${nowPlaying.title}](${nowPlaying.url}) ${nowPlaying.artist && nowPlaying.artist !== "Unknown Artist" ? `by ${nowPlaying.artist}` : ""}${reqInfo}\n\n**Up Next:**\n`;
+
+        if (queuedSongs.length === 0) {
+          description += "No upcoming songs manually queued.";
+        } else {
+          const displayList = queuedSongs.slice(0, 10);
+          description += displayList
+            .map((song, index) => `${index + 1}. [${song.title}](${song.url}) - <@${song.requestedBy?.id}>`)
+            .join("\n");
+
+          if (queuedSongs.length > 10) {
+            description += `\n\n...and ${queuedSongs.length - 10} more song(s).`;
+          }
+        }
+
+        const queueEmbed = new EmbedBuilder()
+          .setColor("#0099FF")
+          .setTitle(`Music Queue - ${message.guild.name}`)
+          .setDescription(description)
+          .setFooter({
+            text: `Autoplay: ${serverQueue.autoplay ? "Enabled" : "Disabled"} | Total Songs in Queue: ${serverQueue.songs.length}`,
+          });
+
+        return message.channel.send({ embeds: [queueEmbed] });
       }
 
       if (command === "play" || command === "p") {
