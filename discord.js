@@ -622,6 +622,7 @@ function runDiscord() {
 
   discordClient.on("messageCreate", async (message) => {
     if (message.author.bot) return;
+    if (!message.guild) return;
 
     const content = message.content.trim();
     if (!content.startsWith("!")) return;
@@ -631,7 +632,7 @@ function runDiscord() {
     const command = args.shift()?.toLowerCase();
     const voiceChannel = message.member?.voice?.channel;
 
-    log(`[Bot Command] From ${message.author.tag} in #${message.channel.name || "DM"}: ${content}`);
+    log(`[Bot Command] Guild: ${message.guild.id} | From ${message.author.tag} in #${message.channel.name}: ${content}`);
 
     if (command === "h") {
       const helpEmbed = new EmbedBuilder()
@@ -679,7 +680,7 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
-      log(`[Discord AI Chat] From ${message.author.tag}: ${prompt}`);
+      log(`[Discord AI Chat] Guild: ${message.guild.id} | From ${message.author.tag}: ${prompt}`);
 
       let typingInterval;
       try {
@@ -720,6 +721,8 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
+      serverQueue.textChannel = message.channel;
+
       const nowPlaying = serverQueue.songs[0];
       const queuedSongs = serverQueue.songs.slice(1);
 
@@ -755,6 +758,14 @@ function runDiscord() {
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
           .setDescription("You need to join a voice channel first!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
+      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
+      if (botChannelId && voiceChannel.id !== botChannelId) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You must be in the same voice channel as the bot to play music!");
         return message.channel.send({ embeds: [embed] });
       }
 
@@ -916,17 +927,25 @@ function runDiscord() {
           queues.set(message.guild.id, serverQueue);
           serverQueue.songs.push(...songsToAdd);
 
+          const currentGuildId = message.guild.id;
+
           player.on(AudioPlayerStatus.Idle, () => {
-            serverQueue.songs.shift();
-            playNextSong(message.guild.id);
+            const sq = queues.get(currentGuildId);
+            if (sq) {
+              sq.songs.shift();
+              playNextSong(currentGuildId);
+            }
           });
 
           player.on("error", async (err) => {
-            log(`Audio Player Error: ${err.message}`);
-            serverQueue.failCount++;
-            serverQueue.songs.shift();
-            await delay(2000);
-            playNextSong(message.guild.id);
+            log(`Audio Player Error in Guild ${currentGuildId}: ${err.message}`);
+            const sq = queues.get(currentGuildId);
+            if (sq) {
+              sq.failCount++;
+              sq.songs.shift();
+              await delay(2000);
+              playNextSong(currentGuildId);
+            }
           });
 
           if (isPlaylist && !query.includes("watch?v=")) {
@@ -938,6 +957,7 @@ function runDiscord() {
 
           playNextSong(message.guild.id);
         } else {
+          serverQueue.textChannel = message.channel;
           serverQueue.songs.push(...songsToAdd);
           log(`[Queue Added] Guild: ${message.guild.id} | Added ${songsToAdd.length} tracks.`);
           
@@ -974,6 +994,16 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
+      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
+      if (botChannelId && (!voiceChannel || voiceChannel.id !== botChannelId)) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You must be in the same voice channel as the bot to toggle autoplay!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
+      serverQueue.textChannel = message.channel;
+
       if (!canControlQueue(message, serverQueue)) {
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
@@ -1001,6 +1031,16 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
+      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
+      if (botChannelId && (!voiceChannel || voiceChannel.id !== botChannelId)) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You must be in the same voice channel as the bot to skip!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
+      serverQueue.textChannel = message.channel;
+
       if (!canControlQueue(message, serverQueue)) {
         const reqUser = serverQueue.songs[0]?.requestedBy;
         const reqTag = reqUser ? `<@${reqUser.id}>` : "the requester";
@@ -1022,7 +1062,15 @@ function runDiscord() {
 
     if (command === "l") {
       const serverQueue = queues.get(message.guild.id);
-      
+      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
+
+      if (botChannelId && (!voiceChannel || voiceChannel.id !== botChannelId)) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You must be in the same voice channel as the bot to stop/leave!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
       if (serverQueue) {
         if (!canControlQueue(message, serverQueue)) {
           const reqUser = serverQueue.songs[0]?.requestedBy;
