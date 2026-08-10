@@ -489,7 +489,7 @@ async function getAutoplayCandidate(serverQueue, baseSong) {
     artist: nextSong.artist || "Unknown Artist",
     url: nextSong.url,
     id: nextSong.id || extractVideoId(nextSong.url),
-    requestedBy: baseSong.requestedBy || null,
+    requestedBy: null,
     isManual: false,
   };
 }
@@ -596,7 +596,7 @@ async function playNextSong(guildId) {
     serverQueue.failCount = 0;
 
     const artistText = song.artist && song.artist !== "Unknown Artist" ? ` by ${song.artist}` : "";
-    const reqText = song.requestedBy ? `\nRequested by: <@${song.requestedBy.id}>` : "";
+    const reqText = song.isManual && song.requestedBy ? `\nRequested by: <@${song.requestedBy.id}>` : "";
     
     const embed = new EmbedBuilder()
       .setColor("#00FF00")
