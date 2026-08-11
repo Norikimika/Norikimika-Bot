@@ -22,7 +22,7 @@ function log(msg) {
   try {
     fs.appendFileSync(
       LOG_FILE,
-      `[${new Date().toLocaleString("en-US")}] ${msg}\n`
+      `[${new Date().toLocaleString()}] ${msg}\n`
     );
   } catch (err) {
     console.error("Failed to write log:", err.message);

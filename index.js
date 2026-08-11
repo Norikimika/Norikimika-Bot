@@ -19,7 +19,7 @@ const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
 
 function appendLogLine(line) {
   try {
-    const ts = new Date().toISOString();
+    const ts = new Date().toLocaleString();
     fs.appendFileSync(LOG_FILE, `[${ts}] ${line}\n`);
   } catch (e) {
     console.error("Failed to write to log file:", e.message);

@@ -117,7 +117,7 @@ const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.log');
 function log(msg) {
   fs.appendFileSync(
     LOG_FILE,
-    `[${new Date().toLocaleString('id-ID')}] ${msg}\n`
+    `[${new Date().toLocaleString()}] ${msg}\n`
   );
 }
 

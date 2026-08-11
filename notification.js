@@ -78,8 +78,8 @@ for (const r of REQUIRED) {
 fs.mkdirSync(logDir, { recursive: true });
 
 function log(level, message) {
-    const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const formatted = `${ts} [${level}] ${message}`;
+    const ts = new Date().toLocaleString();
+    const formatted = `[${ts}] [${level}] ${message}`;
     try {
         fs.appendFileSync(logFile, formatted + '\n', 'utf8');
     } catch (err) {
