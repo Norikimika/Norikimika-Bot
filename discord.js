@@ -1135,7 +1135,7 @@ function runDiscord() {
       const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
       serverQueue.player.stop();
       const embed = new EmbedBuilder()
-        .setColor("#FF0000")
+        .setColor("#FFFF00")
         .setDescription(`**${currentSong.title}**${artistText} was skipped by ${message.author}`);
       return message.channel.send({ embeds: [embed] });
     }
