@@ -288,7 +288,7 @@ async function processOpenRouterRequest(prompt) {
         messages: [
           {
             role: "system",
-            content: "You are Zero Two, a Discord AI assistant. STRICTLY DO NOT output safety evaluation logs, moderation tags, or system metadata such as 'User Safety: safe'. Answer directly and naturally.",
+            content: "You are Zero Two, a helpful, friendly, and smart AI assistant.",
           },
           { role: "user", content: prompt },
         ],
@@ -734,7 +734,7 @@ function runDiscord() {
       if (!prompt) {
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
-          .setDescription("Please provide a question or prompt for the AI!");
+          .setDescription("Please provide a question or prompt!");
         return message.channel.send({ embeds: [embed] });
       }
 
@@ -750,11 +750,7 @@ function runDiscord() {
         let responseText = await processOpenRouterRequest(prompt);
         
         if (!responseText) {
-          responseText = await processOpenRouterRequest(`${prompt} (Answer directly without any system tags or safety metadata)`);
-        }
-
-        if (!responseText) {
-          responseText = "I could not generate a response. Please try again.";
+          responseText = await processOpenRouterRequest(`${prompt}`);
         }
 
         const parts = chunkText(responseText, 1900);
