@@ -193,7 +193,7 @@ async function searchYtMusic(query, limit = 10) {
 
   return new Promise((resolve) => {
     const proc = spawn("yt-dlp", [
-      "--extractor-args", "youtube:player_client=android,web",
+      "--extractor-args", "youtube:player_client=ios,android",
       "--flat-playlist",
       "--no-warnings",
       "-j",
@@ -230,7 +230,7 @@ function getPlaylistTracks(playlistUrl) {
     if (!playlistUrl) return resolve([]);
 
     const proc = spawn("yt-dlp", [
-      "--extractor-args", "youtube:player_client=android,web",
+      "--extractor-args", "youtube:player_client=ios,android",
       "--flat-playlist",
       "--no-warnings",
       "-j",
@@ -270,7 +270,7 @@ function getYtMusicRadioTracks(videoId) {
     const radioUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
     
     const proc = spawn("yt-dlp", [
-      "--extractor-args", "youtube:player_client=android,web",
+      "--extractor-args", "youtube:player_client=ios,android",
       "--flat-playlist",
       "--no-warnings",
       "-j",
@@ -351,6 +351,94 @@ async function processGeminiRequest(prompt) {
   }
 }
 
+async function getDirectAudioUrl(targetUrl, extraArgs = []) {
+  const args = [
+    "-g",
+    "-f", "251/bestaudio/b",
+    "--no-playlist",
+    "--no-warnings",
+    "--no-check-certificates",
+    ...extraArgs,
+    `"${targetUrl}"`
+  ].join(" ");
+
+  const { stdout } = await execPromise(`yt-dlp ${args}`, { timeout: 8000 });
+  const directUrl = stdout.trim().split("\n")[0];
+  if (!directUrl || !directUrl.startsWith("http")) {
+    throw new Error("Invalid direct audio URL retrieved");
+  }
+  return directUrl;
+}
+
+function streamFromDirectUrl(directUrl) {
+  return new Promise((resolve, reject) => {
+    const ffmpegProcess = spawn(
+      "ffmpeg",
+      [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-probesize", "32768",
+        "-analyzeduration", "0",
+        "-loglevel", "error",
+        "-hide_banner",
+        "-i", directUrl,
+        "-vn",
+        "-af", "volume=0.85",
+        "-ac", "2",
+        "-ar", "48000",
+        "-c:a", "pcm_s16le",
+        "-f", "s16le",
+        "pipe:1",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+
+    let settled = false;
+    let stderrBuf = "";
+
+    const fail = (reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      try { ffmpegProcess.kill("SIGKILL"); } catch {}
+      reject(new Error(reason));
+    };
+
+    const timeoutId = setTimeout(() => fail("Timed out waiting for FFmpeg audio data"), 10000);
+
+    ffmpegProcess.stdout.once("data", (chunk) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      ffmpegProcess.stdout.pause();
+      ffmpegProcess.stdout.unshift(chunk);
+      resolve(
+        createAudioResource(ffmpegProcess.stdout, {
+          inputType: StreamType.Raw,
+          inlineVolume: false,
+          highWaterMark: 1 << 23,
+        })
+      );
+    });
+
+    ffmpegProcess.stderr.on("data", (data) => {
+      const msg = data.toString().trim();
+      if (msg && !msg.includes("Broken pipe") && !msg.includes("Error writing trailer")) {
+        stderrBuf = `${stderrBuf} [ffmpeg] ${msg}`.slice(-500);
+      }
+    });
+
+    ffmpegProcess.once("error", (err) => fail(`ffmpeg process error: ${err.message}`));
+
+    ffmpegProcess.once("close", (code) => {
+      if (!settled) {
+        fail(stderrBuf.trim() || `FFmpeg process exited (code ${code}) before producing audio`);
+      }
+    });
+  });
+}
+
 function streamWithYtdlp(targetUrl, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const ytdlpArgs = [
@@ -370,7 +458,7 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
     const ffmpegProcess = spawn(
       "ffmpeg",
       [
-        "-probesize", "32",
+        "-probesize", "32768",
         "-analyzeduration", "0",
         "-loglevel", "error",
         "-hide_banner",
@@ -409,7 +497,7 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
       reject(new Error(reason));
     };
 
-    const timeoutId = setTimeout(() => fail("Timed out waiting for audio data"), 15000);
+    const timeoutId = setTimeout(() => fail("Timed out waiting for audio data"), 10000);
 
     ffmpegProcess.stdout.once("data", (chunk) => {
       if (settled) return;
@@ -455,17 +543,27 @@ async function createAudioResourceFromSong(song) {
   const targetUrl = normalizeUrl(song.url);
 
   try {
-    return await streamWithYtdlp(targetUrl, [
-      "--extractor-args", "youtube:player_client=android,web",
+    const directUrl = await getDirectAudioUrl(targetUrl, [
+      "--extractor-args", "youtube:player_client=ios,android",
     ]);
+    return await streamFromDirectUrl(directUrl);
   } catch (err1) {
-    log(`yt-dlp Android Client Failed: ${err1.message}`);
+    log(`Direct URL (iOS/Android) Stream Failed: ${err1.message}`);
   }
 
   try {
-    return await streamWithYtdlp(targetUrl, []);
+    const directUrl = await getDirectAudioUrl(targetUrl, []);
+    return await streamFromDirectUrl(directUrl);
   } catch (err2) {
-    log(`yt-dlp Default Failed: ${err2.message}`);
+    log(`Direct URL (Default) Stream Failed: ${err2.message}`);
+  }
+
+  try {
+    return await streamWithYtdlp(targetUrl, [
+      "--extractor-args", "youtube:player_client=ios,android",
+    ]);
+  } catch (err3) {
+    log(`yt-dlp Pipe Stream Failed: ${err3.message}`);
   }
 
   try {
@@ -481,8 +579,8 @@ async function createAudioResourceFromSong(song) {
         highWaterMark: 1 << 23,
       });
     }
-  } catch (err3) {
-    log(`play-dl Engine Failed: ${err3.message}`);
+  } catch (err4) {
+    log(`play-dl Engine Failed: ${err4.message}`);
   }
 
   throw new Error("All audio streaming engines failed.");
@@ -941,7 +1039,7 @@ function runDiscord() {
           if (!trackInfo) {
             try {
               const { stdout } = await execPromise(
-                `yt-dlp --extractor-args "youtube:player_client=android,web" -j --no-warnings "${normUrl}"`
+                `yt-dlp --extractor-args "youtube:player_client=ios,android" -j --no-warnings "${normUrl}"`
               );
               const json = JSON.parse(stdout);
               trackInfo = {
