@@ -1,11 +1,19 @@
 require("dotenv").config();
+
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { spawn, exec } = require("child_process");
-const util = require("util");
-const execPromise = util.promisify(exec);
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, PermissionFlagsBits, ActivityType } = require("discord.js");
+const { spawn } = require("child_process");
+
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  PermissionFlagsBits,
+  ActivityType,
+} = require("discord.js");
+
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -14,15 +22,39 @@ const {
   getVoiceConnection,
   StreamType,
 } = require("@discordjs/voice");
-const play = require("play-dl");
 
-const LOG_FILE = path.join(os.homedir(), "SERVER", "Backup", "discord.log");
+const LOG_FILE = path.join(
+  os.homedir(),
+  "SERVER",
+  "Backup",
+  "discord.log"
+);
 
-function log(msg) {
+const AUDIO_CONFIG = {
+  sampleRate: 48000,
+  channels: 2,
+  highWaterMark: 1 << 21,
+  ytDlpTimeout: 20000,
+  ffmpegStartupTimeout: 12000,
+  maxConsecutiveFailures: 3,
+  failureDelay: 1500,
+  autoplayTimeout: 25000,
+  searchTimeout: 15000,
+  playlistTimeout: 30000,
+};
+
+const queues = new Map();
+
+function log(message) {
   try {
+    const dir = path.dirname(LOG_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
     fs.appendFileSync(
       LOG_FILE,
-      `[${new Date().toLocaleString()}] ${msg}\n`
+      `[${new Date().toLocaleString()}] ${message}\n`
     );
   } catch (err) {
     console.error("Failed to write log:", err.message);
@@ -31,107 +63,200 @@ function log(msg) {
 
 process.on("uncaughtException", (err) => {
   if (err.code === "EPIPE") {
-    log(`[Warning] Ignored EPIPE stream error: ${err.message}`);
+    log(`[Warning] Ignored EPIPE: ${err.message}`);
     return;
   }
-  log(`[Uncaught Exception]: ${err.stack || err.message}`);
+
+  log(`[Uncaught Exception] ${err.stack || err.message}`);
 });
 
 process.on("unhandledRejection", (reason) => {
-  log(`[Unhandled Rejection]: ${reason?.stack || reason}`);
+  log(`[Unhandled Rejection] ${reason?.stack || reason}`);
 });
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function chunkText(text, maxLength = 1900) {
-  if (!text) return [];
+  if (!text) {
+    return [];
+  }
+
   return text.match(new RegExp(`.{1,${maxLength}}`, "gs")) || [text];
 }
 
 function extractVideoId(url) {
-  if (!url) return null;
-  const match = url.match(/(?:v=|\/embed\/|\/v\/|youtu\.be\/|watch\?v=|^)([a-zA-Z0-9_-]{11})/);
-  return match ? match[1] : null;
+  if (!url) {
+    return null;
+  }
+
+  const value = String(url).trim();
+
+  const patterns = [
+    /[?&]v=([a-zA-Z0-9_-]{11})/,
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/v\/([a-zA-Z0-9_-]{11})/,
+    /^([a-zA-Z0-9_-]{11})$/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match) {
+      return match[1];
+    }
+  }
+
+  return null;
 }
 
 function normalizeUrl(url) {
-  if (!url) return url;
+  if (!url) {
+    return url;
+  }
+
   const videoId = extractVideoId(url);
+
   if (videoId) {
     return `https://www.youtube.com/watch?v=${videoId}`;
   }
-  return url.replace("music.youtube.com", "www.youtube.com");
+
+  return String(url)
+    .replace("music.youtube.com", "www.youtube.com")
+    .replace("m.youtube.com", "www.youtube.com");
 }
 
-function getTitleKey(title) {
-  if (!title) return "";
-  return title
-    .toLowerCase()
-    .replace(/[\(\[\{].*?[\)\]\}]/g, "")
-    .replace(/\b(official|video|audio|lyrics?|lirik|lagu|terjemahan|subtitle|sub|indonesia|mv|hd|4k|ft|feat|featuring|remix|cover|prod|topic)\b/gi, "")
-    .replace(/[^a-z0-9]/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter((w) => w.length > 1)
-    .sort()
-    .join("");
-}
+function cleanArtist(value) {
+  if (!value) {
+    return "Unknown Artist";
+  }
 
-function cleanAiText(text) {
-  if (!text) return "";
-  return text
-    .replace(/User Safety:\s*\w+/gi, "")
-    .replace(/\[\s*Safety Status:\s*\w+\s*\]/gi, "")
+  return String(value)
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-function isSingleSong(video) {
-  if (!video) return false;
+function cleanTitle(title, artist) {
+  let value = String(title || "")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const duration = video.durationInSec || video.duration || 0;
-  if (duration > 600) return false;
+  const cleanArtistName = cleanArtist(artist);
 
-  const title = (video.title || "").toLowerCase();
-  const blacklist = [
-    "lyric",
-    "lyrics",
-    "lirik",
-    "orchestral",
-    "soundtrack version",
-    "fanmade",
-    "slowed",
-    "reverb",
-    "full album",
-    "greatest hits",
-    "best of",
-    "compilation",
-    "1 hour",
-    "2 hour",
-    "3 hour",
-    "10 hour",
-    "nonstop",
-    "collection",
-    "top 10",
-    "top 20",
-    "top 50",
-    "megamix",
-    "discography",
-    "safety",
-    "induction",
-    "tutorial",
-  ];
+  if (
+    cleanArtistName &&
+    cleanArtistName !== "Unknown Artist"
+  ) {
+    const escapedArtist =
+      cleanArtistName.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
+      );
 
-  return !blacklist.some((term) => title.includes(term));
+    value = value.replace(
+      new RegExp(
+        `^${escapedArtist}\\s*[-–—:]\\s*`,
+        "i"
+      ),
+      ""
+    );
+  }
+
+  return value.trim();
+}
+
+function normalizeSongMetadata(song) {
+  if (!song) {
+    return null;
+  }
+
+  const artist = cleanArtist(
+    song.artist ||
+      song.uploader ||
+      song.channel ||
+      song.creator
+  );
+
+  return {
+    ...song,
+    title: cleanTitle(song.title, artist),
+    artist,
+    url: normalizeUrl(song.url),
+    id:
+      song.id ||
+      extractVideoId(song.url),
+  };
+}
+
+function getSongId(song) {
+  return song?.id || extractVideoId(song?.url);
+}
+
+function getSongKey(song) {
+  const id = getSongId(song);
+
+  if (id) {
+    return `yt:${id}`;
+  }
+
+  return `${song?.artist || ""}:${song?.title || ""}`
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getSongUrlKey(song) {
+  const id = getSongId(song);
+
+  if (id) {
+    return `https://www.youtube.com/watch?v=${id}`;
+  }
+
+  return normalizeUrl(song?.url || "");
+}
+
+function isValidSong(song) {
+  return Boolean(
+    song &&
+      song.title &&
+      song.url &&
+      getSongId(song)
+  );
 }
 
 function canControlQueue(message, serverQueue) {
-  if (!serverQueue) return true;
-  const currentSong = serverQueue.songs[0] || serverQueue.lastSong;
-  if (!currentSong || !currentSong.requestedBy) return true;
+  if (!serverQueue) {
+    return true;
+  }
 
-  if (currentSong.requestedBy.id === message.author.id) return true;
+  const currentSong =
+    serverQueue.songs[0] ||
+    serverQueue.lastSong;
+
+  if (!currentSong?.requestedBy) {
+    return true;
+  }
 
   if (
-    message.member?.permissions?.has(PermissionFlagsBits.Administrator) ||
-    message.member?.permissions?.has(PermissionFlagsBits.ManageChannels)
+    currentSong.requestedBy.id ===
+    message.author.id
+  ) {
+    return true;
+  }
+
+  if (
+    message.member?.permissions?.has(
+      PermissionFlagsBits.Administrator
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    message.member?.permissions?.has(
+      PermissionFlagsBits.ManageChannels
+    )
   ) {
     return true;
   }
@@ -139,180 +264,330 @@ function canControlQueue(message, serverQueue) {
   return false;
 }
 
-async function fetchOembedInfo(videoId, requesterData) {
-  try {
-    const normUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(normUrl)}&format=json`);
-    if (res.ok) {
-      const json = await res.json();
-      return {
-        title: json.title,
-        artist: json.author_name ? json.author_name.replace(/ - Topic$/i, "") : "Unknown Artist",
-        url: normUrl,
-        id: videoId,
-        durationInSec: 0,
-        requestedBy: requesterData,
-        isManual: true,
-      };
-    }
-  } catch (err) {
-    log(`oEmbed Fetch Error: ${err.message}`);
+function spawnYtDlp(
+  args,
+  timeoutMs = AUDIO_CONFIG.ytDlpTimeout
+) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("yt-dlp", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+
+      try {
+        proc.kill("SIGKILL");
+      } catch {}
+
+      reject(
+        new Error(
+          `yt-dlp timeout after ${timeoutMs}ms`
+        )
+      );
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+    };
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+
+      if (stderr.length > 4000) {
+        stderr = stderr.slice(-4000);
+      }
+    });
+
+    proc.once("error", (err) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+
+      reject(
+        new Error(
+          `yt-dlp process error: ${err.message}`
+        )
+      );
+    });
+
+    proc.once("close", (code) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+
+      if (code !== 0) {
+        reject(
+          new Error(
+            `yt-dlp exited with code ${code}${
+              stderr
+                ? `: ${stderr.trim()}`
+                : ""
+            }`
+          )
+        );
+        return;
+      }
+
+      resolve({
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+function buildTrackFromYtDlpItem(item) {
+  const id =
+    item?.id ||
+    extractVideoId(item?.webpage_url) ||
+    extractVideoId(item?.url);
+
+  if (!id || !item?.title) {
+    return null;
   }
-  return null;
+
+  if (
+    item.title === "[Private video]" ||
+    item.title === "[Deleted video]"
+  ) {
+    return null;
+  }
+
+  return normalizeSongMetadata({
+    title: item.title,
+    artist:
+      item.artist ||
+      item.uploader ||
+      item.channel ||
+      item.creator ||
+      "Unknown Artist",
+    url: `https://www.youtube.com/watch?v=${id}`,
+    id,
+    durationInSec:
+      Number(item.duration) || 0,
+  });
 }
 
 async function searchYtMusic(query, limit = 10) {
-  try {
-    const results = await play.search(query, { limit, source: { youtube: "video" } }).catch((e) => {
-      log(`play-dl search catch: ${e.message}`);
-      return null;
-    });
-
-    if (results && results.length > 0) {
-      const formatted = results.map((r) => {
-        let artistName = "Unknown Artist";
-        if (r.channel && r.channel.name) {
-          artistName = r.channel.name.replace(/ - Topic$/i, "");
-        }
-        return {
-          title: r.title,
-          artist: artistName,
-          url: r.url,
-          id: r.id || extractVideoId(r.url),
-          durationInSec: r.durationInSec || 0,
-        };
-      });
-
-      const validTracks = formatted.filter((t) => isSingleSong(t));
-      if (validTracks.length > 0) return validTracks;
-      return formatted;
-    }
-  } catch (err) {
-    log(`play-dl Search Error: ${err.message}`);
+  if (!query?.trim()) {
+    return [];
   }
 
-  return new Promise((resolve) => {
-    const proc = spawn("yt-dlp", [
-      "--extractor-args", "youtube:player_client=ios,android",
-      "--flat-playlist",
-      "--no-warnings",
-      "-j",
-      `ytsearch${limit}:${query}`,
-    ]);
+  const args = [
+    "--extractor-args",
+    "youtube:player_client=ios,android",
+    "--flat-playlist",
+    "--no-warnings",
+    "--no-cache-dir",
+    "--skip-download",
+    "--playlist-end",
+    String(limit),
+    "-J",
+    `ytsearch${limit}:${query}`,
+  ];
 
-    let data = "";
-    proc.stdout.on("data", (chunk) => (data += chunk));
-    proc.on("close", () => {
-      try {
-        const lines = data.trim().split("\n").filter(Boolean);
-        const tracks = lines.map((line) => {
-          const json = JSON.parse(line);
-          return {
-            title: json.title,
-            artist: json.artist || json.uploader || json.channel || "Unknown Artist",
-            url: json.url || `https://www.youtube.com/watch?v=${json.id}`,
-            id: json.id,
-            durationInSec: json.duration || 0,
-          };
-        });
-        const valid = tracks.filter((t) => isSingleSong(t));
-        resolve(valid.length > 0 ? valid : tracks);
-      } catch {
-        resolve([]);
-      }
-    });
-    proc.on("error", () => resolve([]));
-  });
+  try {
+    const { stdout } = await spawnYtDlp(
+      args,
+      AUDIO_CONFIG.searchTimeout
+    );
+
+    const data = JSON.parse(stdout);
+
+    return (
+      Array.isArray(data?.entries)
+        ? data.entries
+        : []
+    )
+      .map(buildTrackFromYtDlpItem)
+      .filter(Boolean)
+      .filter(isValidSong);
+  } catch (err) {
+    log(
+      `[yt-dlp Search Error] ${query}: ${err.message}`
+    );
+
+    return [];
+  }
 }
 
-function getPlaylistTracks(playlistUrl) {
-  return new Promise((resolve) => {
-    if (!playlistUrl) return resolve([]);
+async function getPlaylistTracks(
+  playlistUrl
+) {
+  if (!playlistUrl) {
+    return [];
+  }
 
-    const proc = spawn("yt-dlp", [
-      "--extractor-args", "youtube:player_client=ios,android",
-      "--flat-playlist",
-      "--no-warnings",
-      "-j",
-      playlistUrl,
-    ]);
+  const args = [
+    "--extractor-args",
+    "youtube:player_client=ios,android",
+    "--flat-playlist",
+    "--no-warnings",
+    "--no-cache-dir",
+    "--skip-download",
+    "-J",
+    playlistUrl,
+  ];
 
-    let data = "";
-    proc.stdout.on("data", (chunk) => (data += chunk));
-    proc.on("close", () => {
-      try {
-        const lines = data.trim().split("\n").filter(Boolean);
-        const tracks = lines
-          .map((line) => {
-            const json = JSON.parse(line);
-            return {
-              title: json.title,
-              artist: json.artist || json.uploader || json.channel || "Unknown Artist",
-              url: json.url || `https://www.youtube.com/watch?v=${json.id}`,
-              id: json.id,
-              durationInSec: json.duration || 0,
-            };
-          })
-          .filter((t) => t.id && t.title && t.title !== "[Private video]" && t.title !== "[Deleted video]");
+  try {
+    const { stdout } = await spawnYtDlp(
+      args,
+      AUDIO_CONFIG.playlistTimeout
+    );
 
-        resolve(tracks);
-      } catch {
-        resolve([]);
-      }
-    });
-    proc.on("error", () => resolve([]));
-  });
+    const data = JSON.parse(stdout);
+
+    return (
+      Array.isArray(data?.entries)
+        ? data.entries
+        : []
+    )
+      .map(buildTrackFromYtDlpItem)
+      .filter(Boolean)
+      .filter(isValidSong);
+  } catch (err) {
+    log(
+      `[yt-dlp Playlist Error] ${playlistUrl}: ${err.message}`
+    );
+
+    return [];
+  }
 }
 
-function getYtMusicRadioTracks(videoId) {
-  return new Promise((resolve) => {
-    if (!videoId) return resolve([]);
-    const radioUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
-    
-    const proc = spawn("yt-dlp", [
-      "--extractor-args", "youtube:player_client=ios,android",
-      "--flat-playlist",
-      "--no-warnings",
-      "-j",
-      radioUrl
-    ]);
+async function getYtMusicRadioTracks(
+  videoId
+) {
+  if (!videoId) {
+    return [];
+  }
 
-    let data = "";
-    proc.stdout.on("data", (chunk) => (data += chunk));
-    proc.on("close", () => {
-      try {
-        const lines = data.trim().split("\n").filter(Boolean);
-        const tracks = lines.map((line) => {
-          const json = JSON.parse(line);
-          return {
-            title: json.title,
-            artist: json.artist || json.uploader || json.channel || "Unknown Artist",
-            url: `https://www.youtube.com/watch?v=${json.id}`,
-            id: json.id,
-            durationInSec: json.duration || 0,
-          };
-        });
-        resolve(tracks);
-      } catch {
-        resolve([]);
-      }
-    });
-    proc.on("error", () => resolve([]));
-  });
+  const radioUrl =
+    `https://music.youtube.com/watch?v=${videoId}` +
+    `&list=RD${videoId}`;
+
+  const args = [
+    "--extractor-args",
+    "youtube:player_client=ios,android",
+    "--flat-playlist",
+    "--no-warnings",
+    "--no-cache-dir",
+    "--skip-download",
+    "--playlist-end",
+    "15",
+    "-J",
+    radioUrl,
+  ];
+
+  try {
+    const { stdout } = await spawnYtDlp(
+      args,
+      AUDIO_CONFIG.autoplayTimeout
+    );
+
+    const data = JSON.parse(stdout);
+
+    return (
+      Array.isArray(data?.entries)
+        ? data.entries
+        : []
+    )
+      .map(buildTrackFromYtDlpItem)
+      .filter(Boolean)
+      .filter(isValidSong);
+  } catch (err) {
+    log(
+      `[Autoplay Radio Error] ${err.message}`
+    );
+
+    return [];
+  }
 }
 
-const queues = new Map();
-const delay = (ms) => new Promise((res) => setTimeout(res, ms));
+async function fetchVideoInfo(videoId) {
+  if (!videoId) {
+    return null;
+  }
+
+  const url =
+    `https://www.youtube.com/watch?v=${videoId}`;
+
+  const args = [
+    "--extractor-args",
+    "youtube:player_client=ios,android",
+    "--no-warnings",
+    "--no-cache-dir",
+    "--skip-download",
+    "-j",
+    url,
+  ];
+
+  try {
+    const { stdout } = await spawnYtDlp(
+      args,
+      AUDIO_CONFIG.ytDlpTimeout
+    );
+
+    const json = JSON.parse(stdout);
+
+    return normalizeSongMetadata({
+      title: json.title,
+      artist:
+        json.artist ||
+        json.uploader ||
+        json.channel ||
+        json.creator ||
+        "Unknown Artist",
+      url,
+      id: videoId,
+      durationInSec:
+        Number(json.duration) || 0,
+    });
+  } catch (err) {
+    log(
+      `[Video Info Error] ${videoId}: ${err.message}`
+    );
+
+    return null;
+  }
+}
 
 async function processGeminiRequest(prompt) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey =
+      process.env.GEMINI_API_KEY;
+
     if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is missing in .env file!");
+      throw new Error(
+        "GEMINI_API_KEY is missing in .env file!"
+      );
     }
 
-    const model = process.env.DISCORD_AI_API_MODEL || "gemini-3.5-flash";
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const model =
+      process.env.DISCORD_AI_API_MODEL ||
+      "gemini-3.5-flash";
+
+    const endpoint =
+      `https://generativelanguage.googleapis.com/v1beta/models/` +
+      `${model}:generateContent?key=${apiKey}`;
 
     const res = await fetch(endpoint, {
       method: "POST",
@@ -322,13 +597,20 @@ async function processGeminiRequest(prompt) {
       body: JSON.stringify({
         systemInstruction: {
           parts: [
-            { text: "You are Zero Two, a helpful, friendly, and smart AI assistant." }
+            {
+              text:
+                "You are Zero Two, a helpful, friendly, and smart AI assistant.",
+            },
           ],
         },
         contents: [
           {
             role: "user",
-            parts: [{ text: prompt }],
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
           },
         ],
         generationConfig: {
@@ -339,463 +621,1264 @@ async function processGeminiRequest(prompt) {
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Gemini API HTTP ${res.status}: ${errText}`);
+
+      throw new Error(
+        `Gemini API HTTP ${res.status}: ${errText}`
+      );
     }
 
     const data = await res.json();
-    const rawContent = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    return cleanAiText(rawContent);
+
+    return (
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      null
+    );
   } catch (err) {
-    log(`Gemini Error: ${err.message}`);
+    log(`[Gemini Error] ${err.message}`);
     throw err;
   }
 }
 
-async function getDirectAudioUrl(targetUrl, extraArgs = []) {
-  const args = [
-    "-g",
-    "-f", "251/bestaudio/b",
-    "--no-playlist",
-    "--no-warnings",
-    "--no-check-certificates",
-    ...extraArgs,
-    `"${targetUrl}"`
-  ].join(" ");
-
-  const { stdout } = await execPromise(`yt-dlp ${args}`, { timeout: 8000 });
-  const directUrl = stdout.trim().split("\n")[0];
-  if (!directUrl || !directUrl.startsWith("http")) {
-    throw new Error("Invalid direct audio URL retrieved");
-  }
-  return directUrl;
-}
-
-function streamFromDirectUrl(directUrl) {
+function getDirectAudioUrl(
+  targetUrl,
+  extraArgs = []
+) {
   return new Promise((resolve, reject) => {
-    const ffmpegProcess = spawn(
-      "ffmpeg",
-      [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-probesize", "32768",
-        "-analyzeduration", "0",
-        "-loglevel", "error",
-        "-hide_banner",
-        "-i", directUrl,
-        "-vn",
-        "-af", "volume=0.85",
-        "-ac", "2",
-        "-ar", "48000",
-        "-c:a", "pcm_s16le",
-        "-f", "s16le",
-        "pipe:1",
-      ],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
-
-    let settled = false;
-    let stderrBuf = "";
-
-    const fail = (reason) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      try { ffmpegProcess.kill("SIGKILL"); } catch {}
-      reject(new Error(reason));
-    };
-
-    const timeoutId = setTimeout(() => fail("Timed out waiting for FFmpeg audio data"), 10000);
-
-    ffmpegProcess.stdout.once("data", (chunk) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      ffmpegProcess.stdout.pause();
-      ffmpegProcess.stdout.unshift(chunk);
-      resolve(
-        createAudioResource(ffmpegProcess.stdout, {
-          inputType: StreamType.Raw,
-          inlineVolume: false,
-          highWaterMark: 1 << 23,
-        })
-      );
-    });
-
-    ffmpegProcess.stderr.on("data", (data) => {
-      const msg = data.toString().trim();
-      if (msg && !msg.includes("Broken pipe") && !msg.includes("Error writing trailer")) {
-        stderrBuf = `${stderrBuf} [ffmpeg] ${msg}`.slice(-500);
-      }
-    });
-
-    ffmpegProcess.once("error", (err) => fail(`ffmpeg process error: ${err.message}`));
-
-    ffmpegProcess.once("close", (code) => {
-      if (!settled) {
-        fail(stderrBuf.trim() || `FFmpeg process exited (code ${code}) before producing audio`);
-      }
-    });
-  });
-}
-
-function streamWithYtdlp(targetUrl, extraArgs = []) {
-  return new Promise((resolve, reject) => {
-    const ytdlpArgs = [
-      "-o", "-",
-      "-f", "251/bestaudio/b",
+    const args = [
+      "-g",
+      "-f",
+      "bestaudio/b",
       "--no-playlist",
       "--no-warnings",
       "--no-check-certificates",
+      "--no-cache-dir",
       ...extraArgs,
       targetUrl,
     ];
 
-    const ytdlpProcess = spawn("yt-dlp", ytdlpArgs, {
+    const proc = spawn("yt-dlp", args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const ffmpegProcess = spawn(
-      "ffmpeg",
-      [
-        "-probesize", "32768",
-        "-analyzeduration", "0",
-        "-loglevel", "error",
-        "-hide_banner",
-        "-i", "pipe:0",
-        "-vn",
-        "-af", "volume=0.85",
-        "-ac", "2",
-        "-ar", "48000",
-        "-c:a", "pcm_s16le",
-        "-f", "s16le",
-        "pipe:1",
-      ],
-      { stdio: ["pipe", "pipe", "pipe"] }
-    );
-
-    ffmpegProcess.stdin.on("error", (err) => {
-      if (err.code === "EPIPE") return;
-    });
-
-    ytdlpProcess.stdout.on("error", (err) => {
-      if (err.code === "EPIPE") return;
-    });
-
-    ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
-
+    let stdout = "";
+    let stderr = "";
     let settled = false;
-    let stderrBuf = "";
 
-    const fail = (reason) => {
-      if (settled) return;
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
       settled = true;
+
+      try {
+        proc.kill("SIGKILL");
+      } catch {}
+
+      reject(
+        new Error(
+          "yt-dlp timed out while resolving audio URL"
+        )
+      );
+    }, AUDIO_CONFIG.ytDlpTimeout);
+
+    const cleanup = () => {
       clearTimeout(timeoutId);
-      try { ytdlpProcess.stdout.unpipe(ffmpegProcess.stdin); } catch {}
-      try { ytdlpProcess.kill("SIGKILL"); } catch {}
-      try { ffmpegProcess.kill("SIGKILL"); } catch {}
-      reject(new Error(reason));
     };
 
-    const timeoutId = setTimeout(() => fail("Timed out waiting for audio data"), 10000);
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
 
-    ffmpegProcess.stdout.once("data", (chunk) => {
-      if (settled) return;
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+
+      if (stderr.length > 3000) {
+        stderr = stderr.slice(-3000);
+      }
+    });
+
+    proc.once("error", (err) => {
+      if (settled) {
+        return;
+      }
+
       settled = true;
-      clearTimeout(timeoutId);
-      ffmpegProcess.stdout.pause();
-      ffmpegProcess.stdout.unshift(chunk);
-      resolve(
-        createAudioResource(ffmpegProcess.stdout, {
-          inputType: StreamType.Raw,
-          inlineVolume: false,
-          highWaterMark: 1 << 23,
-        })
+      cleanup();
+
+      reject(
+        new Error(
+          `yt-dlp process error: ${err.message}`
+        )
       );
     });
 
-    ytdlpProcess.stderr.on("data", (data) => {
-      const msg = data.toString().trim();
-      if (msg && !msg.includes("WARNING")) {
-        stderrBuf = `${stderrBuf} [yt-dlp] ${msg}`.slice(-500);
+    proc.once("close", (code) => {
+      if (settled) {
+        return;
       }
-    });
 
-    ffmpegProcess.stderr.on("data", (data) => {
-      const msg = data.toString().trim();
-      if (msg && !msg.includes("Broken pipe") && !msg.includes("Error writing trailer")) {
-        stderrBuf = `${stderrBuf} [ffmpeg] ${msg}`.slice(-500);
+      settled = true;
+      cleanup();
+
+      if (code !== 0) {
+        reject(
+          new Error(
+            `yt-dlp exited with code ${code}${
+              stderr
+                ? `: ${stderr.trim()}`
+                : ""
+            }`
+          )
+        );
+
+        return;
       }
-    });
 
-    ytdlpProcess.once("error", (err) => fail(`yt-dlp process error: ${err.message}`));
-    ffmpegProcess.once("error", (err) => fail(`ffmpeg process error: ${err.message}`));
+      const directUrl = stdout
+        .trim()
+        .split(/\r?\n/)
+        .find((line) =>
+          /^https?:\/\//i.test(line.trim())
+        );
 
-    ffmpegProcess.once("close", (code) => {
-      if (!settled) {
-        fail(stderrBuf.trim() || `Process exited (code ${code}) before producing audio`);
+      if (!directUrl) {
+        reject(
+          new Error(
+            "yt-dlp returned no direct audio URL"
+          )
+        );
+
+        return;
       }
+
+      resolve(directUrl.trim());
     });
   });
 }
 
-async function createAudioResourceFromSong(song) {
-  const targetUrl = normalizeUrl(song.url);
-
-  try {
-    const directUrl = await getDirectAudioUrl(targetUrl, [
-      "--extractor-args", "youtube:player_client=ios,android",
-    ]);
-    return await streamFromDirectUrl(directUrl);
-  } catch (err1) {
-    log(`Direct URL (iOS/Android) Stream Failed: ${err1.message}`);
-  }
-
-  try {
-    const directUrl = await getDirectAudioUrl(targetUrl, []);
-    return await streamFromDirectUrl(directUrl);
-  } catch (err2) {
-    log(`Direct URL (Default) Stream Failed: ${err2.message}`);
-  }
-
-  try {
-    return await streamWithYtdlp(targetUrl, [
-      "--extractor-args", "youtube:player_client=ios,android",
-    ]);
-  } catch (err3) {
-    log(`yt-dlp Pipe Stream Failed: ${err3.message}`);
-  }
-
-  try {
-    const pdlStream = await play.stream(targetUrl, {
-      discordPlayerCompatibility: true,
-    }).catch((e) => {
-      log(`play-dl stream Catch: ${e.message}`);
-      return null;
-    });
-    if (pdlStream) {
-      return createAudioResource(pdlStream.stream, {
-        inputType: pdlStream.type,
-        highWaterMark: 1 << 23,
-      });
-    }
-  } catch (err4) {
-    log(`play-dl Engine Failed: ${err4.message}`);
-  }
-
-  throw new Error("All audio streaming engines failed.");
-}
-
-async function getAutoplayCandidate(serverQueue, baseSong) {
-  const videoId = baseSong.id || extractVideoId(baseSong.url);
-  let nextSong = null;
-
-  const baseArtist = (baseSong.artist || "").toLowerCase().replace(/ - topic$/i, "").trim();
-
-  const radioTracks = await getYtMusicRadioTracks(videoId);
-  if (radioTracks && radioTracks.length > 0) {
-    nextSong = radioTracks.find((s) => {
-      if (!isSingleSong(s)) return false;
-      const titleKey = getTitleKey(s.title);
-      if (serverQueue.playedKeys.has(titleKey)) return false;
-      if (serverQueue.playedUrls.has(s.url)) return false;
-
-      const candidateArtist = (s.artist || "").toLowerCase().replace(/ - topic$/i, "").trim();
-      if (baseArtist && candidateArtist && (candidateArtist.includes(baseArtist) || baseArtist.includes(candidateArtist))) {
-        return false;
+function streamFromDirectUrl(
+  directUrl,
+  song = null
+) {
+  return new Promise((resolve, reject) => {
+    const ffmpegProcess = spawn(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_at_eof",
+        "1",
+        "-reconnect_delay_max",
+        "5",
+        "-i",
+        directUrl,
+        "-vn",
+        "-ac",
+        String(AUDIO_CONFIG.channels),
+        "-ar",
+        String(AUDIO_CONFIG.sampleRate),
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+      ],
+      {
+        stdio: [
+          "ignore",
+          "pipe",
+          "pipe",
+        ],
       }
-      return true;
-    });
+    );
 
-    if (!nextSong) {
-      nextSong = radioTracks.find((s) => {
-        if (!isSingleSong(s)) return false;
-        const titleKey = getTitleKey(s.title);
-        if (serverQueue.playedKeys.has(titleKey)) return false;
-        if (serverQueue.playedUrls.has(s.url)) return false;
-        return true;
-      });
+    let settled = false;
+    let started = false;
+    let stderr = "";
+
+    const startTimeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      fail(
+        `FFmpeg startup timeout${
+          stderr
+            ? `: ${stderr.slice(-800)}`
+            : ""
+        }`
+      );
+    }, AUDIO_CONFIG.ffmpegStartupTimeout);
+
+    function cleanup() {
+      clearTimeout(startTimeout);
+
+      if (!ffmpegProcess.killed) {
+        try {
+          ffmpegProcess.kill("SIGKILL");
+        } catch {}
+      }
     }
-  }
 
-  if (!nextSong) {
-    const cleanTitle = baseSong.title
-      .replace(/[\(\[\{].*?[\)\]\}]/g, "")
-      .replace(/ft\..*$/i, "")
-      .replace(/feat\..*$/i, "")
-      .trim();
+    function fail(message) {
+      if (settled) {
+        return;
+      }
 
-    const searchResult = await searchYtMusic(`songs like ${cleanTitle}`, 15);
-    if (searchResult && searchResult.length > 0) {
-      nextSong = searchResult.find((s) => {
-        if (!isSingleSong(s)) return false;
-        const titleKey = getTitleKey(s.title);
-        if (serverQueue.playedKeys.has(titleKey)) return false;
-        if (serverQueue.playedUrls.has(s.url)) return false;
+      settled = true;
+      cleanup();
 
-        const candidateArtist = (s.artist || "").toLowerCase().replace(/ - topic$/i, "").trim();
-        if (baseArtist && candidateArtist && (candidateArtist.includes(baseArtist) || baseArtist.includes(candidateArtist))) {
-          return false;
+      reject(new Error(message));
+    }
+
+    ffmpegProcess.stdout.once(
+      "data",
+      (chunk) => {
+        if (settled) {
+          return;
         }
-        return true;
-      });
 
-      if (!nextSong) {
-        nextSong = searchResult.find((s) => {
-          if (!isSingleSong(s)) return false;
-          const titleKey = getTitleKey(s.title);
-          if (serverQueue.playedKeys.has(titleKey)) return false;
-          if (serverQueue.playedUrls.has(s.url)) return false;
-          return true;
-        });
+        started = true;
+        settled = true;
+
+        clearTimeout(startTimeout);
+
+        ffmpegProcess.stdout.pause();
+        ffmpegProcess.stdout.unshift(chunk);
+
+        const resource =
+          createAudioResource(
+            ffmpegProcess.stdout,
+            {
+              inputType: StreamType.Raw,
+              inlineVolume: false,
+              silencePaddingFrames: 5,
+              highWaterMark:
+                AUDIO_CONFIG.highWaterMark,
+              metadata: {
+                title:
+                  song?.title || null,
+                artist:
+                  song?.artist || null,
+                id:
+                  song?.id || null,
+                url:
+                  song?.url || null,
+              },
+            }
+          );
+
+        resource.ffmpegProcess =
+          ffmpegProcess;
+
+        resolve(resource);
       }
+    );
+
+    ffmpegProcess.stderr.on(
+      "data",
+      (chunk) => {
+        const message =
+          chunk.toString().trim();
+
+        if (message) {
+          stderr =
+            `${stderr}\n${message}`.slice(
+              -3000
+            );
+        }
+      }
+    );
+
+    ffmpegProcess.once(
+      "error",
+      (err) => {
+        fail(
+          `FFmpeg process error: ${err.message}`
+        );
+      }
+    );
+
+    ffmpegProcess.once(
+      "close",
+      (code) => {
+        if (
+          !started &&
+          !settled
+        ) {
+          fail(
+            `FFmpeg exited before producing audio (code ${code})${
+              stderr
+                ? `: ${stderr.slice(-800)}`
+                : ""
+            }`
+          );
+        }
+      }
+    );
+  });
+}
+
+function streamWithYtdlp(
+  targetUrl,
+  extraArgs = [],
+  song = null
+) {
+  return new Promise((resolve, reject) => {
+    const ytdlpProcess = spawn(
+      "yt-dlp",
+      [
+        "-o",
+        "-",
+        "-f",
+        "bestaudio/b",
+        "--no-playlist",
+        "--no-warnings",
+        "--no-check-certificates",
+        "--no-cache-dir",
+        ...extraArgs,
+        targetUrl,
+      ],
+      {
+        stdio: [
+          "ignore",
+          "pipe",
+          "pipe",
+        ],
+      }
+    );
+
+    const ffmpegProcess = spawn(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-probesize",
+        "32768",
+        "-analyzeduration",
+        "0",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-ac",
+        String(AUDIO_CONFIG.channels),
+        "-ar",
+        String(AUDIO_CONFIG.sampleRate),
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+      ],
+      {
+        stdio: [
+          "pipe",
+          "pipe",
+          "pipe",
+        ],
+      }
+    );
+
+    let settled = false;
+    let started = false;
+    let stderr = "";
+
+    const startTimeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      fail(
+        `yt-dlp/FFmpeg startup timeout${
+          stderr
+            ? `: ${stderr.slice(-800)}`
+            : ""
+        }`
+      );
+    }, AUDIO_CONFIG.ffmpegStartupTimeout);
+
+    function cleanup() {
+      clearTimeout(startTimeout);
+
+      try {
+        ytdlpProcess.stdout.unpipe(
+          ffmpegProcess.stdin
+        );
+      } catch {}
+
+      try {
+        if (!ytdlpProcess.killed) {
+          ytdlpProcess.kill("SIGKILL");
+        }
+      } catch {}
+
+      try {
+        if (!ffmpegProcess.killed) {
+          ffmpegProcess.kill("SIGKILL");
+        }
+      } catch {}
     }
+
+    function fail(message) {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+
+      reject(new Error(message));
+    }
+
+    ytdlpProcess.stdout.on(
+      "error",
+      (err) => {
+        if (err.code === "EPIPE") {
+          return;
+        }
+
+        fail(
+          `yt-dlp stdout error: ${err.message}`
+        );
+      }
+    );
+
+    ffmpegProcess.stdin.on(
+      "error",
+      (err) => {
+        if (err.code === "EPIPE") {
+          return;
+        }
+
+        fail(
+          `FFmpeg stdin error: ${err.message}`
+        );
+      }
+    );
+
+    ytdlpProcess.stdout.pipe(
+      ffmpegProcess.stdin
+    );
+
+    ffmpegProcess.stdout.once(
+      "data",
+      (chunk) => {
+        if (settled) {
+          return;
+        }
+
+        started = true;
+        settled = true;
+
+        clearTimeout(startTimeout);
+
+        ffmpegProcess.stdout.pause();
+        ffmpegProcess.stdout.unshift(chunk);
+
+        const resource =
+          createAudioResource(
+            ffmpegProcess.stdout,
+            {
+              inputType: StreamType.Raw,
+              inlineVolume: false,
+              silencePaddingFrames: 5,
+              highWaterMark:
+                AUDIO_CONFIG.highWaterMark,
+              metadata: {
+                title:
+                  song?.title || null,
+                artist:
+                  song?.artist || null,
+                id:
+                  song?.id || null,
+                url:
+                  song?.url || null,
+              },
+            }
+          );
+
+        resource.ytdlpProcess =
+          ytdlpProcess;
+
+        resource.ffmpegProcess =
+          ffmpegProcess;
+
+        resolve(resource);
+      }
+    );
+
+    ytdlpProcess.stderr.on(
+      "data",
+      (chunk) => {
+        const message =
+          chunk.toString().trim();
+
+        if (
+          message &&
+          !message.includes("WARNING")
+        ) {
+          stderr =
+            `${stderr}\n[yt-dlp] ${message}`.slice(
+              -3000
+            );
+        }
+      }
+    );
+
+    ffmpegProcess.stderr.on(
+      "data",
+      (chunk) => {
+        const message =
+          chunk.toString().trim();
+
+        if (message) {
+          stderr =
+            `${stderr}\n[ffmpeg] ${message}`.slice(
+              -3000
+            );
+        }
+      }
+    );
+
+    ytdlpProcess.once(
+      "error",
+      (err) => {
+        fail(
+          `yt-dlp process error: ${err.message}`
+        );
+      }
+    );
+
+    ffmpegProcess.once(
+      "error",
+      (err) => {
+        fail(
+          `FFmpeg process error: ${err.message}`
+        );
+      }
+    );
+
+    ffmpegProcess.once(
+      "close",
+      (code) => {
+        if (
+          !started &&
+          !settled
+        ) {
+          fail(
+            `FFmpeg exited before producing audio (code ${code})${
+              stderr
+                ? `: ${stderr.slice(-800)}`
+                : ""
+            }`
+          );
+        }
+      }
+    );
+  });
+}
+
+async function createAudioResourceFromSong(
+  song
+) {
+  if (!isValidSong(song)) {
+    throw new Error(
+      "Invalid song object"
+    );
   }
 
-  if (!nextSong) return null;
+  const targetUrl =
+    normalizeUrl(song.url);
 
-  return {
-    title: nextSong.title,
-    artist: nextSong.artist || "Unknown Artist",
-    url: nextSong.url,
-    id: nextSong.id || extractVideoId(nextSong.url),
-    requestedBy: baseSong.requestedBy || null,
-    isManual: false,
-  };
+  try {
+    const directUrl =
+      await getDirectAudioUrl(
+        targetUrl,
+        [
+          "--extractor-args",
+          "youtube:player_client=ios,android",
+        ]
+      );
+
+    return await streamFromDirectUrl(
+      directUrl,
+      song
+    );
+  } catch (err) {
+    log(
+      `[Audio Engine #1 Failed] ${song.title}: ${err.message}`
+    );
+  }
+
+  try {
+    const directUrl =
+      await getDirectAudioUrl(
+        targetUrl
+      );
+
+    return await streamFromDirectUrl(
+      directUrl,
+      song
+    );
+  } catch (err) {
+    log(
+      `[Audio Engine #2 Failed] ${song.title}: ${err.message}`
+    );
+  }
+
+  try {
+    return await streamWithYtdlp(
+      targetUrl,
+      [
+        "--extractor-args",
+        "youtube:player_client=ios,android",
+      ],
+      song
+    );
+  } catch (err) {
+    log(
+      `[Audio Engine #3 Failed] ${song.title}: ${err.message}`
+    );
+  }
+
+  throw new Error(
+    `All audio streaming engines failed for "${song.title}"`
+  );
 }
 
-function warmAutoplayCandidate(serverQueue, baseSong) {
-  if (!serverQueue.autoplay) return;
-  serverQueue.autoplayPrefetch = {
-    songUrl: baseSong.url,
-    promise: getAutoplayCandidate(serverQueue, baseSong)
-      .catch((err) => {
-        log(`Autoplay Prefetch Error: ${err.message}`);
-        return null;
-      }),
-  };
-}
-
-async function playNextSong(guildId) {
-  const serverQueue = queues.get(guildId);
-  if (!serverQueue) return;
-
-  if (serverQueue.failCount >= 3) {
-    log(`[Music] Guild ${guildId}: 3 consecutive errors. Stopping playback.`);
-    const errEmbed = new EmbedBuilder()
-      .setColor("#FF0000")
-      .setDescription("Too many consecutive playback errors.");
-    serverQueue.textChannel.send({ embeds: [errEmbed] });
-    serverQueue.connection.destroy();
-    queues.delete(guildId);
+function destroyAudioResource(resource) {
+  if (!resource) {
     return;
   }
 
-  if (serverQueue.songs.length === 0) {
-    if (serverQueue.autoplay && serverQueue.lastSong) {
+  try {
+    if (
+      resource.ffmpegProcess &&
+      !resource.ffmpegProcess.killed
+    ) {
+      resource.ffmpegProcess.kill(
+        "SIGKILL"
+      );
+    }
+  } catch {}
+
+  try {
+    if (
+      resource.ytdlpProcess &&
+      !resource.ytdlpProcess.killed
+    ) {
+      resource.ytdlpProcess.kill(
+        "SIGKILL"
+      );
+    }
+  } catch {}
+}
+
+async function getAutoplayCandidate(
+  serverQueue,
+  baseSong
+) {
+  if (
+    !serverQueue ||
+    !baseSong
+  ) {
+    return null;
+  }
+
+  const videoId =
+    getSongId(baseSong);
+
+  if (!videoId) {
+    return null;
+  }
+
+  const radioTracks =
+    await getYtMusicRadioTracks(
+      videoId
+    );
+
+  if (!radioTracks.length) {
+    return null;
+  }
+
+  for (const candidate of radioTracks) {
+    if (!candidate?.id) {
+      continue;
+    }
+
+    const candidateSong =
+      normalizeSongMetadata({
+        ...candidate,
+        requestedBy:
+          baseSong.requestedBy ||
+          null,
+        isManual: false,
+      });
+
+    if (!isValidSong(candidateSong)) {
+      continue;
+    }
+
+    const candidateId =
+      getSongId(candidateSong);
+
+    const candidateKey =
+      getSongKey(candidateSong);
+
+    const candidateUrl =
+      getSongUrlKey(candidateSong);
+
+    if (
+      candidateId ===
+      getSongId(baseSong)
+    ) {
+      continue;
+    }
+
+    if (
+      serverQueue.playedIds.has(
+        candidateId
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      serverQueue.playedKeys.has(
+        candidateKey
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      serverQueue.playedUrls.has(
+        candidateUrl
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      serverQueue.songs.some(
+        (song) =>
+          getSongId(song) ===
+            candidateId ||
+          getSongKey(song) ===
+            candidateKey
+      )
+    ) {
+      continue;
+    }
+
+    return candidateSong;
+  }
+
+  return null;
+}
+
+function warmAutoplayCandidate(
+  serverQueue,
+  baseSong
+) {
+  if (
+    !serverQueue?.autoplay ||
+    !baseSong
+  ) {
+    return;
+  }
+
+  const songKey =
+    getSongKey(baseSong);
+
+  if (
+    serverQueue.autoplayPrefetch &&
+    serverQueue.autoplayPrefetch.songKey ===
+      songKey
+  ) {
+    return;
+  }
+
+  const generation =
+    ++serverQueue.autoplayGeneration;
+
+  const promise =
+    getAutoplayCandidate(
+      serverQueue,
+      baseSong
+    ).catch((err) => {
+      log(
+        `[Autoplay Prefetch Error] ${err.message}`
+      );
+
+      return null;
+    });
+
+  serverQueue.autoplayPrefetch = {
+    songKey,
+    generation,
+    promise,
+  };
+}
+
+function destroyServerQueue(
+  guildId,
+  deleteQueue = true
+) {
+  const serverQueue =
+    queues.get(guildId);
+
+  if (!serverQueue) {
+    return;
+  }
+
+  serverQueue.transitioning = true;
+  serverQueue.playing = false;
+  serverQueue.autoplayPrefetch = null;
+
+  destroyAudioResource(
+    serverQueue.currentResource
+  );
+
+  serverQueue.currentResource =
+    null;
+
+  serverQueue.currentSong =
+    null;
+
+  try {
+    serverQueue.player.stop(true);
+  } catch {}
+
+  try {
+    serverQueue.connection.destroy();
+  } catch {}
+
+  if (deleteQueue) {
+    queues.delete(guildId);
+  }
+}
+
+async function advanceQueue(
+  guildId,
+  reason = "idle"
+) {
+  const serverQueue =
+    queues.get(guildId);
+
+  if (!serverQueue) {
+    return;
+  }
+
+  if (serverQueue.transitioning) {
+    log(
+      `[Queue Transition Ignored] Guild ${guildId} | ${reason}`
+    );
+
+    return;
+  }
+
+  serverQueue.transitioning = true;
+
+  try {
+    if (
+      serverQueue.songs.length > 0
+    ) {
+      const finishedSong =
+        serverQueue.songs.shift();
+
+      if (finishedSong) {
+        log(
+          `[Queue Advance] Guild ${guildId} | Finished: ${finishedSong.title} | Reason: ${reason}`
+        );
+      }
+    }
+
+    if (reason === "error") {
+      await delay(
+        AUDIO_CONFIG.failureDelay
+      );
+    }
+
+    await playNextSong(guildId);
+  } catch (err) {
+    log(
+      `[Queue Advance Error] Guild ${guildId}: ${err.message}`
+    );
+  } finally {
+    const currentQueue =
+      queues.get(guildId);
+
+    if (currentQueue) {
+      currentQueue.transitioning =
+        false;
+    }
+  }
+}
+
+async function playNextSong(guildId) {
+  const serverQueue =
+    queues.get(guildId);
+
+  if (!serverQueue) {
+    return;
+  }
+
+  if (serverQueue.playing) {
+    return;
+  }
+
+  if (
+    serverQueue.failCount >=
+    AUDIO_CONFIG.maxConsecutiveFailures
+  ) {
+    const embed =
+      new EmbedBuilder()
+        .setColor("#FF0000")
+        .setDescription(
+          "Too many consecutive playback errors. Music stopped."
+        );
+
+    await serverQueue.textChannel
+      ?.send({
+        embeds: [embed],
+      })
+      .catch(() => {});
+
+    destroyServerQueue(guildId);
+    return;
+  }
+
+  if (
+    serverQueue.songs.length === 0
+  ) {
+    if (
+      serverQueue.autoplay &&
+      serverQueue.lastSong
+    ) {
       try {
         let nextSong = null;
 
-        const prefetch = serverQueue.autoplayPrefetch;
-        if (prefetch && prefetch.songUrl === serverQueue.lastSong.url) {
-          nextSong = await prefetch.promise;
+        const prefetch =
+          serverQueue.autoplayPrefetch;
+
+        const lastSongKey =
+          getSongKey(
+            serverQueue.lastSong
+          );
+
+        if (
+          prefetch &&
+          prefetch.songKey ===
+            lastSongKey
+        ) {
+          nextSong =
+            await prefetch.promise;
         }
-        serverQueue.autoplayPrefetch = null;
+
+        serverQueue.autoplayPrefetch =
+          null;
 
         if (!nextSong) {
-          nextSong = await getAutoplayCandidate(serverQueue, serverQueue.lastSong);
+          nextSong =
+            await getAutoplayCandidate(
+              serverQueue,
+              serverQueue.lastSong
+            );
         }
 
-        if (nextSong) {
-          serverQueue.songs.push(nextSong);
-          serverQueue.playedUrls.add(nextSong.url);
-          serverQueue.playedKeys.add(getTitleKey(nextSong.title));
-
-          log(`[Autoplay YTM Picked]: ${nextSong.title} - ${nextSong.artist} (${nextSong.url})`);
-        } else {
-          throw new Error("No suitable unique YouTube Music radio track found.");
+        if (!nextSong) {
+          throw new Error(
+            "No suitable unique autoplay track found"
+          );
         }
+
+        serverQueue.songs.push(
+          nextSong
+        );
+
+        const songId =
+          getSongId(nextSong);
+
+        const songKey =
+          getSongKey(nextSong);
+
+        const songUrl =
+          getSongUrlKey(nextSong);
+
+        serverQueue.playedIds.add(
+          songId
+        );
+
+        serverQueue.playedKeys.add(
+          songKey
+        );
+
+        serverQueue.playedUrls.add(
+          songUrl
+        );
+
+        log(
+          `[Autoplay] Guild ${guildId} | ${nextSong.title} - ${nextSong.artist}`
+        );
       } catch (err) {
-        log(`Autoplay Error: ${err.message}`);
-        serverQueue.connection.destroy();
-        queues.delete(guildId);
+        log(
+          `[Autoplay Error] Guild ${guildId}: ${err.message}`
+        );
+
+        const embed =
+          new EmbedBuilder()
+            .setColor("#FF0000")
+            .setDescription(
+              "Autoplay could not find another suitable track. Playback stopped."
+            );
+
+        await serverQueue.textChannel
+          ?.send({
+            embeds: [embed],
+          })
+          .catch(() => {});
+
+        destroyServerQueue(guildId);
         return;
       }
     } else {
-      const finishEmbed = new EmbedBuilder()
-        .setColor("#FF0000")
-        .setDescription("Queue finished.");
-      serverQueue.textChannel.send({ embeds: [finishEmbed] });
-      serverQueue.connection.destroy();
-      queues.delete(guildId);
+      const embed =
+        new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription(
+            "Queue finished."
+          );
+
+      await serverQueue.textChannel
+        ?.send({
+          embeds: [embed],
+        })
+        .catch(() => {});
+
+      destroyServerQueue(guildId);
       return;
     }
   }
 
-  const song = serverQueue.songs[0];
+  const song =
+    normalizeSongMetadata(
+      serverQueue.songs[0]
+    );
 
-  if (!song.isManual && !isSingleSong(song)) {
-    log(`[Skipping Blacklisted Autoplay Song]: ${song.title}`);
+  serverQueue.songs[0] = song;
+
+  if (!isValidSong(song)) {
     serverQueue.songs.shift();
     return playNextSong(guildId);
   }
 
   serverQueue.lastSong = song;
-  serverQueue.playedUrls.add(song.url);
-  serverQueue.playedKeys.add(getTitleKey(song.title));
 
-  if (serverQueue.songs.length === 1) {
-    warmAutoplayCandidate(serverQueue, song);
+  const songId =
+    getSongId(song);
+
+  const songKey =
+    getSongKey(song);
+
+  const songUrl =
+    getSongUrlKey(song);
+
+  serverQueue.playedIds.add(
+    songId
+  );
+
+  serverQueue.playedKeys.add(
+    songKey
+  );
+
+  serverQueue.playedUrls.add(
+    songUrl
+  );
+
+  if (
+    serverQueue.autoplay &&
+    serverQueue.songs.length === 1
+  ) {
+    warmAutoplayCandidate(
+      serverQueue,
+      song
+    );
   }
 
+  serverQueue.playing = true;
+
   try {
-    log(`[Music Stream Start] Guild: ${guildId} | Playing: ${song.title} - ${song.artist}`);
-    const resource = await createAudioResourceFromSong(song);
+    log(
+      `[Music Stream Start] Guild ${guildId} | ${song.title} - ${song.artist}`
+    );
 
-    serverQueue.player.play(resource);
-    serverQueue.failCount = 0;
+    const resource =
+      await createAudioResourceFromSong(
+        song
+      );
 
-    const artistText = song.artist && song.artist !== "Unknown Artist" ? ` by ${song.artist}` : "";
-    const reqText = song.isManual && song.requestedBy ? `\nRequested by: <@${song.requestedBy.id}>` : "";
-    
-    const embed = new EmbedBuilder()
-      .setColor("#00FF00")
-      .setDescription(`Started playing [${song.title}](${song.url})${artistText}${reqText}`)
-      .setThumbnail(`https://img.youtube.com/vi/${song.id}/mqdefault.jpg`);
+    const currentQueue =
+      queues.get(guildId);
 
-    serverQueue.textChannel.send({ embeds: [embed] });
+    if (
+      !currentQueue ||
+      currentQueue !== serverQueue
+    ) {
+      destroyAudioResource(resource);
+      return;
+    }
+
+    currentQueue.currentResource =
+      resource;
+
+    currentQueue.currentSong =
+      song;
+
+    currentQueue.player.play(
+      resource
+    );
+
+    currentQueue.failCount = 0;
+
+    const artistText =
+      song.artist &&
+      song.artist !==
+        "Unknown Artist"
+        ? ` by ${song.artist}`
+        : "";
+
+    const reqText =
+      song.isManual &&
+      song.requestedBy
+        ? `\nRequested by: <@${song.requestedBy.id}>`
+        : "\n*(Autoplay)*";
+
+    const embed =
+      new EmbedBuilder()
+        .setColor("#00FF00")
+        .setDescription(
+          `Started playing [${song.title}](${song.url})${artistText}${reqText}`
+        );
+
+    if (songId) {
+      embed.setThumbnail(
+        `https://img.youtube.com/vi/${songId}/mqdefault.jpg`
+      );
+    }
+
+    await currentQueue.textChannel
+      ?.send({
+        embeds: [embed],
+      })
+      .catch(() => {});
+
+    log(
+      `[Music Stream Ready] Guild ${guildId} | ${song.title}`
+    );
   } catch (err) {
-    log(`Play Stream Error: ${err.message}`);
-    serverQueue.failCount++;
-    const errPlayEmbed = new EmbedBuilder()
-      .setColor("#FF0000")
-      .setDescription(`Failed to play: **${song.title}**. Skipping...`);
-    serverQueue.textChannel.send({ embeds: [errPlayEmbed] });
-    serverQueue.songs.shift();
-    await delay(2000);
-    playNextSong(guildId);
+    log(
+      `[Play Stream Error] Guild ${guildId} | ${song.title}: ${err.message}`
+    );
+
+    const currentQueue =
+      queues.get(guildId);
+
+    if (!currentQueue) {
+      return;
+    }
+
+    currentQueue.playing = false;
+
+    destroyAudioResource(
+      currentQueue.currentResource
+    );
+
+    currentQueue.currentResource =
+      null;
+
+    currentQueue.currentSong =
+      null;
+
+    currentQueue.failCount++;
+
+    const errEmbed =
+      new EmbedBuilder()
+        .setColor("#FF0000")
+        .setDescription(
+          `Failed to play: **${song.title}**. Skipping...`
+        );
+
+    await currentQueue.textChannel
+      ?.send({
+        embeds: [errEmbed],
+      })
+      .catch(() => {});
+
+    if (
+      currentQueue.songs[0] ===
+      song
+    ) {
+      currentQueue.songs.shift();
+    }
+
+    await delay(
+      AUDIO_CONFIG.failureDelay
+    );
+
+    await playNextSong(guildId);
   }
 }
 
 function getActiveUsersCount(client) {
-  const activeUserIds = new Set();
+  const activeUserIds =
+    new Set();
 
-  for (const [guildId, queue] of queues.entries()) {
-    if (!queue) continue;
-    
-    const connection = getVoiceConnection(guildId);
-    if (connection) {
-      const channelId = connection.joinConfig?.channelId;
-      if (channelId) {
-        const channel = client.channels.cache.get(channelId);
-        if (channel && channel.members) {
-          channel.members.forEach((member) => {
-            if (!member.user.bot) {
-              activeUserIds.add(member.id);
-            }
-          });
+  for (const [
+    guildId,
+    queue,
+  ] of queues.entries()) {
+    if (!queue) {
+      continue;
+    }
+
+    const connection =
+      getVoiceConnection(guildId);
+
+    if (!connection) {
+      continue;
+    }
+
+    const channelId =
+      connection.joinConfig
+        ?.channelId;
+
+    if (!channelId) {
+      continue;
+    }
+
+    const channel =
+      client.channels.cache.get(
+        channelId
+      );
+
+    if (channel?.members) {
+      channel.members.forEach(
+        (member) => {
+          if (!member.user.bot) {
+            activeUserIds.add(
+              member.id
+            );
+          }
         }
-      }
+      );
     }
   }
 
@@ -803,550 +1886,1145 @@ function getActiveUsersCount(client) {
 }
 
 function runDiscord() {
-  const discordClient = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-      GatewayIntentBits.DirectMessages,
-      GatewayIntentBits.GuildVoiceStates,
-    ],
-    partials: [Partials.Channel],
-  });
+  const discordClient =
+    new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildVoiceStates,
+      ],
+      partials: [
+        Partials.Channel,
+      ],
+    });
 
-  discordClient.once("clientReady", () => {
-    log(`Discord Bot online as: ${discordClient.user.tag}`);
-    
-    const updateActivity = () => {
-      const activeUsers = getActiveUsersCount(discordClient);
-      discordClient.user.setActivity(`!h | ${activeUsers}`, { type: ActivityType.Listening });
-    };
+  discordClient.once(
+    "clientReady",
+    () => {
+      log(
+        `Discord Bot online as: ${discordClient.user.tag}`
+      );
 
-    updateActivity();
-    setInterval(updateActivity, 30 * 1000);
-  });
-
-  discordClient.on("messageCreate", async (message) => {
-    if (message.author.bot) return;
-    if (!message.guild) return;
-
-    const content = message.content.trim();
-    if (!content.startsWith("!")) return;
-
-    const prefixLen = 1;
-    const args = content.slice(prefixLen).trim().split(/ +/);
-    const command = args.shift()?.toLowerCase();
-    const voiceChannel = message.member?.voice?.channel;
-
-    log(`[Bot Command] Guild: ${message.guild.id} | From ${message.author.tag} in #${message.channel.name}: ${content}`);
-
-    if (command === "h") {
-      const helpEmbed = new EmbedBuilder()
-        .setColor("#0099FF")
-        .setTitle(`Available Commands - ${message.guild.name}`)
-        .setDescription(
-          "**AI Assistant**\n" +
-          "`!a` - Ask AI assistant a question or prompt\n\n" +
-          "**Music**\n" +
-          "`!p` - Play a track by link or search term\n" +
-          "`!q` - Display the current song queue\n" +
-          "`!s` - Skip the current track\n" +
-          "`!l` - Make the bot leave the voice channel\n" +
-          "`!ap` - Toggle automatic song recommendations"
-        )
-        .setFooter({
-          text: "Note: Skips and stops are restricted to the track requester or admins.",
-        });
-
-      return message.channel.send({ embeds: [helpEmbed] });
-    }
-
-    if (command === "a") {
-      let argPrompt = args.join(" ").trim();
-      let replyText = "";
-
-      if (message.reference?.messageId) {
-        try {
-          const referencedMsg = await message.channel.messages.fetch(
-            message.reference.messageId
+      const updateActivity = () => {
+        const activeUsers =
+          getActiveUsersCount(
+            discordClient
           );
-          replyText = referencedMsg?.content?.trim() || "";
-        } catch {}
-      }
 
-      let prompt = "";
-      if (argPrompt && replyText) prompt = `${argPrompt}: ${replyText}`;
-      else if (argPrompt) prompt = argPrompt;
-      else if (replyText) prompt = replyText;
+        discordClient.user.setActivity(
+          `!h | ${activeUsers}`,
+          {
+            type:
+              ActivityType.Listening,
+          }
+        );
+      };
 
-      if (!prompt) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("Please provide a question or prompt!");
-        return message.channel.send({ embeds: [embed] });
-      }
+      updateActivity();
 
-      log(`[Discord AI Chat] Guild: ${message.guild.id} | From ${message.author.tag}: ${prompt}`);
-
-      let typingInterval;
-      try {
-        await message.channel.sendTyping();
-        typingInterval = setInterval(() => {
-          message.channel.sendTyping().catch(() => {});
-        }, 5000);
-
-        let responseText = await processGeminiRequest(prompt);
-
-        const parts = chunkText(responseText, 1900);
-        for (let i = 0; i < parts.length; i++) {
-          await message.channel.send(parts[i]);
-        }
-      } catch (err) {
-        log(`Discord AI Error: ${err.message}`);
-        await message.channel.send("Failed to process request.");
-      } finally {
-        if (typingInterval) clearInterval(typingInterval);
-      }
-      return;
+      setInterval(
+        updateActivity,
+        30000
+      );
     }
+  );
 
-    if (command === "q") {
-      const serverQueue = queues.get(message.guild.id);
-      if (!serverQueue || serverQueue.songs.length === 0) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("The queue is currently empty.");
-        return message.channel.send({ embeds: [embed] });
+  discordClient.on(
+    "messageCreate",
+    async (message) => {
+      if (message.author.bot) {
+        return;
       }
 
-      serverQueue.textChannel = message.channel;
-
-      const nowPlaying = serverQueue.songs[0];
-      const queuedSongs = serverQueue.songs.slice(1);
-
-      const reqInfo = nowPlaying.isManual && nowPlaying.requestedBy ? ` | Requested by: <@${nowPlaying.requestedBy.id}>` : " | *(Autoplay)*";
-      let description = `**Now Playing:**\n[${nowPlaying.title}](${nowPlaying.url}) ${nowPlaying.artist && nowPlaying.artist !== "Unknown Artist" ? `by ${nowPlaying.artist}` : ""}${reqInfo}\n\n**Up Next:**\n`;
-
-      if (queuedSongs.length === 0) {
-        description += "No upcoming songs manually queued.";
-      } else {
-        const displayList = queuedSongs.slice(0, 10);
-        description += displayList
-          .map((song, index) => `${index + 1}. [${song.title}](${song.url}) - <@${song.requestedBy?.id}>`)
-          .join("\n");
-
-        if (queuedSongs.length > 10) {
-          description += `\n\n...and ${queuedSongs.length - 10} more song(s).`;
-        }
+      if (!message.guild) {
+        return;
       }
 
-      const queueEmbed = new EmbedBuilder()
-        .setColor("#0099FF")
-        .setTitle(`Music Queue - ${message.guild.name}`)
-        .setDescription(description)
-        .setFooter({
-          text: `Autoplay: ${serverQueue.autoplay ? "Enabled" : "Disabled"} | Total Songs in Queue: ${serverQueue.songs.length}`,
-        });
+      const content =
+        message.content.trim();
 
-      return message.channel.send({ embeds: [queueEmbed] });
-    }
-
-    if (command === "p") {
-      if (!voiceChannel) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You need to join a voice channel first!");
-        return message.channel.send({ embeds: [embed] });
+      if (!content.startsWith("!")) {
+        return;
       }
 
-      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
-      if (botChannelId && voiceChannel.id !== botChannelId) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You must be in the same voice channel as the bot to play music!");
-        return message.channel.send({ embeds: [embed] });
-      }
+      const args =
+        content
+          .slice(1)
+          .trim()
+          .split(/ +/);
 
-      const query = args.join(" ");
-      if (!query) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("Please provide a song title, playlist URL, or song URL!");
-        return message.channel.send({ embeds: [embed] });
-      }
+      const command =
+        args
+          .shift()
+          ?.toLowerCase();
 
-      try {
-        const isPlaylist = query.includes("list=") || query.includes("playlist");
-        let songsToAdd = [];
+      const voiceChannel =
+        message.member?.voice?.channel;
 
-        const requesterData = {
-          id: message.author.id,
-          tag: message.author.tag,
-        };
+      log(
+        `[Bot Command] Guild: ${message.guild.id} | From ${message.author.tag} in #${message.channel.name}: ${content}`
+      );
 
-        const directVideoId = extractVideoId(query);
-
-        if (isPlaylist && !query.includes("watch?v=")) {
-          log(`[Playlist Processing]: ${query}`);
-          const playlistTracks = await getPlaylistTracks(query);
-
-          if (playlistTracks && playlistTracks.length > 0) {
-            songsToAdd = playlistTracks.map((t) => ({
-              title: t.title,
-              artist: t.artist || "Unknown Artist",
-              url: t.url,
-              id: t.id || extractVideoId(t.url),
-              requestedBy: requesterData,
-              isManual: true,
-            }));
-          } else {
-            try {
-              const playlistInfo = await play.playlist_info(query, { incomplete: true }).catch((e) => {
-                log(`play-dl Playlist Catch: ${e.message}`);
-                return null;
-              });
-              if (playlistInfo) {
-                const videos = await playlistInfo.all_videos();
-                songsToAdd = videos.map((v) => {
-                  let artistName = "Unknown Artist";
-                  if (v.channel && v.channel.name) artistName = v.channel.name;
-                  return {
-                    title: v.title,
-                    artist: artistName,
-                    url: v.url,
-                    id: v.id || extractVideoId(v.url),
-                    requestedBy: requesterData,
-                    isManual: true,
-                  };
-                });
-              }
-            } catch (pErr) {
-              log(`play-dl Playlist Fallback Error: ${pErr.message}`);
-            }
-          }
-
-          if (songsToAdd.length === 0) {
-            const embed = new EmbedBuilder()
-              .setColor("#FF0000")
-              .setDescription("Could not load any tracks from the playlist.");
-            return message.channel.send({ embeds: [embed] });
-          }
-        } else if (directVideoId) {
-          const normUrl = `https://www.youtube.com/watch?v=${directVideoId}`;
-          
-          let trackInfo = await fetchOembedInfo(directVideoId, requesterData);
-
-          if (!trackInfo) {
-            try {
-              const { stdout } = await execPromise(
-                `yt-dlp --extractor-args "youtube:player_client=ios,android" -j --no-warnings "${normUrl}"`
-              );
-              const json = JSON.parse(stdout);
-              trackInfo = {
-                title: json.title,
-                artist: json.artist || json.uploader || json.channel || "Unknown Artist",
-                url: normUrl,
-                id: directVideoId,
-                durationInSec: json.duration || 0,
-                requestedBy: requesterData,
-                isManual: true,
-              };
-            } catch (yErr) {
-              log(`yt-dlp Direct URL Fetch Error: ${yErr.message}`);
-            }
-          }
-
-          if (!trackInfo) {
-            try {
-              const info = await play.video_basic_info(normUrl).catch((e) => {
-                log(`play-dl video_basic_info Catch: ${e.message}`);
-                return null;
-              });
-              if (info && info.video_details) {
-                const v = info.video_details;
-                let artistName = "Unknown Artist";
-                if (v.channel && v.channel.name) artistName = v.channel.name.replace(/ - Topic$/i, "");
-                trackInfo = {
-                  title: v.title,
-                  artist: artistName,
-                  url: normUrl,
-                  id: directVideoId,
-                  durationInSec: v.durationInSec || 0,
-                  requestedBy: requesterData,
-                  isManual: true,
-                };
-              }
-            } catch (e) {
-              log(`play-dl video_basic_info Error: ${e.message}`);
-            }
-          }
-
-          if (trackInfo) {
-            songsToAdd.push(trackInfo);
-          } else {
-            const embed = new EmbedBuilder()
-              .setColor("#FF0000")
-              .setDescription("Could not fetch video from the provided URL.");
-            return message.channel.send({ embeds: [embed] });
-          }
-        } else {
-          const searchResult = await searchYtMusic(query, 10);
-
-          if (searchResult && searchResult.length > 0) {
-            const validVideo = searchResult.find((v) => isSingleSong(v)) || searchResult[0];
-            songsToAdd.push({
-              title: validVideo.title,
-              artist: validVideo.artist || "Unknown Artist",
-              url: validVideo.url,
-              id: validVideo.id || extractVideoId(validVideo.url),
-              requestedBy: requesterData,
-              isManual: true,
+      if (command === "h") {
+        const embed =
+          new EmbedBuilder()
+            .setColor("#0099FF")
+            .setTitle(
+              `Available Commands - ${message.guild.name}`
+            )
+            .setDescription(
+              "**AI Assistant**\n" +
+                "`!a` - Ask AI assistant a question or prompt\n\n" +
+                "**Music**\n" +
+                "`!p` - Play a track by link or search term\n" +
+                "`!q` - Display the current song queue\n" +
+                "`!s` - Skip the current track\n" +
+                "`!l` - Make the bot leave the voice channel\n" +
+                "`!ap` - Toggle automatic song recommendations"
+            )
+            .setFooter({
+              text:
+                "Skips and stops are restricted to the track requester or admins.",
             });
-          } else {
-            const embed = new EmbedBuilder()
+
+        return message.channel.send({
+          embeds: [embed],
+        });
+      }
+
+      if (command === "a") {
+        const argPrompt =
+          args.join(" ").trim();
+
+        let replyText = "";
+
+        if (
+          message.reference?.messageId
+        ) {
+          try {
+            const referencedMsg =
+              await message.channel.messages.fetch(
+                message.reference.messageId
+              );
+
+            replyText =
+              referencedMsg?.content?.trim() ||
+              "";
+          } catch {}
+        }
+
+        let prompt = "";
+
+        if (
+          argPrompt &&
+          replyText
+        ) {
+          prompt =
+            `${argPrompt}: ${replyText}`;
+        } else if (argPrompt) {
+          prompt = argPrompt;
+        } else if (replyText) {
+          prompt = replyText;
+        }
+
+        if (!prompt) {
+          const embed =
+            new EmbedBuilder()
               .setColor("#FF0000")
-              .setDescription("No song found.");
-            return message.channel.send({ embeds: [embed] });
+              .setDescription(
+                "Please provide a question or prompt!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        log(
+          `[Discord AI Chat] Guild: ${message.guild.id} | From ${message.author.tag}: ${prompt}`
+        );
+
+        let typingInterval;
+
+        try {
+          await message.channel.sendTyping();
+
+          typingInterval =
+            setInterval(() => {
+              message.channel
+                .sendTyping()
+                .catch(() => {});
+            }, 5000);
+
+          const responseText =
+            await processGeminiRequest(
+              prompt
+            );
+
+          const parts =
+            chunkText(
+              responseText,
+              1900
+            );
+
+          for (
+            let i = 0;
+            i < parts.length;
+            i++
+          ) {
+            await message.channel.send(
+              parts[i]
+            );
+          }
+        } catch (err) {
+          log(
+            `Discord AI Error: ${err.message}`
+          );
+
+          await message.channel
+            .send(
+              "Failed to process request."
+            )
+            .catch(() => {});
+        } finally {
+          if (typingInterval) {
+            clearInterval(
+              typingInterval
+            );
           }
         }
 
-        let serverQueue = queues.get(message.guild.id);
+        return;
+      }
 
-        if (!serverQueue) {
-          const connection = joinVoiceChannel({
-            channelId: voiceChannel.id,
-            guildId: message.guild.id,
-            adapterCreator: message.guild.voiceAdapterCreator,
+      if (command === "q") {
+        const serverQueue =
+          queues.get(
+            message.guild.id
+          );
+
+        if (
+          !serverQueue ||
+          serverQueue.songs.length === 0
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "The queue is currently empty."
+              );
+
+          return message.channel.send({
+            embeds: [embed],
           });
+        }
 
-          const player = createAudioPlayer();
-          connection.subscribe(player);
+        serverQueue.textChannel =
+          message.channel;
 
-          serverQueue = {
-            textChannel: message.channel,
-            connection,
-            player,
-            songs: [],
-            lastSong: null,
-            autoplay: true,
-            failCount: 0,
-            playedUrls: new Set(),
-            playedKeys: new Set(),
-            autoplayPrefetch: null,
+        const nowPlaying =
+          serverQueue.songs[0];
+
+        const queuedSongs =
+          serverQueue.songs.slice(1);
+
+        const reqInfo =
+          nowPlaying.isManual &&
+          nowPlaying.requestedBy
+            ? ` | Requested by: <@${nowPlaying.requestedBy.id}>`
+            : " | *(Autoplay)*";
+
+        let description =
+          `**Now Playing:**\n` +
+          `[${nowPlaying.title}](${nowPlaying.url}) ` +
+          `${
+            nowPlaying.artist &&
+            nowPlaying.artist !==
+              "Unknown Artist"
+              ? `by ${nowPlaying.artist}`
+              : ""
+          }` +
+          `${reqInfo}\n\n` +
+          `**Up Next:**\n`;
+
+        if (
+          queuedSongs.length === 0
+        ) {
+          description +=
+            "No upcoming songs manually queued.";
+        } else {
+          const displayList =
+            queuedSongs.slice(0, 10);
+
+          description +=
+            displayList
+              .map(
+                (song, index) =>
+                  `${index + 1}. [${song.title}](${song.url}) - ${
+                    song.requestedBy?.id
+                      ? `<@${song.requestedBy.id}>`
+                      : "Autoplay"
+                  }`
+              )
+              .join("\n");
+
+          if (
+            queuedSongs.length > 10
+          ) {
+            description +=
+              `\n\n...and ${
+                queuedSongs.length - 10
+              } more song(s).`;
+          }
+        }
+
+        const queueEmbed =
+          new EmbedBuilder()
+            .setColor("#0099FF")
+            .setTitle(
+              `Music Queue - ${message.guild.name}`
+            )
+            .setDescription(
+              description
+            )
+            .setFooter({
+              text:
+                `Autoplay: ${
+                  serverQueue.autoplay
+                    ? "Enabled"
+                    : "Disabled"
+                } | Total Songs in Queue: ${serverQueue.songs.length}`,
+            });
+
+        return message.channel.send({
+          embeds: [queueEmbed],
+        });
+      }
+
+      if (command === "p") {
+        if (!voiceChannel) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You need to join a voice channel first!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const botChannelId =
+          getVoiceConnection(
+            message.guild.id
+          )?.joinConfig?.channelId ||
+          message.guild.members.me
+            ?.voice?.channelId;
+
+        if (
+          botChannelId &&
+          voiceChannel.id !==
+            botChannelId
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You must be in the same voice channel as the bot to play music!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const query =
+          args.join(" ").trim();
+
+        if (!query) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "Please provide a song title, playlist URL, or song URL!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        try {
+          const isPlaylist =
+            /[?&]list=|\/playlist/i.test(
+              query
+            );
+
+          let songsToAdd = [];
+
+          const requesterData = {
+            id: message.author.id,
+            tag: message.author.tag,
           };
 
-          queues.set(message.guild.id, serverQueue);
-          serverQueue.songs.push(...songsToAdd);
+          const directVideoId =
+            extractVideoId(query);
 
-          const currentGuildId = message.guild.id;
+          if (
+            isPlaylist &&
+            !directVideoId
+          ) {
+            const playlistTracks =
+              await getPlaylistTracks(
+                query
+              );
 
-          player.on(AudioPlayerStatus.Idle, () => {
-            const sq = queues.get(currentGuildId);
-            if (sq) {
-              sq.songs.shift();
-              playNextSong(currentGuildId);
+            songsToAdd =
+              playlistTracks.map(
+                (track) =>
+                  normalizeSongMetadata({
+                    ...track,
+                    requestedBy:
+                      requesterData,
+                    isManual: true,
+                  })
+              );
+          } else if (
+            directVideoId
+          ) {
+            const normUrl =
+              `https://www.youtube.com/watch?v=${directVideoId}`;
+
+            const trackInfo =
+              await fetchVideoInfo(
+                directVideoId
+              );
+
+            if (trackInfo) {
+              songsToAdd.push(
+                normalizeSongMetadata({
+                  ...trackInfo,
+                  url: normUrl,
+                  requestedBy:
+                    requesterData,
+                  isManual: true,
+                })
+              );
             }
-          });
-
-          player.on("error", async (err) => {
-            log(`Audio Player Error in Guild ${currentGuildId}: ${err.message}`);
-            const sq = queues.get(currentGuildId);
-            if (sq) {
-              sq.failCount++;
-              sq.songs.shift();
-              await delay(2000);
-              playNextSong(currentGuildId);
-            }
-          });
-
-          if (isPlaylist && !query.includes("watch?v=")) {
-            const embed = new EmbedBuilder()
-              .setColor("#00FF00")
-              .setDescription(`Added **${songsToAdd.length}** tracks from playlist to queue!`);
-            message.channel.send({ embeds: [embed] });
-          }
-
-          playNextSong(message.guild.id);
-        } else {
-          serverQueue.textChannel = message.channel;
-          serverQueue.songs.push(...songsToAdd);
-          log(`[Queue Added] Guild: ${message.guild.id} | Added ${songsToAdd.length} tracks.`);
-          
-          if (isPlaylist && !query.includes("watch?v=")) {
-            const embed = new EmbedBuilder()
-              .setColor("#00FF00")
-              .setDescription(`Added **${songsToAdd.length}** tracks from playlist to queue!`);
-            return message.channel.send({ embeds: [embed] });
           } else {
-            const artistText = songsToAdd[0].artist && songsToAdd[0].artist !== "Unknown Artist" ? ` by ${songsToAdd[0].artist}` : "";
-            const embed = new EmbedBuilder()
-              .setColor("#00FF00")
-              .setDescription(`Added to queue: [${songsToAdd[0].title}](${songsToAdd[0].url})${artistText}`)
-              .setThumbnail(`https://img.youtube.com/vi/${songsToAdd[0].id}/mqdefault.jpg`);
-            return message.channel.send({ embeds: [embed] });
+            const searchResult =
+              await searchYtMusic(
+                query,
+                10
+              );
+
+            if (
+              searchResult.length > 0
+            ) {
+              songsToAdd.push(
+                normalizeSongMetadata({
+                  ...searchResult[0],
+                  requestedBy:
+                    requesterData,
+                  isManual: true,
+                })
+              );
+            }
           }
+
+          songsToAdd =
+            songsToAdd
+              .map(normalizeSongMetadata)
+              .filter(isValidSong);
+
+          if (
+            songsToAdd.length === 0
+          ) {
+            const embed =
+              new EmbedBuilder()
+                .setColor("#FF0000")
+                .setDescription(
+                  "No valid tracks were found."
+                );
+
+            return message.channel.send({
+              embeds: [embed],
+            });
+          }
+
+          let serverQueue =
+            queues.get(
+              message.guild.id
+            );
+
+          if (!serverQueue) {
+            const connection =
+              joinVoiceChannel({
+                channelId:
+                  voiceChannel.id,
+                guildId:
+                  message.guild.id,
+                adapterCreator:
+                  message.guild
+                    .voiceAdapterCreator,
+                selfDeaf: true,
+              });
+
+            const player =
+              createAudioPlayer();
+
+            connection.subscribe(
+              player
+            );
+
+            serverQueue = {
+              textChannel:
+                message.channel,
+              connection,
+              player,
+              songs: [],
+              lastSong: null,
+              currentSong: null,
+              currentResource: null,
+              autoplay: true,
+              failCount: 0,
+              transitioning: false,
+              playing: false,
+              autoplayPrefetch: null,
+              autoplayGeneration: 0,
+              playedIds: new Set(),
+              playedUrls: new Set(),
+              playedKeys: new Set(),
+            };
+
+            queues.set(
+              message.guild.id,
+              serverQueue
+            );
+
+            for (
+              const song of songsToAdd
+            ) {
+              const id =
+                getSongId(song);
+
+              if (
+                !serverQueue.playedIds.has(
+                  id
+                )
+              ) {
+                serverQueue.songs.push(
+                  song
+                );
+              }
+            }
+
+            const currentGuildId =
+              message.guild.id;
+
+            player.on(
+              AudioPlayerStatus.Idle,
+              async () => {
+                const sq =
+                  queues.get(
+                    currentGuildId
+                  );
+
+                if (!sq) {
+                  return;
+                }
+
+                log(
+                  `[Audio Idle] Guild ${currentGuildId} | Current: ${
+                    sq.currentSong?.title ||
+                    "Unknown"
+                  }`
+                );
+
+                sq.playing = false;
+
+                destroyAudioResource(
+                  sq.currentResource
+                );
+
+                sq.currentResource =
+                  null;
+
+                sq.currentSong =
+                  null;
+
+                await advanceQueue(
+                  currentGuildId,
+                  "idle"
+                );
+              }
+            );
+
+            player.on(
+              "error",
+              async (err) => {
+                log(
+                  `[Audio Player Error] Guild ${currentGuildId}: ${err.message}`
+                );
+
+                const sq =
+                  queues.get(
+                    currentGuildId
+                  );
+
+                if (!sq) {
+                  return;
+                }
+
+                sq.playing = false;
+
+                destroyAudioResource(
+                  sq.currentResource
+                );
+
+                sq.currentResource =
+                  null;
+
+                sq.currentSong =
+                  null;
+
+                sq.failCount++;
+
+                await advanceQueue(
+                  currentGuildId,
+                  "error"
+                );
+              }
+            );
+
+            connection.on(
+              "stateChange",
+              (
+                oldState,
+                newState
+              ) => {
+                log(
+                  `[Voice State] Guild ${currentGuildId} | ${oldState.status} -> ${newState.status}`
+                );
+              }
+            );
+
+            if (
+              isPlaylist &&
+              !directVideoId
+            ) {
+              const embed =
+                new EmbedBuilder()
+                  .setColor("#00FF00")
+                  .setDescription(
+                    `Added **${songsToAdd.length}** tracks from playlist to queue!`
+                  );
+
+              await message.channel.send(
+                {
+                  embeds: [embed],
+                }
+              );
+            }
+
+            playNextSong(
+              message.guild.id
+            ).catch((err) => {
+              log(
+                `[Initial Playback Error] Guild ${message.guild.id}: ${err.message}`
+              );
+            });
+
+            return;
+          }
+
+          serverQueue.textChannel =
+            message.channel;
+
+          const existingIds =
+            new Set(
+              serverQueue.songs
+                .map(getSongId)
+                .filter(Boolean)
+            );
+
+          const newSongs =
+            songsToAdd.filter(
+              (song) => {
+                const id =
+                  getSongId(song);
+
+                return (
+                  id &&
+                  !existingIds.has(id)
+                );
+              }
+            );
+
+          serverQueue.songs.push(
+            ...newSongs
+          );
+
+          log(
+            `[Queue Added] Guild ${message.guild.id} | Added ${newSongs.length} tracks`
+          );
+
+          if (
+            isPlaylist &&
+            !directVideoId
+          ) {
+            const embed =
+              new EmbedBuilder()
+                .setColor("#00FF00")
+                .setDescription(
+                  `Added **${newSongs.length}** tracks from playlist to queue!`
+                );
+
+            return message.channel.send({
+              embeds: [embed],
+            });
+          }
+
+          const firstSong =
+            newSongs[0] ||
+            songsToAdd[0];
+
+          const artistText =
+            firstSong.artist &&
+            firstSong.artist !==
+              "Unknown Artist"
+              ? ` by ${firstSong.artist}`
+              : "";
+
+          const embed =
+            new EmbedBuilder()
+              .setColor("#00FF00")
+              .setDescription(
+                `Added to queue: [${firstSong.title}](${firstSong.url})${artistText}`
+              );
+
+          const videoId =
+            getSongId(firstSong);
+
+          if (videoId) {
+            embed.setThumbnail(
+              `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`
+            );
+          }
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        } catch (err) {
+          log(
+            `Music Play Error: ${err.message}`
+          );
+
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "An error occurred while searching or loading the track."
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
         }
-      } catch (err) {
-        log(`Music Play Error: ${err.message}`);
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("An error occurred while searching or loading the playlist.");
-        return message.channel.send({ embeds: [embed] });
-      }
-      return;
-    }
-
-    if (command === "ap") {
-      const serverQueue = queues.get(message.guild.id);
-      if (!serverQueue) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("Play a song first to toggle autoplay!");
-        return message.channel.send({ embeds: [embed] });
       }
 
-      if (!voiceChannel) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You need to join a voice channel first!");
-        return message.channel.send({ embeds: [embed] });
+      if (command === "ap") {
+        const serverQueue =
+          queues.get(
+            message.guild.id
+          );
+
+        if (!serverQueue) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "Play a song first to toggle autoplay!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        if (!voiceChannel) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You need to join a voice channel first!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const botChannelId =
+          getVoiceConnection(
+            message.guild.id
+          )?.joinConfig?.channelId ||
+          message.guild.members.me
+            ?.voice?.channelId;
+
+        if (
+          botChannelId &&
+          voiceChannel.id !==
+            botChannelId
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You must be in the same voice channel as the bot to toggle autoplay!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        serverQueue.textChannel =
+          message.channel;
+
+        if (
+          !canControlQueue(
+            message,
+            serverQueue
+          )
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "Only the person who played this song can toggle autoplay."
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        serverQueue.autoplay =
+          !serverQueue.autoplay;
+
+        log(
+          `[Autoplay Toggle] Guild ${message.guild.id} | ${serverQueue.autoplay}`
+        );
+
+        if (
+          serverQueue.autoplay &&
+          serverQueue.lastSong &&
+          serverQueue.songs.length === 1 &&
+          !serverQueue.autoplayPrefetch
+        ) {
+          warmAutoplayCandidate(
+            serverQueue,
+            serverQueue.lastSong
+          );
+        }
+
+        if (
+          !serverQueue.autoplay
+        ) {
+          serverQueue.autoplayPrefetch =
+            null;
+
+          serverQueue.autoplayGeneration++;
+        }
+
+        const embed =
+          new EmbedBuilder()
+            .setColor(
+              serverQueue.autoplay
+                ? "#00FF00"
+                : "#FF0000"
+            )
+            .setDescription(
+              `Autoplay has been **${
+                serverQueue.autoplay
+                  ? "enabled"
+                  : "disabled"
+              }**`
+            );
+
+        return message.channel.send({
+          embeds: [embed],
+        });
       }
 
-      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
-      if (botChannelId && voiceChannel.id !== botChannelId) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You must be in the same voice channel as the bot to toggle autoplay!");
-        return message.channel.send({ embeds: [embed] });
+      if (command === "s") {
+        const serverQueue =
+          queues.get(
+            message.guild.id
+          );
+
+        if (
+          !serverQueue ||
+          serverQueue.songs.length === 0
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "No song is currently playing."
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        if (!voiceChannel) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You need to join a voice channel first!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const botChannelId =
+          getVoiceConnection(
+            message.guild.id
+          )?.joinConfig?.channelId ||
+          message.guild.members.me
+            ?.voice?.channelId;
+
+        if (
+          botChannelId &&
+          voiceChannel.id !==
+            botChannelId
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You must be in the same voice channel as the bot to skip!"
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        serverQueue.textChannel =
+          message.channel;
+
+        if (
+          !canControlQueue(
+            message,
+            serverQueue
+          )
+        ) {
+          const reqUser =
+            serverQueue.songs[0]
+              ?.requestedBy;
+
+          const reqTag =
+            reqUser
+              ? `<@${reqUser.id}>`
+              : "the requester";
+
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                `Only ${reqTag} (or an Admin) can skip this track.`
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const currentSong =
+          serverQueue.songs[0];
+
+        log(
+          `[Skip Command] Guild ${message.guild.id} | Skipped by ${message.author.tag}`
+        );
+
+        const artistText =
+          currentSong.artist &&
+          currentSong.artist !==
+            "Unknown Artist"
+            ? ` by ${currentSong.artist}`
+            : "";
+
+        const embed =
+          new EmbedBuilder()
+            .setColor("#FFFF00")
+            .setDescription(
+              `**${currentSong.title}**${artistText} was skipped by ${message.author}`
+            );
+
+        try {
+          serverQueue.player.stop();
+        } catch {}
+
+        return message.channel.send({
+          embeds: [embed],
+        });
       }
 
-      serverQueue.textChannel = message.channel;
+      if (command === "l") {
+        const serverQueue =
+          queues.get(
+            message.guild.id
+          );
 
-      if (!canControlQueue(message, serverQueue)) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("Only the person who played this song can toggle autoplay.");
-        return message.channel.send({ embeds: [embed] });
-      }
+        const botChannelId =
+          getVoiceConnection(
+            message.guild.id
+          )?.joinConfig?.channelId ||
+          message.guild.members.me
+            ?.voice?.channelId;
 
-      serverQueue.autoplay = !serverQueue.autoplay;
-      log(`[Autoplay Toggle] Guild: ${message.guild.id} | Status: ${serverQueue.autoplay}`);
-      if (serverQueue.autoplay && serverQueue.lastSong && serverQueue.songs.length === 1 && !serverQueue.autoplayPrefetch) {
-        warmAutoplayCandidate(serverQueue, serverQueue.lastSong);
-      }
-      const embed = new EmbedBuilder()
-        .setColor(serverQueue.autoplay ? "#00FF00" : "#FF0000")
-        .setDescription(`Autoplay has been **${serverQueue.autoplay ? "enabled" : "disabled"}**`);
-      return message.channel.send({ embeds: [embed] });
-    }
+        if (!voiceChannel) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You need to join a voice channel first!"
+              );
 
-    if (command === "s") {
-      const serverQueue = queues.get(message.guild.id);
-      if (!serverQueue || serverQueue.songs.length === 0) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("No song is currently playing.");
-        return message.channel.send({ embeds: [embed] });
-      }
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
 
-      if (!voiceChannel) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You need to join a voice channel first!");
-        return message.channel.send({ embeds: [embed] });
-      }
+        if (
+          botChannelId &&
+          voiceChannel.id !==
+            botChannelId
+        ) {
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "You must be in the same voice channel as the bot to stop/leave!"
+              );
 
-      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
-      if (botChannelId && voiceChannel.id !== botChannelId) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You must be in the same voice channel as the bot to skip!");
-        return message.channel.send({ embeds: [embed] });
-      }
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
 
-      serverQueue.textChannel = message.channel;
+        if (serverQueue) {
+          if (
+            !canControlQueue(
+              message,
+              serverQueue
+            )
+          ) {
+            const reqUser =
+              serverQueue.songs[0]
+                ?.requestedBy;
 
-      if (!canControlQueue(message, serverQueue)) {
-        const reqUser = serverQueue.songs[0]?.requestedBy;
-        const reqTag = reqUser ? `<@${reqUser.id}>` : "the requester";
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription(`Only ${reqTag} (or an Admin) can skip this track.`);
-        return message.channel.send({ embeds: [embed] });
-      }
+            const reqTag =
+              reqUser
+                ? `<@${reqUser.id}>`
+                : "the requester";
 
-      log(`[Skip Command] Guild: ${message.guild.id} | Skipped by: ${message.author.tag}`);
-      const currentSong = serverQueue.songs[0];
-      const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
-      serverQueue.player.stop();
-      const embed = new EmbedBuilder()
-        .setColor("#FFFF00")
-        .setDescription(`**${currentSong.title}**${artistText} was skipped by ${message.author}`);
-      return message.channel.send({ embeds: [embed] });
-    }
+            const embed =
+              new EmbedBuilder()
+                .setColor("#FF0000")
+                .setDescription(
+                  `Only ${reqTag} (or an Admin) can stop the player.`
+                );
 
-    if (command === "l") {
-      const serverQueue = queues.get(message.guild.id);
-      const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
+            return message.channel.send({
+              embeds: [embed],
+            });
+          }
 
-      if (!voiceChannel) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You need to join a voice channel first!");
-        return message.channel.send({ embeds: [embed] });
-      }
+          log(
+            `[Stop Command] Guild ${message.guild.id} | Stopped by ${message.author.tag}`
+          );
 
-      if (botChannelId && voiceChannel.id !== botChannelId) {
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("You must be in the same voice channel as the bot to stop/leave!");
-        return message.channel.send({ embeds: [embed] });
-      }
+          destroyServerQueue(
+            message.guild.id
+          );
 
-      if (serverQueue) {
-        if (!canControlQueue(message, serverQueue)) {
-          const reqUser = serverQueue.songs[0]?.requestedBy;
-          const reqTag = reqUser ? `<@${reqUser.id}>` : "the requester";
-          const embed = new EmbedBuilder()
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "Music stopped and disconnected."
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const existingConnection =
+          getVoiceConnection(
+            message.guild.id
+          );
+
+        if (existingConnection) {
+          log(
+            `[Leave Command] Guild ${message.guild.id} | Left by ${message.author.tag}`
+          );
+
+          try {
+            existingConnection.destroy();
+          } catch {}
+
+          const embed =
+            new EmbedBuilder()
+              .setColor("#FF0000")
+              .setDescription(
+                "Disconnected from voice channel."
+              );
+
+          return message.channel.send({
+            embeds: [embed],
+          });
+        }
+
+        const embed =
+          new EmbedBuilder()
             .setColor("#FF0000")
-            .setDescription(`Only ${reqTag} (or an Admin) can stop the player.`);
-          return message.channel.send({ embeds: [embed] });
-        }
+            .setDescription(
+              "Bot is not in a voice channel."
+            );
 
-        log(`[Stop Command] Guild: ${message.guild.id} | Stopped by: ${message.author.tag}`);
-        serverQueue.songs = [];
-        serverQueue.player.stop();
-        serverQueue.connection.destroy();
-        queues.delete(message.guild.id);
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("Music stopped and disconnected.");
-        return message.channel.send({ embeds: [embed] });
+        return message.channel.send({
+          embeds: [embed],
+        });
       }
-
-      const existingConnection = getVoiceConnection(message.guild.id);
-      if (existingConnection) {
-        log(`[Leave Command] Guild: ${message.guild.id} | Left by: ${message.author.tag}`);
-        existingConnection.destroy();
-        const embed = new EmbedBuilder()
-          .setColor("#FF0000")
-          .setDescription("Disconnected from voice channel.");
-        return message.channel.send({ embeds: [embed] });
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor("#FF0000")
-        .setDescription("Bot is not in a voice channel.");
-      return message.channel.send({ embeds: [embed] });
     }
-  });
+  );
 
   if (process.env.DISCORD_BOT_TOKEN) {
-    discordClient.login(process.env.DISCORD_BOT_TOKEN).catch((err) => {
-      log(`Discord Login Error: ${err.message}`);
-    });
+    discordClient
+      .login(
+        process.env.DISCORD_BOT_TOKEN
+      )
+      .catch((err) => {
+        log(
+          `Discord Login Error: ${err.message}`
+        );
+      });
   } else {
-    log("DISCORD_BOT_TOKEN is missing in .env file!");
+    log(
+      "DISCORD_BOT_TOKEN is missing in .env file!"
+    );
   }
 }
 
