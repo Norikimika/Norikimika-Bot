@@ -139,9 +139,35 @@ function canControlQueue(message, serverQueue) {
   return false;
 }
 
+async function fetchOembedInfo(videoId, requesterData) {
+  try {
+    const normUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(normUrl)}&format=json`);
+    if (res.ok) {
+      const json = await res.json();
+      return {
+        title: json.title,
+        artist: json.author_name ? json.author_name.replace(/ - Topic$/i, "") : "Unknown Artist",
+        url: normUrl,
+        id: videoId,
+        durationInSec: 0,
+        requestedBy: requesterData,
+        isManual: true,
+      };
+    }
+  } catch (err) {
+    log(`oEmbed Fetch Error: ${err.message}`);
+  }
+  return null;
+}
+
 async function searchYtMusic(query, limit = 10) {
   try {
-    const results = await play.search(query, { limit, source: { youtube: "video" } });
+    const results = await play.search(query, { limit, source: { youtube: "video" } }).catch((e) => {
+      log(`play-dl search catch: ${e.message}`);
+      return null;
+    });
+
     if (results && results.length > 0) {
       const formatted = results.map((r) => {
         let artistName = "Unknown Artist";
@@ -167,6 +193,7 @@ async function searchYtMusic(query, limit = 10) {
 
   return new Promise((resolve) => {
     const proc = spawn("yt-dlp", [
+      "--extractor-args", "youtube:player_client=android,web",
       "--flat-playlist",
       "--no-warnings",
       "-j",
@@ -203,6 +230,7 @@ function getPlaylistTracks(playlistUrl) {
     if (!playlistUrl) return resolve([]);
 
     const proc = spawn("yt-dlp", [
+      "--extractor-args", "youtube:player_client=android,web",
       "--flat-playlist",
       "--no-warnings",
       "-j",
@@ -242,6 +270,7 @@ function getYtMusicRadioTracks(videoId) {
     const radioUrl = `https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
     
     const proc = spawn("yt-dlp", [
+      "--extractor-args", "youtube:player_client=android,web",
       "--flat-playlist",
       "--no-warnings",
       "-j",
@@ -426,27 +455,32 @@ async function createAudioResourceFromSong(song) {
   const targetUrl = normalizeUrl(song.url);
 
   try {
-    return await streamWithYtdlp(targetUrl, []);
-  } catch (err1) {
-    log(`yt-dlp Auto Fallback Failed: ${err1.message}`);
-  }
-
-  try {
     return await streamWithYtdlp(targetUrl, [
       "--extractor-args", "youtube:player_client=android,web",
     ]);
+  } catch (err1) {
+    log(`yt-dlp Android Client Failed: ${err1.message}`);
+  }
+
+  try {
+    return await streamWithYtdlp(targetUrl, []);
   } catch (err2) {
-    log(`yt-dlp Android/Web Fallback Failed: ${err2.message}`);
+    log(`yt-dlp Default Failed: ${err2.message}`);
   }
 
   try {
     const pdlStream = await play.stream(targetUrl, {
       discordPlayerCompatibility: true,
+    }).catch((e) => {
+      log(`play-dl stream Catch: ${e.message}`);
+      return null;
     });
-    return createAudioResource(pdlStream.stream, {
-      inputType: pdlStream.type,
-      highWaterMark: 1 << 23,
-    });
+    if (pdlStream) {
+      return createAudioResource(pdlStream.stream, {
+        inputType: pdlStream.type,
+        highWaterMark: 1 << 23,
+      });
+    }
   } catch (err3) {
     log(`play-dl Engine Failed: ${err3.message}`);
   }
@@ -869,20 +903,25 @@ function runDiscord() {
             }));
           } else {
             try {
-              const playlistInfo = await play.playlist_info(query, { incomplete: true });
-              const videos = await playlistInfo.all_videos();
-              songsToAdd = videos.map((v) => {
-                let artistName = "Unknown Artist";
-                if (v.channel && v.channel.name) artistName = v.channel.name;
-                return {
-                  title: v.title,
-                  artist: artistName,
-                  url: v.url,
-                  id: v.id || extractVideoId(v.url),
-                  requestedBy: requesterData,
-                  isManual: true,
-                };
+              const playlistInfo = await play.playlist_info(query, { incomplete: true }).catch((e) => {
+                log(`play-dl Playlist Catch: ${e.message}`);
+                return null;
               });
+              if (playlistInfo) {
+                const videos = await playlistInfo.all_videos();
+                songsToAdd = videos.map((v) => {
+                  let artistName = "Unknown Artist";
+                  if (v.channel && v.channel.name) artistName = v.channel.name;
+                  return {
+                    title: v.title,
+                    artist: artistName,
+                    url: v.url,
+                    id: v.id || extractVideoId(v.url),
+                    requestedBy: requesterData,
+                    isManual: true,
+                  };
+                });
+              }
             } catch (pErr) {
               log(`play-dl Playlist Fallback Error: ${pErr.message}`);
             }
@@ -896,31 +935,14 @@ function runDiscord() {
           }
         } else if (directVideoId) {
           const normUrl = `https://www.youtube.com/watch?v=${directVideoId}`;
-          let trackInfo = null;
-
-          try {
-            const info = await play.video_basic_info(normUrl);
-            if (info && info.video_details) {
-              const v = info.video_details;
-              let artistName = "Unknown Artist";
-              if (v.channel && v.channel.name) artistName = v.channel.name.replace(/ - Topic$/i, "");
-              trackInfo = {
-                title: v.title,
-                artist: artistName,
-                url: normUrl,
-                id: directVideoId,
-                durationInSec: v.durationInSec || 0,
-                requestedBy: requesterData,
-                isManual: true,
-              };
-            }
-          } catch (e) {
-            log(`play-dl video_basic_info Error: ${e.message}`);
-          }
+          
+          let trackInfo = await fetchOembedInfo(directVideoId, requesterData);
 
           if (!trackInfo) {
             try {
-              const { stdout } = await execPromise(`yt-dlp -j --no-warnings "${normUrl}"`);
+              const { stdout } = await execPromise(
+                `yt-dlp --extractor-args "youtube:player_client=android,web" -j --no-warnings "${normUrl}"`
+              );
               const json = JSON.parse(stdout);
               trackInfo = {
                 title: json.title,
@@ -933,6 +955,31 @@ function runDiscord() {
               };
             } catch (yErr) {
               log(`yt-dlp Direct URL Fetch Error: ${yErr.message}`);
+            }
+          }
+
+          if (!trackInfo) {
+            try {
+              const info = await play.video_basic_info(normUrl).catch((e) => {
+                log(`play-dl video_basic_info Catch: ${e.message}`);
+                return null;
+              });
+              if (info && info.video_details) {
+                const v = info.video_details;
+                let artistName = "Unknown Artist";
+                if (v.channel && v.channel.name) artistName = v.channel.name.replace(/ - Topic$/i, "");
+                trackInfo = {
+                  title: v.title,
+                  artist: artistName,
+                  url: normUrl,
+                  id: directVideoId,
+                  durationInSec: v.durationInSec || 0,
+                  requestedBy: requesterData,
+                  isManual: true,
+                };
+              }
+            } catch (e) {
+              log(`play-dl video_basic_info Error: ${e.message}`);
             }
           }
 
