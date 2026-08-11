@@ -310,7 +310,7 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const ytdlpArgs = [
       "-o", "-",
-      "-f", "ba/b",
+      "-f", "251/bestaudio/b",
       "--no-playlist",
       "--no-warnings",
       "--no-check-certificates",
@@ -325,16 +325,17 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
     const ffmpegProcess = spawn(
       "ffmpeg",
       [
+        "-probesize", "32",
+        "-analyzeduration", "0",
         "-loglevel", "error",
         "-hide_banner",
         "-i", "pipe:0",
         "-vn",
-        "-filter:a", "volume=0.95",
+        "-af", "volume=0.85",
         "-ac", "2",
         "-ar", "48000",
-        "-c:a", "libopus",
-        "-b:a", "128k",
-        "-f", "ogg",
+        "-c:a", "pcm_s16le",
+        "-f", "s16le",
         "pipe:1",
       ],
       { stdio: ["pipe", "pipe", "pipe"] }
@@ -373,7 +374,9 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
       ffmpegProcess.stdout.unshift(chunk);
       resolve(
         createAudioResource(ffmpegProcess.stdout, {
-          inputType: StreamType.OggOpus,
+          inputType: StreamType.Raw,
+          inlineVolume: false,
+          highWaterMark: 1 << 23,
         })
       );
     });
@@ -426,6 +429,7 @@ async function createAudioResourceFromSong(song) {
     });
     return createAudioResource(pdlStream.stream, {
       inputType: pdlStream.type,
+      highWaterMark: 1 << 23,
     });
   } catch (err3) {
     log(`play-dl Engine Failed: ${err3.message}`);
