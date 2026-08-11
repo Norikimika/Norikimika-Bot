@@ -275,33 +275,49 @@ function getYtMusicRadioTracks(videoId) {
 const queues = new Map();
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-async function processOpenRouterRequest(prompt) {
+async function processGeminiRequest(prompt) {
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is missing in .env file!");
+    }
+
+    const model = process.env.DISCORD_AI_API_MODEL || "gemini-3.5-flash";
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free",
-        messages: [
+        systemInstruction: {
+          parts: [
+            { text: "You are Zero Two, a helpful, friendly, and smart AI assistant." }
+          ],
+        },
+        contents: [
           {
-            role: "system",
-            content: "You are Zero Two, a helpful, friendly, and smart AI assistant.",
+            role: "user",
+            parts: [{ text: prompt }],
           },
-          { role: "user", content: prompt },
         ],
-        temperature: 0.7,
+        generationConfig: {
+          temperature: 0.7,
+        },
       }),
     });
 
-    if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Gemini API HTTP ${res.status}: ${errText}`);
+    }
+
     const data = await res.json();
-    const rawContent = data?.choices?.[0]?.message?.content || null;
+    const rawContent = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
     return cleanAiText(rawContent);
   } catch (err) {
-    log(`OpenRouter Error: ${err.message}`);
+    log(`Gemini Error: ${err.message}`);
     throw err;
   }
 }
@@ -747,11 +763,7 @@ function runDiscord() {
           message.channel.sendTyping().catch(() => {});
         }, 5000);
 
-        let responseText = await processOpenRouterRequest(prompt);
-        
-        if (!responseText) {
-          responseText = await processOpenRouterRequest(`${prompt}`);
-        }
+        let responseText = await processGeminiRequest(prompt);
 
         const parts = chunkText(responseText, 1900);
         for (let i = 0; i < parts.length; i++) {
