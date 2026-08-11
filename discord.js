@@ -5,7 +5,7 @@ const os = require("os");
 const { spawn, exec } = require("child_process");
 const util = require("util");
 const execPromise = util.promisify(exec);
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, PermissionFlagsBits } = require("discord.js");
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, PermissionFlagsBits, ActivityType } = require("discord.js");
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -629,6 +629,31 @@ async function playNextSong(guildId) {
   }
 }
 
+function getActiveUsersCount(client) {
+  const activeUserIds = new Set();
+
+  for (const [guildId, queue] of queues.entries()) {
+    if (!queue) continue;
+    
+    const connection = getVoiceConnection(guildId);
+    if (connection) {
+      const channelId = connection.joinConfig?.channelId;
+      if (channelId) {
+        const channel = client.channels.cache.get(channelId);
+        if (channel && channel.members) {
+          channel.members.forEach((member) => {
+            if (!member.user.bot) {
+              activeUserIds.add(member.id);
+            }
+          });
+        }
+      }
+    }
+  }
+
+  return activeUserIds.size;
+}
+
 function runDiscord() {
   const discordClient = new Client({
     intents: [
@@ -643,6 +668,14 @@ function runDiscord() {
 
   discordClient.once("clientReady", () => {
     log(`Discord Bot online as: ${discordClient.user.tag}`);
+    
+    const updateActivity = () => {
+      const activeUsers = getActiveUsersCount(discordClient);
+      discordClient.user.setActivity(`!h | ${activeUsers}`, { type: ActivityType.Listening });
+    };
+
+    updateActivity();
+    setInterval(updateActivity, 30 * 1000);
   });
 
   discordClient.on("messageCreate", async (message) => {
