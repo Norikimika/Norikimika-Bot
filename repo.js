@@ -228,7 +228,7 @@ async function checkGithubUpdates(state) {
     const lastSha = state[lastShaKey];
 
     if (latestSha === lastSha) {
-      log(`✅ ${repo.repo} (${repo.branch}): No new commit`);
+      // log(`✅ ${repo.repo} (${repo.branch}): No new commit`);
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }

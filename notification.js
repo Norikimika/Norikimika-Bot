@@ -300,7 +300,7 @@ class NotificationMonitor {
         }
         try {
             const current_count = this.get_notification_count();
-            logger.info(`Current notification count: ${current_count}`);
+            // logger.info(`Current notification count: ${current_count}`);
             if (current_count >= this.config.max_notifications) {
                 logger.warning(`Threshold reached (${current_count} >= ${this.config.max_notifications}). Auto-clearing...`);
                 await this.clear_all_notifications();
@@ -494,7 +494,7 @@ class NotificationMonitor {
                 this.cleanup_old_notifications();
             }
 
-            logger.debug(`Cycle ${cycle}: scanning for new notifications`);
+            // logger.debug(`Cycle ${cycle}: scanning for new notifications`);
             const new_notifs = this.get_new_notifications();
 
             if (new_notifs.length > 0) {
@@ -521,14 +521,14 @@ class NotificationMonitor {
                     }
                 }
             } else {
-                logger.debug("No new notifications");
+                // logger.debug("No new notifications");
             }
 
             const current_time = Date.now() / 1000;
             if (cycle % 10 === 0 || (this.config.auto_clear_enabled && (current_time - this.last_clear_time > 30))) {
                 const notification_count = await this.check_and_clear_notifications();
                 this.last_clear_time = current_time;
-                logger.info(`System notification count: ${notification_count}`);
+                // logger.info(`System notification count: ${notification_count}`);
             }
 
             await sleep(this.config.check_interval * 1000);
