@@ -994,8 +994,15 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
+      if (!voiceChannel) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You need to join a voice channel first!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
       const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
-      if (botChannelId && (!voiceChannel || voiceChannel.id !== botChannelId)) {
+      if (botChannelId && voiceChannel.id !== botChannelId) {
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
           .setDescription("You must be in the same voice channel as the bot to toggle autoplay!");
@@ -1031,8 +1038,15 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
+      if (!voiceChannel) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You need to join a voice channel first!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
       const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
-      if (botChannelId && (!voiceChannel || voiceChannel.id !== botChannelId)) {
+      if (botChannelId && voiceChannel.id !== botChannelId) {
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
           .setDescription("You must be in the same voice channel as the bot to skip!");
@@ -1064,7 +1078,14 @@ function runDiscord() {
       const serverQueue = queues.get(message.guild.id);
       const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
 
-      if (botChannelId && (!voiceChannel || voiceChannel.id !== botChannelId)) {
+      if (!voiceChannel) {
+        const embed = new EmbedBuilder()
+          .setColor("#FF0000")
+          .setDescription("You need to join a voice channel first!");
+        return message.channel.send({ embeds: [embed] });
+      }
+
+      if (botChannelId && voiceChannel.id !== botChannelId) {
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
           .setDescription("You must be in the same voice channel as the bot to stop/leave!");
