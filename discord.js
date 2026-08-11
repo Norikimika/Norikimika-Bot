@@ -29,6 +29,18 @@ function log(msg) {
   }
 }
 
+process.on("uncaughtException", (err) => {
+  if (err.code === "EPIPE") {
+    log(`[Warning] Ignored EPIPE stream error: ${err.message}`);
+    return;
+  }
+  log(`[Uncaught Exception]: ${err.stack || err.message}`);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log(`[Unhandled Rejection]: ${reason?.stack || reason}`);
+});
+
 function chunkText(text, maxLength = 1900) {
   if (!text) return [];
   return text.match(new RegExp(`.{1,${maxLength}}`, "gs")) || [text];
@@ -328,6 +340,14 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
       { stdio: ["pipe", "pipe", "pipe"] }
     );
 
+    ffmpegProcess.stdin.on("error", (err) => {
+      if (err.code === "EPIPE") return;
+    });
+
+    ytdlpProcess.stdout.on("error", (err) => {
+      if (err.code === "EPIPE") return;
+    });
+
     ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
 
     let settled = false;
@@ -337,6 +357,7 @@ function streamWithYtdlp(targetUrl, extraArgs = []) {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
+      try { ytdlpProcess.stdout.unpipe(ffmpegProcess.stdin); } catch {}
       try { ytdlpProcess.kill("SIGKILL"); } catch {}
       try { ffmpegProcess.kill("SIGKILL"); } catch {}
       reject(new Error(reason));
