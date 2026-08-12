@@ -626,7 +626,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
   }
 
   try {
-    const ytArgs = ["-f", "251", "-j", query.startsWith("http") ? query : `ytsearch1:${query}`];
+    const ytArgs = ["-f", "bestaudio/ba", "-j", query.startsWith("http") ? query : `ytsearch1:${query}`];
     const { stdout } = await execFilePromise("yt-dlp", ytArgs);
 
     const info = JSON.parse(stdout);
@@ -648,7 +648,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
     } catch (err) { return; }
 
     try {
-      await execFilePromise("yt-dlp", ["-f", "bestaudio", "-o", tempFile, videoUrl]);
+      await execFilePromise("yt-dlp", ["-f", "bestaudio/ba", "-o", tempFile, videoUrl]);
       await execFilePromise("yt-dlp", ["--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "-o", thumbBase, videoUrl]);
 
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Sending" });
@@ -1580,3 +1580,5 @@ loop();
 runMonitor();
 runNotification();
 runDiscord();
+
+execFile("termux-tts-speak", ["Bot launched"]);

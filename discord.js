@@ -265,7 +265,7 @@ async function searchYtMusic(query, limit = 10) {
   if (!query?.trim()) return [];
 
   const args = [
-    "--extractor-args", "youtube:player_client=ios,android",
+    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--flat-playlist",
     "--no-warnings",
     "--no-cache-dir",
@@ -292,7 +292,7 @@ async function getPlaylistTracks(playlistUrl) {
   if (!playlistUrl) return [];
 
   const args = [
-    "--extractor-args", "youtube:player_client=ios,android",
+    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--flat-playlist",
     "--no-warnings",
     "--no-cache-dir",
@@ -319,7 +319,7 @@ async function getYtMusicRadioTracks(videoId) {
 
   const radioUrl = `https://music.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
   const args = [
-    "--extractor-args", "youtube:player_client=ios,android",
+    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--flat-playlist",
     "--no-warnings",
     "--no-cache-dir",
@@ -347,7 +347,7 @@ async function fetchVideoInfo(videoId) {
 
   const url = `https://www.youtube.com/watch?v=${videoId}`;
   const args = [
-    "--extractor-args", "youtube:player_client=ios,android",
+    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--no-warnings",
     "--no-cache-dir",
     "--skip-download",
@@ -410,7 +410,7 @@ async function processGeminiRequest(prompt) {
 function getDirectAudioUrl(targetUrl, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const args = [
-      "-g", "-f", "bestaudio",
+      "-g", "-f", "bestaudio/ba",
       "--no-playlist", "--no-warnings",
       "--no-check-certificates", "--no-cache-dir",
       ...extraArgs, targetUrl,
@@ -548,7 +548,7 @@ function streamFromDirectUrl(directUrl, song = null) {
 function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
   return new Promise((resolve, reject) => {
     const ytdlpProcess = spawn("yt-dlp", [
-      "-o", "-", "-f", "bestaudio",
+      "-o", "-", "-f", "bestaudio/ba",
       "--no-playlist", "--no-warnings",
       "--no-check-certificates", "--no-cache-dir",
       ...extraArgs, targetUrl
@@ -658,7 +658,7 @@ async function createAudioResourceFromSong(song) {
   const targetUrl = normalizeUrl(song.url);
 
   try {
-    const directUrl = await getDirectAudioUrl(targetUrl, ["--extractor-args", "youtube:player_client=ios,android"]);
+    const directUrl = await getDirectAudioUrl(targetUrl, ["--extractor-args", "youtube:player_client=tv,mweb,ios,android"]);
     return await streamFromDirectUrl(directUrl, song);
   } catch (err) {
     log(`[Audio Engine #1 Failed] ${song.title}: ${err.message}`);
@@ -672,7 +672,7 @@ async function createAudioResourceFromSong(song) {
   }
 
   try {
-    return await streamWithYtdlp(targetUrl, ["--extractor-args", "youtube:player_client=ios,android"], song);
+    return await streamWithYtdlp(targetUrl, ["--extractor-args", "youtube:player_client=tv,mweb,ios,android"], song);
   } catch (err) {
     log(`[Audio Engine #3 Failed] ${song.title}: ${err.message}`);
   }
