@@ -1053,8 +1053,13 @@ function runDiscord() {
         }, 5000);
 
         const responseText = await processGeminiRequest(prompt);
-        const parts = chunkText(responseText, 1900);
 
+        if (typingInterval) {
+          clearInterval(typingInterval);
+          typingInterval = null;
+        }
+
+        const parts = chunkText(responseText, 1900);
         for (let i = 0; i < parts.length; i++) {
           await message.channel.send(parts[i]);
         }
@@ -1062,7 +1067,9 @@ function runDiscord() {
         log(`Discord AI Error: ${err.message}`);
         await message.channel.send("Failed to process request.").catch(() => {});
       } finally {
-        if (typingInterval) clearInterval(typingInterval);
+        if (typingInterval) {
+          clearInterval(typingInterval);
+        }
       }
       return;
     }
