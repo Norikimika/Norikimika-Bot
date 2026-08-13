@@ -658,23 +658,16 @@ async function createAudioResourceFromSong(song) {
   const targetUrl = normalizeUrl(song.url);
 
   try {
-    const directUrl = await getDirectAudioUrl(targetUrl, ["--extractor-args", "youtube:player_client=tv,mweb,ios,android"]);
+    const directUrl = await getDirectAudioUrl(targetUrl);
     return await streamFromDirectUrl(directUrl, song);
   } catch (err) {
     log(`[Audio Engine #1 Failed] ${song.title}: ${err.message}`);
   }
 
   try {
-    const directUrl = await getDirectAudioUrl(targetUrl);
-    return await streamFromDirectUrl(directUrl, song);
-  } catch (err) {
-    log(`[Audio Engine #2 Failed] ${song.title}: ${err.message}`);
-  }
-
-  try {
     return await streamWithYtdlp(targetUrl, ["--extractor-args", "youtube:player_client=tv,mweb,ios,android"], song);
   } catch (err) {
-    log(`[Audio Engine #3 Failed] ${song.title}: ${err.message}`);
+    log(`[Audio Engine #2 Failed] ${song.title}: ${err.message}`);
   }
 
   throw new Error(`All audio streaming engines failed for "${song.title}"`);
