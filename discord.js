@@ -765,7 +765,7 @@ async function advanceQueue(guildId, reason = "idle") {
   if (!serverQueue) return;
 
   if (serverQueue.transitioning) {
-    log(`[Queue Transition Ignored] Guild ${guildId} | ${reason}`);
+    log(`[Queue Transition Ignored] Server: ${serverQueue.guildName} | ${reason}`);
     return;
   }
 
@@ -775,7 +775,7 @@ async function advanceQueue(guildId, reason = "idle") {
     if (serverQueue.songs.length > 0) {
       const finishedSong = serverQueue.songs.shift();
       if (finishedSong) {
-        log(`[Queue Advance] Guild ${guildId} | Finished: ${finishedSong.title} | Reason: ${reason}`);
+        log(`[Queue Advance] Server: ${serverQueue.guildName} | Finished: ${finishedSong.title} | Reason: ${reason}`);
       }
     }
 
@@ -785,7 +785,7 @@ async function advanceQueue(guildId, reason = "idle") {
 
     await playNextSong(guildId);
   } catch (err) {
-    log(`[Queue Advance Error] Guild ${guildId}: ${err.message}`);
+    log(`[Queue Advance Error] Server: ${serverQueue?.guildName || guildId}: ${err.message}`);
   } finally {
     const currentQueue = queues.get(guildId);
     if (currentQueue) {
@@ -835,9 +835,9 @@ async function playNextSong(guildId) {
         serverQueue.playedKeys.add(songKey);
         serverQueue.playedUrls.add(songUrl);
 
-        log(`[Autoplay] Guild ${guildId} | ${nextSong.title} - ${nextSong.artist}`);
+        log(`[Autoplay] Server: ${serverQueue.guildName} | ${nextSong.title} - ${nextSong.artist}`);
       } catch (err) {
-        log(`[Autoplay Error] Guild ${guildId}: ${err.message}`);
+        log(`[Autoplay Error] Server: ${serverQueue.guildName}: ${err.message}`);
         const embed = new EmbedBuilder()
           .setColor("#FF0000")
           .setDescription("Autoplay could not find another suitable track. Playback stopped.");
@@ -877,7 +877,7 @@ async function playNextSong(guildId) {
   serverQueue.playing = true;
 
   try {
-    log(`[Music Stream Start] Guild ${guildId} | ${song.title} - ${song.artist}`);
+    log(`[Music Stream Start] Server: ${serverQueue.guildName} | ${song.title} - ${song.artist}`);
     const resource = await createAudioResourceFromSong(song);
     const currentQueue = queues.get(guildId);
 
@@ -903,9 +903,9 @@ async function playNextSong(guildId) {
     }
 
     await currentQueue.textChannel?.send({ embeds: [embed] }).catch(() => {});
-    log(`[Music Stream Ready] Guild ${guildId} | ${song.title}`);
+    log(`[Music Stream Ready] Server: ${serverQueue.guildName} | ${song.title}`);
   } catch (err) {
-    log(`[Play Stream Error] Guild ${guildId} | ${song.title}: ${err.message}`);
+    log(`[Play Stream Error] Server: ${serverQueue.guildName} | ${song.title}: ${err.message}`);
     const currentQueue = queues.get(guildId);
     if (!currentQueue) return;
 
@@ -990,7 +990,7 @@ function runDiscord() {
     const command = args.shift()?.toLowerCase();
     const voiceChannel = message.member?.voice?.channel;
 
-    log(`[Bot Command] Guild: ${message.guild.id} | From ${message.author.tag} in #${message.channel.name}: ${content}`);
+    log(`[Bot Command] Server: ${message.guild.name} | From ${message.author.tag} in #${message.channel.name}: ${content}`);
 
     if (command === "h") {
       const embed = new EmbedBuilder()
@@ -1036,7 +1036,7 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
-      log(`[Discord AI Chat] Guild: ${message.guild.id} | From ${message.author.tag}: ${prompt}`);
+      log(`[Discord AI Chat] Server: ${message.guild.name} | From ${message.author.tag}: ${prompt}`);
 
       let typingInterval;
       try {
@@ -1075,6 +1075,7 @@ function runDiscord() {
       }
 
       serverQueue.textChannel = message.channel;
+      serverQueue.guildName = message.guild.name;
       const nowPlaying = serverQueue.songs[0];
       const queuedSongs = serverQueue.songs.slice(1);
       const reqInfo = nowPlaying.isManual && nowPlaying.requestedBy ? ` | Requested by: <@${nowPlaying.requestedBy.id}>` : " | *(Autoplay)*";
@@ -1164,6 +1165,7 @@ function runDiscord() {
 
           serverQueue = {
             textChannel: message.channel,
+            guildName: message.guild.name,
             connection,
             player,
             songs: [],
@@ -1196,7 +1198,7 @@ function runDiscord() {
             const sq = queues.get(currentGuildId);
             if (!sq) return;
 
-            log(`[Audio Idle] Guild ${currentGuildId} | Current: ${sq.currentSong?.title || "Unknown"}`);
+            log(`[Audio Idle] Server: ${sq.guildName} | Current: ${sq.currentSong?.title || "Unknown"}`);
             sq.playing = false;
             destroyAudioResource(sq.currentResource);
             sq.currentResource = null;
@@ -1205,7 +1207,7 @@ function runDiscord() {
           });
 
           player.on("error", async (err) => {
-            log(`[Audio Player Error] Guild ${currentGuildId}: ${err.message}`);
+            log(`[Audio Player Error] Server: ${serverQueue?.guildName || currentGuildId}: ${err.message}`);
             const sq = queues.get(currentGuildId);
             if (!sq) return;
 
@@ -1218,7 +1220,7 @@ function runDiscord() {
           });
 
           connection.on("stateChange", (oldState, newState) => {
-            log(`[Voice State] Guild ${currentGuildId} | ${oldState.status} -> ${newState.status}`);
+            log(`[Voice State] Server: ${message.guild.name} | ${oldState.status} -> ${newState.status}`);
           });
 
           if (isPlaylist && !directVideoId) {
@@ -1227,13 +1229,14 @@ function runDiscord() {
           }
 
           playNextSong(message.guild.id).catch((err) => {
-            log(`[Initial Playback Error] Guild ${message.guild.id}: ${err.message}`);
+            log(`[Initial Playback Error] Server: ${message.guild.name}: ${err.message}`);
           });
 
           return;
         }
 
         serverQueue.textChannel = message.channel;
+        serverQueue.guildName = message.guild.name;
         const existingIds = new Set(serverQueue.songs.map(getSongId).filter(Boolean));
         const newSongs = songsToAdd.filter((song) => {
           const id = getSongId(song);
@@ -1241,7 +1244,7 @@ function runDiscord() {
         });
 
         serverQueue.songs.push(...newSongs);
-        log(`[Queue Added] Guild ${message.guild.id} | Added ${newSongs.length} tracks`);
+        log(`[Queue Added] Server: ${message.guild.name} | Added ${newSongs.length} tracks`);
 
         if (isPlaylist && !directVideoId) {
           const embed = new EmbedBuilder().setColor("#00FF00").setDescription(`Added **${newSongs.length}** tracks from playlist to queue!`);
@@ -1286,13 +1289,14 @@ function runDiscord() {
       }
 
       serverQueue.textChannel = message.channel;
+      serverQueue.guildName = message.guild.name;
       if (!canControlQueue(message, serverQueue)) {
         const embed = new EmbedBuilder().setColor("#FF0000").setDescription("Only the person who played this song can toggle autoplay.");
         return message.channel.send({ embeds: [embed] });
       }
 
       serverQueue.autoplay = !serverQueue.autoplay;
-      log(`[Autoplay Toggle] Guild ${message.guild.id} | ${serverQueue.autoplay}`);
+      log(`[Autoplay Toggle] Server: ${message.guild.name} | ${serverQueue.autoplay}`);
 
       if (serverQueue.autoplay && serverQueue.lastSong && serverQueue.songs.length === 1 && !serverQueue.autoplayPrefetch) {
         warmAutoplayCandidate(serverQueue, serverQueue.lastSong);
@@ -1329,6 +1333,7 @@ function runDiscord() {
       }
 
       serverQueue.textChannel = message.channel;
+      serverQueue.guildName = message.guild.name;
       if (!canControlQueue(message, serverQueue)) {
         const reqUser = serverQueue.songs[0]?.requestedBy;
         const reqTag = reqUser ? `<@${reqUser.id}>` : "the requester";
@@ -1337,7 +1342,7 @@ function runDiscord() {
       }
 
       const currentSong = serverQueue.songs[0];
-      log(`[Skip Command] Guild ${message.guild.id} | Skipped by ${message.author.tag}`);
+      log(`[Skip Command] Server: ${message.guild.name} | Skipped by ${message.author.tag}`);
 
       const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
       const embed = new EmbedBuilder()
@@ -1370,7 +1375,7 @@ function runDiscord() {
           return message.channel.send({ embeds: [embed] });
         }
 
-        log(`[Stop Command] Guild ${message.guild.id} | Stopped by ${message.author.tag}`);
+        log(`[Stop Command] Server: ${message.guild.name} | Stopped by ${message.author.tag}`);
         destroyServerQueue(message.guild.id);
 
         const embed = new EmbedBuilder().setColor("#FF0000").setDescription("Music stopped and disconnected.");
@@ -1379,7 +1384,7 @@ function runDiscord() {
 
       const existingConnection = getVoiceConnection(message.guild.id);
       if (existingConnection) {
-        log(`[Leave Command] Guild ${message.guild.id} | Left by ${message.author.tag}`);
+        log(`[Leave Command] Server: ${message.guild.name} | Left by ${message.author.tag}`);
         try { existingConnection.destroy(); } catch {}
 
         const embed = new EmbedBuilder().setColor("#FF0000").setDescription("Disconnected from voice channel.");
