@@ -372,37 +372,87 @@ async function fetchVideoInfo(videoId) {
   }
 }
 
-async function processGeminiRequest(prompt) {
+async function process9RouterRequest(prompt) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is missing in .env file!");
+    const rawUrl = process.env.NINE_ROUTER_URL;
+    if (!rawUrl) {
+      throw new Error("NINE_ROUTER_URL is missing in .env file!");
     }
 
-    const model = process.env.DISCORD_AI_API_MODEL || "gemini-3.5-flash";
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const apiKey = process.env.NINE_ROUTER_API_KEY;
+    if (!apiKey) {
+      throw new Error("NINE_ROUTER_API_KEY is missing in .env file!");
+    }
+
+    const model = process.env.NINE_ROUTER_MODEL;
+    if (!model) {
+      throw new Error("NINE_ROUTER_MODEL is missing in .env file!");
+    }
+
+    const baseUrl = rawUrl.replace(/\/+$/, "");
+    const endpoint = baseUrl.endsWith("/chat/completions")
+      ? baseUrl
+      : baseUrl.endsWith("/v1")
+      ? `${baseUrl}/chat/completions`
+      : `${baseUrl}/v1/chat/completions`;
 
     const res = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
       body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: "You are Zero Two, a helpful, friendly, and smart AI assistant." }],
-        },
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7 },
+        model,
+        messages: [
+          {
+            role: "system",
+            content: "You are Zero Two, a helpful, friendly, and smart AI assistant.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+        stream: false,
       }),
     });
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Gemini API HTTP ${res.status}: ${errText}`);
+      throw new Error(`9Router API HTTP ${res.status}: ${errText}`);
     }
 
-    const data = await res.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    const rawText = await res.text();
+
+    try {
+      const data = JSON.parse(rawText);
+      return data?.choices?.[0]?.message?.content || null;
+    } catch {
+      let aggregatedContent = "";
+      const lines = rawText.split("\n");
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
+          try {
+            const parsed = JSON.parse(trimmed.slice(6));
+            aggregatedContent +=
+              parsed.choices?.[0]?.delta?.content ||
+              parsed.choices?.[0]?.message?.content ||
+              "";
+          } catch {}
+        }
+      }
+
+      if (aggregatedContent) {
+        return aggregatedContent;
+      }
+
+      throw new Error(`Invalid JSON response: ${rawText.slice(0, 100)}...`);
+    }
   } catch (err) {
-    log(`[Gemini Error] ${err.message}`);
+    log(`[9Router Error] ${err.message}`);
     throw err;
   }
 }
@@ -1045,7 +1095,7 @@ function runDiscord() {
           message.channel.sendTyping().catch(() => {});
         }, 5000);
 
-        const responseText = await processGeminiRequest(prompt);
+        const responseText = await process9RouterRequest(prompt);
 
         if (typingInterval) {
           clearInterval(typingInterval);

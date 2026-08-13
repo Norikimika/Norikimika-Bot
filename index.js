@@ -368,98 +368,91 @@ bot.command("a", async (ctx) => {
     }
   }
 
-  function buildSearchPrompt(userPrompt, searchContext) {
-    let systemPrompt = "You are Zero Two, a helpful, friendly, and smart AI assistant.";
+  function buildMessages(userPrompt, searchContext) {
+    let systemContent = "You are Zero Two, a helpful, friendly, and smart AI assistant.";
     
     if (searchContext) {
-      return (
-        `${systemPrompt} You have access to recent web search results.\n\n` +
-        `Search Results:\n${searchContext}\n\n` +
-        `User Question: ${userPrompt}\n\n` +
-        `Answer based on the search results above. Cite sources where relevant.`
-      );
+      systemContent += ` You have access to recent web search results.\n\nSearch Results:\n${searchContext}\n\nAnswer based on the search results above. Cite sources where relevant.`;
     }
-    
-    return `${systemPrompt}\n\nUser Question: ${userPrompt}`;
+
+    return [
+      { role: "system", content: systemContent },
+      { role: "user", content: userPrompt },
+    ];
   }
 
   try {
-    let rawText;
+    const rawUrl = process.env.NINE_ROUTER_URL;
+    if (!rawUrl) {
+      throw new Error("NINE_ROUTER_URL is missing in .env file!");
+    }
+
+    const apiKey = process.env.NINE_ROUTER_API_KEY;
+    if (!apiKey) {
+      throw new Error("NINE_ROUTER_API_KEY is missing in .env file!");
+    }
+
+    const model = process.env.NINE_ROUTER_MODEL;
+    if (!model) {
+      throw new Error("NINE_ROUTER_MODEL is missing in .env file!");
+    }
+
+    const baseUrl = rawUrl.replace(/\/+$/, "");
+    const endpoint = baseUrl.endsWith("/chat/completions")
+      ? baseUrl
+      : baseUrl.endsWith("/v1")
+      ? `${baseUrl}/chat/completions`
+      : `${baseUrl}/v1/chat/completions`;
 
     const searchContext = useSearch ? await fetchSearchContext(prompt) : null;
-    const enhancedPrompt = buildSearchPrompt(prompt, searchContext);
+    const messages = buildMessages(prompt, searchContext);
+
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`9Router API HTTP ${res.status}: ${errText}`);
+    }
+
+    const rawText = await res.text();
+    let aiResponseText = "";
 
     try {
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_API_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: enhancedPrompt }] }],
-            ...(useSearch && { tools: [{ google_search: {} }] }),
-          }),
+      const data = JSON.parse(rawText);
+      aiResponseText = data?.choices?.[0]?.message?.content || "";
+    } catch {
+      const lines = rawText.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
+          try {
+            const parsed = JSON.parse(trimmed.slice(6));
+            aiResponseText +=
+              parsed.choices?.[0]?.delta?.content ||
+              parsed.choices?.[0]?.message?.content ||
+              "";
+          } catch {}
         }
-      );
-
-      if (!geminiRes.ok) throw new Error(`Gemini HTTP ${geminiRes.status}`);
-      const geminiData = await geminiRes.json();
-      rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-      if (!rawText) throw new Error("Gemini empty response");
-
-    } catch (geminiError) {
-      appendLogLine(`Gemini Failed: ${geminiError.message}`);
-
-      try {
-        const groqRes = await fetch(
-          "https://api.groq.com/openai/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: process.env.GROQ_API_MODEL || "llama-3.3-70b-versatile",
-              messages: [{ role: "user", content: enhancedPrompt }],
-              temperature: 0.7,
-            }),
-          }
-        );
-
-        if (!groqRes.ok) throw new Error(`Groq HTTP ${groqRes.status}`);
-        const groqData = await groqRes.json();
-        rawText = groqData?.choices?.[0]?.message?.content || null;
-        if (!rawText) throw new Error("Groq empty response");
-
-      } catch (groqError) {
-        appendLogLine(`Groq Failed: ${groqError.message}`);
-
-        const nvidiaRes = await fetch(
-          "https://integrate.api.nvidia.com/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: process.env.NVIDIA_API_MODEL || "openai/gpt-oss-120b",
-              messages: [{ role: "user", content: enhancedPrompt }],
-              temperature: 0.7,
-              max_tokens: 1024,
-            }),
-          }
-        );
-
-        if (!nvidiaRes.ok) throw new Error(`NVIDIA HTTP ${nvidiaRes.status}`);
-        const nvidiaData = await nvidiaRes.json();
-        rawText = nvidiaData?.choices?.[0]?.message?.content || null;
       }
     }
 
+    if (!aiResponseText) {
+      throw new Error("9Router returned empty response");
+    }
+
     const MAX_LENGTH = 3500;
-    const parts = rawText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [rawText];
+    const parts = aiResponseText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [aiResponseText];
 
     for (const part of parts) {
       await safeReply(ctx, part, {
@@ -856,7 +849,6 @@ const STORE_NAME = process.env.STORE_NAME || "";
 const STORE_ADDRESS = process.env.STORE_ADDRESS || "";
 const STRUK_FONT = process.env.STRUK_FONT || "";
 const STRUK_FONTSIZE = process.env.STRUK_FONTSIZE || "";
-const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || "";
 const TOPIC_ID_INTAKE = process.env.TOPIC_ID_INTAKE  ? parseInt(process.env.TOPIC_ID_INTAKE,  10) : 416182;
 const TOPIC_ID_PREVIEW = process.env.TOPIC_ID_PREVIEW ? parseInt(process.env.TOPIC_ID_PREVIEW, 10) : 468585;
 
@@ -1146,124 +1138,104 @@ If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
   "nominal": "amount transferred excluding admin fee"
 }`;
 
-async function analyzeWithGemini(base64Image) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_VISION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inline_data: { mime_type: "image/jpeg", data: base64Image } },
-            { text: RECEIPT_PROMPT },
-          ],
-        }],
-      }),
-    }
-  );
-
-  if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
-
-  const data = await res.json();
-  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-  return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
-}
-
-async function analyzeWithGroq(base64Image) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: process.env.GROQ_VISION_MODEL ?? "meta-llama/llama-4-scout-17b-16e-instruct",
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
-          { type: "text", text: RECEIPT_PROMPT },
-        ],
-      }],
-      max_tokens: 1000,
-    }),
-  });
-
-  if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
-
-  const data = await res.json();
-  const raw = data?.choices?.[0]?.message?.content ?? "{}";
-  return JSON.parse(raw.replace(/```[\w]*\n?|```/g, "").trim());
-}
-
-async function analyzeWithNVIDIA(base64Image) {
-  const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: process.env.NVIDIA_VISION_MODEL ?? "meta/llama-3.2-90b-vision-instruct",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:image/jpeg;base64,${base64Image}`,
-              },
-            },
-            {
-              type: "text",
-              text: RECEIPT_PROMPT,
-            },
-          ],
-        },
-      ],
-      max_tokens: 1000,
-      temperature: 0,
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`NVIDIA HTTP ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
-  const raw = data?.choices?.[0]?.message?.content ?? "{}";
-
-  return JSON.parse(
-    raw.replace(/```(?:json)?\n?|```/g, "").trim()
-  );
-}
-
 async function analyzeReceipt(base64Image) {
-  try {
-    const result = await analyzeWithGemini(base64Image);
-    appendLogLine("Vision: Gemini OK");
-    return result;
-  } catch (err) {
-    appendLogLine(`Vision: Gemini failed (${err.message}), trying Groq…`);
+  const rawUrl = process.env.NINE_ROUTER_URL;
+  if (!rawUrl) {
+    throw new Error("NINE_ROUTER_URL is missing in .env file!");
   }
 
-  try {
-    const result = await analyzeWithGroq(base64Image);
-    appendLogLine("Vision: Groq OK");
-    return result;
-  } catch (err) {
-    appendLogLine(`Vision: Groq failed (${err.message}), trying NVIDIA…`);
+  const apiKey = process.env.NINE_ROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error("NINE_ROUTER_API_KEY is missing in .env file!");
   }
 
+  const model = process.env.NINE_ROUTER_MODEL;
+  if (!model) {
+    throw new Error("NINE_ROUTER_MODEL is missing in .env file!");
+  }
+
+  const baseUrl = rawUrl.replace(/\/+$/, "");
+  const endpoint = baseUrl.endsWith("/chat/completions")
+    ? baseUrl
+    : baseUrl.endsWith("/v1")
+    ? `${baseUrl}/chat/completions`
+    : `${baseUrl}/v1/chat/completions`;
+
   try {
-    const result = await analyzeWithNVIDIA(base64Image);
-    appendLogLine("Vision: NVIDIA OK");
-    return result;
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/jpeg;base64,${base64Image}`,
+                },
+              },
+              {
+                type: "text",
+                text: RECEIPT_PROMPT,
+              },
+            ],
+          },
+        ],
+        stream: false,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`9Router API HTTP ${res.status}: ${errText}`);
+    }
+
+    const rawText = await res.text();
+    let rawContent = "";
+
+    try {
+      const data = JSON.parse(rawText);
+      rawContent = data?.choices?.[0]?.message?.content ?? "";
+    } catch {
+      const lines = rawText.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
+          try {
+            const parsed = JSON.parse(trimmed.slice(6));
+            rawContent +=
+              parsed.choices?.[0]?.delta?.content ||
+              parsed.choices?.[0]?.message?.content ||
+              "";
+          } catch {}
+        }
+      }
+    }
+
+    if (!rawContent) {
+      throw new Error("9Router returned empty response for vision analysis");
+    }
+
+    appendLogLine("Vision: 9Router OK");
+
+    const cleanedJson = rawContent.replace(/```(?:json)?\n?|```/g, "").trim();
+
+    try {
+      return JSON.parse(cleanedJson);
+    } catch (parseErr) {
+      appendLogLine(`[JSON Parse Failed] Content received:\n${cleanedJson}`);
+      throw new Error(`Invalid JSON format from model: ${parseErr.message}`);
+    }
   } catch (err) {
-    throw new Error(`All providers failed — NVIDIA: ${err.message}`);
+    appendLogLine(`Vision Error: ${err.message}`);
+    throw err;
   }
 }
 
