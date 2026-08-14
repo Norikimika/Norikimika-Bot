@@ -46,6 +46,20 @@ const TOPIC_ID_MUSIC2 = parseInt(process.env.TOPIC_ID_MUSIC2);
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
 
+// ================== TYPING INDICATOR HELPERS ==================
+function startTyping(ctx, threadId, action = "typing") {
+  const sendAction = () => {
+    const opts = threadId ? { message_thread_id: threadId } : {};
+    ctx.sendChatAction(action, opts).catch(() => {});
+  };
+  sendAction();
+  return setInterval(sendAction, 4000);
+}
+
+function stopTyping(intervalId) {
+  if (intervalId) clearInterval(intervalId);
+}
+
 async function safeSend(botInstance, chatId, text, options = {}, retries = DEFAULT_RETRIES) {
   for (let i = 0; i <= retries; i++) {
     try {
@@ -156,7 +170,6 @@ const adminCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 
 async function isUserAdmin(ctx, chatId, userId) {
-
   const cacheKey = `${chatId}_${userId}`;
   const now = Date.now();
 
@@ -216,8 +229,10 @@ const adminOnly = async (ctx, next) => {
 // ================== SPEED ==================
 bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+  const typing = startTyping(ctx, threadId);
 
   exec("speedtest-go --json", async (error, stdout) => {
+    stopTyping(typing);
     if (error) {
       appendLogLine(`Speedtest failed: ${error.message}`);
       return safeReply(ctx, "❌ Failed to run speedtest", {
@@ -233,8 +248,8 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
       const server = result.servers?.[0]?.name || "Unknown";
       const country = result.servers?.[0]?.country || "-";
       const sponsor = result.servers?.[0]?.sponsor || "Unknown";
-      const latency = (result.servers?.[0]?.latency || 0) / 1e6; // ns → ms
-      const download = (result.servers?.[0]?.dl_speed || 0) / 125000; // bps → Mbps
+      const latency = (result.servers?.[0]?.latency || 0) / 1e6;
+      const download = (result.servers?.[0]?.dl_speed || 0) / 125000;
       const upload = (result.servers?.[0]?.ul_speed || 0) / 125000;
 
       const summary = `<b>⚡ Speed Test Result</b>\n<blockquote>ISP : ${escapeHTML(isp)}\nServer : ${escapeHTML(sponsor)}\nCountry : ${escapeHTML(server)} ${escapeHTML(country)}\nPing : ${latency.toFixed(2)} ms\nDownload : ${download.toFixed(2)} Mbps\nUpload : ${upload.toFixed(2)} Mbps</blockquote>`;
@@ -258,6 +273,7 @@ bot.hears(/^\/speed/i, topicOnly, adminOnly, async (ctx) => {
 // ================== REBOOT ==================
 bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+  const typing = startTyping(ctx, threadId);
 
   await safeReply(ctx, "♻️ Rebooting system...", {
     reply_to_message_id: ctx.message?.message_id,
@@ -271,6 +287,7 @@ bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
       if (stderr) appendLogLine(stderr);
 
       if (error) {
+        stopTyping(typing);
         appendLogLine(`GMS cleanup failed: ${error.message}`);
 
         return safeReply(ctx, "❌ Failed to reboot", {
@@ -280,6 +297,7 @@ bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
       }
 
       exec("su -c reboot", (rebootError) => {
+        stopTyping(typing);
         if (rebootError) {
           appendLogLine(`Reboot failed: ${rebootError.message}`);
 
@@ -296,7 +314,10 @@ bot.hears(/^\/reboot/i, topicOnly, adminOnly, async (ctx) => {
 // ================== BATTERY ==================
 bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+  const typing = startTyping(ctx, threadId);
+
   exec("termux-battery-status", (error, stdout) => {
+    stopTyping(typing);
     if (error) {
       appendLogLine(`Battery failed: ${error.message}`);
       return safeReply(ctx, "❌ Failed to get battery info", {
@@ -381,6 +402,8 @@ bot.command("a", async (ctx) => {
     ];
   }
 
+  const typing = startTyping(ctx, threadId);
+
   try {
     const rawUrl = process.env.NINE_ROUTER_URL;
     if (!rawUrl) {
@@ -451,6 +474,8 @@ bot.command("a", async (ctx) => {
       throw new Error("9Router returned empty response");
     }
 
+    stopTyping(typing);
+
     const MAX_LENGTH = 3500;
     const parts = aiResponseText.match(new RegExp(`.{1,${MAX_LENGTH}}`, "gs")) || [aiResponseText];
 
@@ -462,17 +487,21 @@ bot.command("a", async (ctx) => {
     }
 
   } catch (err) {
+    stopTyping(typing);
     appendLogLine(`AI Error: ${err.message}`);
     await safeReply(ctx, "❌ Failed to process request", {
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
     });
+  } finally {
+    stopTyping(typing);
   }
 });
 
 // ================== USAGE ==================
 bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+  const typing = startTyping(ctx, threadId);
 
   const vnstat = spawn("vnstat", ["--json"]);
   let output = "";
@@ -482,6 +511,7 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   vnstat.stderr.on("data", (data) => (errOutput += data.toString()));
 
   vnstat.on("close", (code) => {
+    stopTyping(typing);
     if (code !== 0 || errOutput) {
       appendLogLine(`vnstat failed: ${errOutput || `code ${code}`}`);
       return safeReply(ctx, "❌ Failed to get usage", {
@@ -618,6 +648,8 @@ async function handleMusicCommand(ctx, targetTopicId) {
     });
   }
 
+  const typing = startTyping(ctx, threadId);
+
   try {
     const ytArgs = ["-f", "bestaudio/ba", "-j", query.startsWith("http") ? query : `ytsearch1:${query}`];
     const { stdout } = await execFilePromise("yt-dlp", ytArgs);
@@ -638,7 +670,10 @@ async function handleMusicCommand(ctx, targetTopicId) {
         `<b>🎵 Music Info</b>\n<blockquote><b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>\n<b>👤 Artist:</b>\n-> <code>${escapeHTML(performer)}</code>\n<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n<b>📦 Status:</b>\n-> <code>Downloading</code></blockquote>`,
         { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
       );
-    } catch (err) { return; }
+    } catch (err) { 
+      stopTyping(typing);
+      return; 
+    }
 
     try {
       await execFilePromise("yt-dlp", ["-f", "bestaudio/ba", "-o", tempFile, videoUrl]);
@@ -670,6 +705,8 @@ async function handleMusicCommand(ctx, targetTopicId) {
     }
   } catch (e) {
     return safeReply(ctx, "❌ Failed to fetch music.");
+  } finally {
+    stopTyping(typing);
   }
 }
 
@@ -706,8 +743,10 @@ function buildVolumeKeyboard(stream, target) {
 // ================== PLAYBACK ==================
 bot.hears(/^\/playback(?:@\w+)?$/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+  const typing = startTyping(ctx, threadId);
 
   exec("termux-volume", async (error, stdout) => {
+    stopTyping(typing);
     if (error) {
       return safeReply(ctx, "❌ Failed to get volume information", {
         reply_to_message_id: ctx.message?.message_id,
@@ -1244,7 +1283,12 @@ bot.on("photo", adminOnly, async (ctx) => {
 
   if (TOPIC_ID_INTAKE !== null && currentThreadId !== TOPIC_ID_INTAKE) return;
 
+  const targetThreadId = (TOPIC_ID_PREVIEW !== null && !isNaN(TOPIC_ID_PREVIEW))
+    ? TOPIC_ID_PREVIEW
+    : currentThreadId;
+
   const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  const typing = startTyping(ctx, targetThreadId, "upload_photo");
 
   try {
     const file = await ctx.telegram.getFile(fileId);
@@ -1295,7 +1339,6 @@ bot.on("photo", adminOnly, async (ctx) => {
 
     if (imgPath) {
       const imgBuffer = fs.readFileSync(imgPath);
-      const targetThreadId = TOPIC_ID_PREVIEW !== null ? TOPIC_ID_PREVIEW : currentThreadId;
       const sendOptions = targetThreadId ? { message_thread_id: targetThreadId } : {};
 
       try {
@@ -1323,6 +1366,8 @@ bot.on("photo", adminOnly, async (ctx) => {
     }
   } catch (err) {
     appendLogLine(`Receipt process error: ${err.message}`);
+  } finally {
+    stopTyping(typing);
   }
 });
 
@@ -1367,11 +1412,14 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
     });
   }
 
+  const typing = startTyping(ctx, threadId);
+
   try {
     const rows = await fetchPriceList();
     const dataRows = rows.slice(1).filter((row) => row[0]?.replace(/\r/, ""));
 
     if (!dataRows.length) {
+      stopTyping(typing);
       return safeReply(ctx, "❌ Price list is empty.", {
         reply_to_message_id: ctx.message?.message_id,
         message_thread_id: threadId,
@@ -1384,6 +1432,7 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
     );
 
     if (!filtered.length) {
+      stopTyping(typing);
       return safeReply(ctx, `❌ No items found matching "<b>${escapeHTML(keyword)}</b>".`, {
         parse_mode: "HTML",
         reply_to_message_id: ctx.message?.message_id,
@@ -1410,6 +1459,8 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
     }
     if (current.trim()) chunks.push(current.trim());
 
+    stopTyping(typing);
+
     for (const chunk of chunks) {
       await safeReply(ctx, chunk, {
         parse_mode: "HTML",
@@ -1418,21 +1469,26 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
       });
     }
   } catch (err) {
+    stopTyping(typing);
     appendLogLine(`Price fetch error: ${err.message}`);
     return safeReply(ctx, "❌ Failed to fetch price list.", {
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
     });
+  } finally {
+    stopTyping(typing);
   }
 });
 
 // ================== APPROVE ==================
 bot.hears(/^\/approve/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
+  const typing = startTyping(ctx, threadId);
 
   exec(
     "su -c \"input tap 150 1260 && sleep 2 && input tap 880 1435\"",
     async (error, stdout, stderr) => {
+      stopTyping(typing);
       if (stdout) appendLogLine(stdout);
       if (stderr) appendLogLine(stderr);
 
@@ -1457,7 +1513,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   if (threadId !== TOPIC_ID) return;
 
-  return safeReply(
+  const typing = startTyping(ctx, threadId);
+  await safeReply(
     ctx,
       "<b>🤖 Public Commands</b>\n" +
       "<blockquote><b>✹ Ask AI</b>\n" +
@@ -1483,6 +1540,7 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "-> /speed</blockquote>",
     { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
   );
+  stopTyping(typing);
 });
 
 // ================== MUTE ==================
@@ -1500,7 +1558,7 @@ bot.on("text", async (ctx, next) => {
       const isAdmin = admins.some((admin) => admin.user.id === userId);
 
       if (!isAdmin) {
-        const untilDate = Math.floor(Date.now() / 1000) + 5 * 60; // 5 min
+        const untilDate = Math.floor(Date.now() / 1000) + 5 * 60;
         await ctx.telegram.restrictChatMember(chatId, userId, {
           permissions: { can_send_messages: false },
           until_date: untilDate,

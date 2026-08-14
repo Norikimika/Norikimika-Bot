@@ -1,3 +1,4 @@
+// ================== IMPORTS & INITIALIZATION ==================
 require("dotenv").config();
 
 const fs = require("fs");
@@ -23,22 +24,8 @@ const {
   StreamType,
 } = require("@discordjs/voice");
 
+// ================== LOGGING & GLOBAL ERROR HANDLING ==================
 const LOG_FILE = path.join(os.homedir(), "SERVER", "Backup", "discord.log");
-
-const AUDIO_CONFIG = {
-  sampleRate: 48000,
-  channels: 2,
-  highWaterMark: 1 << 21,
-  ytDlpTimeout: 20000,
-  ffmpegStartupTimeout: 12000,
-  maxConsecutiveFailures: 3,
-  failureDelay: 1500,
-  autoplayTimeout: 25000,
-  searchTimeout: 15000,
-  playlistTimeout: 30000,
-};
-
-const queues = new Map();
 
 function log(message) {
   try {
@@ -65,21 +52,35 @@ process.on("unhandledRejection", (reason) => {
   log(`[Unhandled Rejection] ${reason?.stack || reason}`);
 });
 
+// ================== AUDIO CONFIGURATION & STATE MAP ==================
+const AUDIO_CONFIG = {
+  sampleRate: 48000,
+  channels: 2,
+  highWaterMark: 1 << 21,
+  ytDlpTimeout: 20000,
+  ffmpegStartupTimeout: 12000,
+  maxConsecutiveFailures: 3,
+  failureDelay: 1500,
+  autoplayTimeout: 25000,
+  searchTimeout: 15000,
+  playlistTimeout: 30000,
+};
+
+const queues = new Map();
+
+// ================== UTILITY HELPERS ==================
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function chunkText(text, maxLength = 1900) {
-  if (!text) {
-    return [];
-  }
+  if (!text) return [];
   return text.match(new RegExp(`.{1,${maxLength}}`, "gs")) || [text];
 }
 
+// ================== METADATA & URL NORMALIZERS ==================
 function extractVideoId(url) {
-  if (!url) {
-    return null;
-  }
+  if (!url) return null;
 
   const value = String(url).trim();
   const patterns = [
@@ -92,18 +93,14 @@ function extractVideoId(url) {
 
   for (const pattern of patterns) {
     const match = value.match(pattern);
-    if (match) {
-      return match[1];
-    }
+    if (match) return match[1];
   }
 
   return null;
 }
 
 function normalizeUrl(url) {
-  if (!url) {
-    return url;
-  }
+  if (!url) return url;
 
   const videoId = extractVideoId(url);
   if (videoId) {
@@ -116,9 +113,7 @@ function normalizeUrl(url) {
 }
 
 function cleanArtist(value) {
-  if (!value) {
-    return "Unknown Artist";
-  }
+  if (!value) return "Unknown Artist";
   return String(value).replace(/\s+/g, " ").trim();
 }
 
@@ -135,9 +130,7 @@ function cleanTitle(title, artist) {
 }
 
 function normalizeSongMetadata(song) {
-  if (!song) {
-    return null;
-  }
+  if (!song) return null;
 
   const artist = cleanArtist(song.artist || song.uploader || song.channel || song.creator);
 
@@ -156,20 +149,13 @@ function getSongId(song) {
 
 function getSongKey(song) {
   const id = getSongId(song);
-  if (id) {
-    return `yt:${id}`;
-  }
-  return `${song?.artist || ""}:${song?.title || ""}`
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+  if (id) return `yt:${id}`;
+  return `${song?.artist || ""}:${song?.title || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function getSongUrlKey(song) {
   const id = getSongId(song);
-  if (id) {
-    return `https://www.youtube.com/watch?v=${id}`;
-  }
+  if (id) return `https://www.youtube.com/watch?v=${id}`;
   return normalizeUrl(song?.url || "");
 }
 
@@ -177,10 +163,9 @@ function isValidSong(song) {
   return Boolean(song && song.title && song.url && getSongId(song));
 }
 
+// ================== PERMISSION HELPERS ==================
 function canControlQueue(message, serverQueue) {
-  if (!serverQueue) {
-    return true;
-  }
+  if (!serverQueue) return true;
 
   const currentSong = serverQueue.songs[0] || serverQueue.lastSong;
 
@@ -192,11 +177,10 @@ function canControlQueue(message, serverQueue) {
   return false;
 }
 
+// ================== YT-DLP PROCESS & DATA FETCHERS ==================
 function spawnYtDlp(args, timeoutMs = AUDIO_CONFIG.ytDlpTimeout) {
   return new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const proc = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
 
     let stdout = "";
     let stderr = "";
@@ -205,25 +189,16 @@ function spawnYtDlp(args, timeoutMs = AUDIO_CONFIG.ytDlpTimeout) {
     const timeoutId = setTimeout(() => {
       if (settled) return;
       settled = true;
-      try {
-        proc.kill("SIGKILL");
-      } catch {}
+      try { proc.kill("SIGKILL"); } catch {}
       reject(new Error(`yt-dlp timeout after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    const cleanup = () => {
-      clearTimeout(timeoutId);
-    };
+    const cleanup = () => clearTimeout(timeoutId);
 
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
+    proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
     proc.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
-      if (stderr.length > 4000) {
-        stderr = stderr.slice(-4000);
-      }
+      if (stderr.length > 4000) stderr = stderr.slice(-4000);
     });
 
     proc.once("error", (err) => {
@@ -266,13 +241,9 @@ async function searchYtMusic(query, limit = 10) {
 
   const args = [
     "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
-    "--flat-playlist",
-    "--no-warnings",
-    "--no-cache-dir",
-    "--skip-download",
+    "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
     "--playlist-end", String(limit),
-    "-J",
-    `ytsearch${limit}:${query}`,
+    "-J", `ytsearch${limit}:${query}`,
   ];
 
   try {
@@ -293,12 +264,8 @@ async function getPlaylistTracks(playlistUrl) {
 
   const args = [
     "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
-    "--flat-playlist",
-    "--no-warnings",
-    "--no-cache-dir",
-    "--skip-download",
-    "-J",
-    playlistUrl,
+    "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
+    "-J", playlistUrl,
   ];
 
   try {
@@ -320,13 +287,9 @@ async function getYtMusicRadioTracks(videoId) {
   const radioUrl = `https://music.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
   const args = [
     "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
-    "--flat-playlist",
-    "--no-warnings",
-    "--no-cache-dir",
-    "--skip-download",
+    "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
     "--playlist-end", "15",
-    "-J",
-    radioUrl,
+    "-J", radioUrl,
   ];
 
   try {
@@ -348,11 +311,8 @@ async function fetchVideoInfo(videoId) {
   const url = `https://www.youtube.com/watch?v=${videoId}`;
   const args = [
     "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
-    "--no-warnings",
-    "--no-cache-dir",
-    "--skip-download",
-    "-j",
-    url,
+    "--no-warnings", "--no-cache-dir", "--skip-download",
+    "-j", url,
   ];
 
   try {
@@ -372,22 +332,17 @@ async function fetchVideoInfo(videoId) {
   }
 }
 
+// ================== 9ROUTER AI CHAT SERVICE ==================
 async function process9RouterRequest(prompt) {
   try {
     const rawUrl = process.env.NINE_ROUTER_URL;
-    if (!rawUrl) {
-      throw new Error("NINE_ROUTER_URL is missing in .env file!");
-    }
+    if (!rawUrl) throw new Error("NINE_ROUTER_URL is missing in .env file!");
 
     const apiKey = process.env.NINE_ROUTER_API_KEY;
-    if (!apiKey) {
-      throw new Error("NINE_ROUTER_API_KEY is missing in .env file!");
-    }
+    if (!apiKey) throw new Error("NINE_ROUTER_API_KEY is missing in .env file!");
 
     const model = process.env.NINE_ROUTER_MODEL;
-    if (!model) {
-      throw new Error("NINE_ROUTER_MODEL is missing in .env file!");
-    }
+    if (!model) throw new Error("NINE_ROUTER_MODEL is missing in .env file!");
 
     const baseUrl = rawUrl.replace(/\/+$/, "");
     const endpoint = baseUrl.endsWith("/chat/completions")
@@ -405,14 +360,8 @@ async function process9RouterRequest(prompt) {
       body: JSON.stringify({
         model,
         messages: [
-          {
-            role: "system",
-            content: "You are Zero Two, a helpful, friendly, and smart AI assistant.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
+          { role: "system", content: "You are Zero Two, a helpful, friendly, and smart AI assistant." },
+          { role: "user", content: prompt },
         ],
         stream: false,
       }),
@@ -445,10 +394,7 @@ async function process9RouterRequest(prompt) {
         }
       }
 
-      if (aggregatedContent) {
-        return aggregatedContent;
-      }
-
+      if (aggregatedContent) return aggregatedContent;
       throw new Error(`Invalid JSON response: ${rawText.slice(0, 100)}...`);
     }
   } catch (err) {
@@ -457,6 +403,7 @@ async function process9RouterRequest(prompt) {
   }
 }
 
+// ================== AUDIO STREAMING ENGINES ==================
 function getDirectAudioUrl(targetUrl, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -701,12 +648,11 @@ function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
 }
 
 async function createAudioResourceFromSong(song) {
-  if (!isValidSong(song)) {
-    throw new Error("Invalid song object");
-  }
+  if (!isValidSong(song)) throw new Error("Invalid song object");
 
   const targetUrl = normalizeUrl(song.url);
 
+  // Engine #1: Fast Direct Stream
   try {
     const directUrl = await getDirectAudioUrl(targetUrl);
     return await streamFromDirectUrl(directUrl, song);
@@ -714,6 +660,7 @@ async function createAudioResourceFromSong(song) {
     log(`[Audio Engine #1 Failed] ${song.title}: ${err.message}`);
   }
 
+  // Engine #2: Fallback Pipe Stream
   try {
     return await streamWithYtdlp(targetUrl, ["--extractor-args", "youtube:player_client=tv,mweb,ios,android"], song);
   } catch (err) {
@@ -739,6 +686,7 @@ function destroyAudioResource(resource) {
   } catch {}
 }
 
+// ================== AUTOPLAY SYSTEM ==================
 async function getAutoplayCandidate(serverQueue, baseSong) {
   if (!serverQueue || !baseSong) return null;
 
@@ -790,6 +738,7 @@ function warmAutoplayCandidate(serverQueue, baseSong) {
   serverQueue.autoplayPrefetch = { songKey, generation, promise };
 }
 
+// ================== QUEUE MANAGEMENT & PLAYBACK CONTROL ==================
 function destroyServerQueue(guildId, deleteQueue = true) {
   const serverQueue = queues.get(guildId);
   if (!serverQueue) return;
@@ -805,9 +754,7 @@ function destroyServerQueue(guildId, deleteQueue = true) {
   try { serverQueue.player.stop(true); } catch {}
   try { serverQueue.connection.destroy(); } catch {}
 
-  if (deleteQueue) {
-    queues.delete(guildId);
-  }
+  if (deleteQueue) queues.delete(guildId);
 }
 
 async function advanceQueue(guildId, reason = "idle") {
@@ -980,6 +927,7 @@ async function playNextSong(guildId) {
   }
 }
 
+// ================== PRESENCE / ACTIVITY UPDATER ==================
 function getActiveUsersCount(client) {
   const activeUserIds = new Set();
 
@@ -1004,6 +952,7 @@ function getActiveUsersCount(client) {
   return activeUserIds.size;
 }
 
+// ================== DISCORD BOT ENGINE & COMMAND HANDLERS ==================
 function runDiscord() {
   const discordClient = new Client({
     intents: [
@@ -1042,6 +991,7 @@ function runDiscord() {
 
     log(`[Bot Command] Server: ${message.guild.name} | From ${message.author.tag} in #${message.channel.name}: ${content}`);
 
+    // --- COMMAND: !h (Help Menu) ---
     if (command === "h") {
       const embed = new EmbedBuilder()
         .setColor("#0099FF")
@@ -1061,6 +1011,7 @@ function runDiscord() {
       return message.channel.send({ embeds: [embed] });
     }
 
+    // --- COMMAND: !a (Ask AI via 9Router) ---
     if (command === "a") {
       const argPrompt = args.join(" ").trim();
       let replyText = "";
@@ -1117,6 +1068,7 @@ function runDiscord() {
       return;
     }
 
+    // --- COMMAND: !q (Display Queue) ---
     if (command === "q") {
       const serverQueue = queues.get(message.guild.id);
       if (!serverQueue || serverQueue.songs.length === 0) {
@@ -1154,6 +1106,7 @@ function runDiscord() {
       return message.channel.send({ embeds: [queueEmbed] });
     }
 
+    // --- COMMAND: !p (Play Song/Playlist) ---
     if (command === "p") {
       if (!voiceChannel) {
         const embed = new EmbedBuilder().setColor("#FF0000").setDescription("You need to join a voice channel first!");
@@ -1320,6 +1273,7 @@ function runDiscord() {
       }
     }
 
+    // --- COMMAND: !ap (Toggle Autoplay) ---
     if (command === "ap") {
       const serverQueue = queues.get(message.guild.id);
       if (!serverQueue) {
@@ -1364,6 +1318,7 @@ function runDiscord() {
       return message.channel.send({ embeds: [embed] });
     }
 
+    // --- COMMAND: !s (Skip Track) ---
     if (command === "s") {
       const serverQueue = queues.get(message.guild.id);
       if (!serverQueue || serverQueue.songs.length === 0) {
@@ -1403,6 +1358,7 @@ function runDiscord() {
       return message.channel.send({ embeds: [embed] });
     }
 
+    // --- COMMAND: !l (Leave/Stop Player) ---
     if (command === "l") {
       const serverQueue = queues.get(message.guild.id);
       const botChannelId = getVoiceConnection(message.guild.id)?.joinConfig?.channelId || message.guild.members.me?.voice?.channelId;
@@ -1446,6 +1402,7 @@ function runDiscord() {
     }
   });
 
+  // ================== LOGIN ==================
   if (process.env.DISCORD_BOT_TOKEN) {
     discordClient.login(process.env.DISCORD_BOT_TOKEN).catch((err) => {
       log(`Discord Login Error: ${err.message}`);
