@@ -91,6 +91,11 @@ const GITHUB_REPOS = [
     owner: "yt-dlp",
     repo: "yt-dlp",
     branch: "master"
+  },
+  {
+    owner: "decolua",
+    repo: "9router",
+    branch: "master"
   }
 ];
 
