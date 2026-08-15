@@ -780,7 +780,7 @@ async function advanceQueue(guildId, reason = "idle") {
     if (serverQueue.songs.length > 0) {
       const finishedSong = serverQueue.songs.shift();
       if (finishedSong) {
-        log(`[Queue Advance] Server: ${serverQueue.guildName} | Finished: ${finishedSong.title} | Reason: ${reason}`);
+        // log(`[Queue Advance] Server: ${serverQueue.guildName} | Finished: ${finishedSong.title} | Reason: ${reason}`);
       }
     }
 
@@ -840,7 +840,7 @@ async function playNextSong(guildId) {
         serverQueue.playedKeys.add(songKey);
         serverQueue.playedUrls.add(songUrl);
 
-        log(`[Autoplay] Server: ${serverQueue.guildName} | ${nextSong.title} - ${nextSong.artist}`);
+        // log(`[Autoplay] Server: ${serverQueue.guildName} | ${nextSong.title} - ${nextSong.artist}`);
       } catch (err) {
         log(`[Autoplay Error] Server: ${serverQueue.guildName}: ${err.message}`);
         const embed = new EmbedBuilder()
@@ -884,7 +884,7 @@ async function playNextSong(guildId) {
   serverQueue.playing = true;
 
   try {
-    log(`[Music Stream Start] Server: ${serverQueue.guildName} | ${song.title} - ${song.artist}`);
+    // log(`[Music Stream Ready] Server: ${serverQueue.guildName} | ${song.title} - ${song.artist}`);
     const resource = await createAudioResourceFromSong(song);
     const currentQueue = queues.get(guildId);
 
@@ -910,7 +910,7 @@ async function playNextSong(guildId) {
     }
 
     await currentQueue.textChannel?.send({ embeds: [embed] }).catch(() => {});
-    log(`[Music Stream Ready] Server: ${serverQueue.guildName} | ${song.title}`);
+    log(`[Music Stream Start] Server: ${serverQueue.guildName} | ${song.title} - ${song.artist}`);
   } catch (err) {
     log(`[Play Stream Error] Server: ${serverQueue.guildName} | ${song.title}: ${err.message}`);
     const currentQueue = queues.get(guildId);
@@ -1075,7 +1075,7 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
-      log(`[Discord AI Chat] Server: ${message.guild.name} | From ${message.author.tag}: ${prompt}`);
+      // log(`[Discord AI Chat] Server: ${message.guild.name} | From ${message.author.tag}: ${prompt}`);
 
       let typingInterval;
       try {
@@ -1096,7 +1096,7 @@ function runDiscord() {
           await message.channel.send(parts[i]);
         }
       } catch (err) {
-        log(`Discord AI Error: ${err.message}`);
+        // log(`Discord AI Error: ${err.message}`);
         await message.channel.send("Failed to process request.").catch(() => {});
       } finally {
         if (typingInterval) {
@@ -1241,7 +1241,7 @@ function runDiscord() {
             const sq = queues.get(currentGuildId);
             if (!sq) return;
 
-            log(`[Audio Idle] Server: ${sq.guildName} | Current: ${sq.currentSong?.title || "Unknown"}`);
+            // log(`[Audio Idle] Server: ${sq.guildName} | Current: ${sq.currentSong?.title || "Unknown"}`);
             sq.playing = false;
             destroyAudioResource(sq.currentResource);
             sq.currentResource = null;
@@ -1404,7 +1404,7 @@ function runDiscord() {
       }
 
       const currentSong = serverQueue.songs[0];
-      log(`[Skip Command] Server: ${message.guild.name} | Skipped by ${message.author.tag}`);
+      // log(`[Skip Command] Server: ${message.guild.name} | Skipped by ${message.author.tag}`);
 
       const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
       const embed = new EmbedBuilder()
