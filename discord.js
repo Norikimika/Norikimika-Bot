@@ -70,6 +70,65 @@ const AUDIO_CONFIG = {
 
 const queues = new Map();
 
+// ================== IN-MEMORY CACHES ==================
+const directUrlCache = new Map();
+const videoInfoCache = new Map();
+const radioCache = new Map();
+
+const CACHE_TTL = {
+  directUrl: 30 * 60 * 1000,
+  videoInfo: 60 * 60 * 1000,
+  radio: 60 * 60 * 1000,
+};
+
+function getCachedDirectUrl(videoId) {
+  if (!videoId) return null;
+  const item = directUrlCache.get(videoId);
+  if (item && Date.now() < item.expiresAt) return item.directUrl;
+  directUrlCache.delete(videoId);
+  return null;
+}
+
+function setCachedDirectUrl(videoId, directUrl) {
+  if (!videoId || !directUrl) return;
+  directUrlCache.set(videoId, {
+    directUrl,
+    expiresAt: Date.now() + CACHE_TTL.directUrl,
+  });
+}
+
+function getCachedVideoInfo(videoId) {
+  if (!videoId) return null;
+  const item = videoInfoCache.get(videoId);
+  if (item && Date.now() < item.expiresAt) return item.trackInfo;
+  videoInfoCache.delete(videoId);
+  return null;
+}
+
+function setCachedVideoInfo(videoId, trackInfo) {
+  if (!videoId || !trackInfo) return;
+  videoInfoCache.set(videoId, {
+    trackInfo,
+    expiresAt: Date.now() + CACHE_TTL.videoInfo,
+  });
+}
+
+function getCachedRadioTracks(videoId) {
+  if (!videoId) return null;
+  const item = radioCache.get(videoId);
+  if (item && Date.now() < item.expiresAt) return item.tracks;
+  radioCache.delete(videoId);
+  return null;
+}
+
+function setCachedRadioTracks(videoId, tracks) {
+  if (!videoId || !tracks?.length) return;
+  radioCache.set(videoId, {
+    tracks,
+    expiresAt: Date.now() + CACHE_TTL.radio,
+  });
+}
+
 // ================== UTILITY HELPERS ==================
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -142,6 +201,7 @@ function normalizeSongMetadata(song) {
     artist,
     url: normalizeUrl(song.url),
     id: song.id || extractVideoId(song.url),
+    directUrl: song.directUrl || null,
   };
 }
 
@@ -235,6 +295,7 @@ function buildTrackFromYtDlpItem(item) {
     url: `https://www.youtube.com/watch?v=${id}`,
     id,
     durationInSec: Number(item.duration) || 0,
+    directUrl: item.url && item.url.startsWith("http") && !item.url.includes("youtube.com") ? item.url : null,
   });
 }
 
@@ -242,7 +303,6 @@ async function searchYtMusic(query, limit = 10) {
   if (!query?.trim()) return [];
 
   const args = [
-    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
     "--playlist-end", String(limit),
     "-J", `ytsearch${limit}:${query}`,
@@ -265,7 +325,6 @@ async function getPlaylistTracks(playlistUrl) {
   if (!playlistUrl) return [];
 
   const args = [
-    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
     "-J", playlistUrl,
   ];
@@ -286,9 +345,11 @@ async function getPlaylistTracks(playlistUrl) {
 async function getYtMusicRadioTracks(videoId) {
   if (!videoId) return [];
 
+  const cachedTracks = getCachedRadioTracks(videoId);
+  if (cachedTracks) return cachedTracks;
+
   const radioUrl = `https://music.youtube.com/watch?v=${videoId}&list=RD${videoId}`;
   const args = [
-    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
     "--playlist-end", "15",
     "-J", radioUrl,
@@ -297,10 +358,13 @@ async function getYtMusicRadioTracks(videoId) {
   try {
     const { stdout } = await spawnYtDlp(args, AUDIO_CONFIG.autoplayTimeout);
     const data = JSON.parse(stdout);
-    return (Array.isArray(data?.entries) ? data.entries : [])
+    const tracks = (Array.isArray(data?.entries) ? data.entries : [])
       .map(buildTrackFromYtDlpItem)
       .filter(Boolean)
       .filter(isValidSong);
+
+    if (tracks.length > 0) setCachedRadioTracks(videoId, tracks);
+    return tracks;
   } catch (err) {
     log(`[Autoplay Radio Error] ${err.message}`);
     return [];
@@ -310,9 +374,11 @@ async function getYtMusicRadioTracks(videoId) {
 async function fetchVideoInfo(videoId) {
   if (!videoId) return null;
 
+  const cached = getCachedVideoInfo(videoId);
+  if (cached) return { ...cached };
+
   const url = `https://www.youtube.com/watch?v=${videoId}`;
   const args = [
-    "--extractor-args", "youtube:player_client=tv,mweb,ios,android",
     "--no-warnings", "--no-cache-dir", "--skip-download",
     "-j", url,
   ];
@@ -321,13 +387,16 @@ async function fetchVideoInfo(videoId) {
     const { stdout } = await spawnYtDlp(args, AUDIO_CONFIG.ytDlpTimeout);
     const json = JSON.parse(stdout);
 
-    return normalizeSongMetadata({
+    const song = normalizeSongMetadata({
       title: json.title,
       artist: json.artist || json.uploader || json.channel || json.creator || "Unknown Artist",
       url,
       id: videoId,
       durationInSec: Number(json.duration) || 0,
     });
+
+    if (song) setCachedVideoInfo(videoId, song);
+    return song;
   } catch (err) {
     log(`[Video Info Error] ${videoId}: ${err.message}`);
     return null;
@@ -409,7 +478,7 @@ async function process9RouterRequest(prompt) {
 function getDirectAudioUrl(targetUrl, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const args = [
-      "-g", "-f", "bestaudio/ba",
+      "-g", "-f", "ba/bestaudio/b/best",
       "--no-playlist", "--no-warnings",
       "--no-check-certificates", "--no-cache-dir",
       ...extraArgs, targetUrl,
@@ -547,7 +616,7 @@ function streamFromDirectUrl(directUrl, song = null) {
 function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
   return new Promise((resolve, reject) => {
     const ytdlpProcess = spawn("yt-dlp", [
-      "-o", "-", "-f", "bestaudio/ba",
+      "-o", "-", "-f", "ba/bestaudio/b/best",
       "--no-playlist", "--no-warnings",
       "--no-check-certificates", "--no-cache-dir",
       ...extraArgs, targetUrl
@@ -653,16 +722,30 @@ async function createAudioResourceFromSong(song) {
   if (!isValidSong(song)) throw new Error("Invalid song object");
 
   const targetUrl = normalizeUrl(song.url);
+  const songId = getSongId(song);
+
+  let directUrl = song.directUrl || getCachedDirectUrl(songId);
+
+  if (directUrl) {
+    try {
+      return await streamFromDirectUrl(directUrl, song);
+    } catch (err) {
+      log(`[Cached Stream Failed] ${song.title}: ${err.message}. Refetching direct URL...`);
+      directUrl = null;
+      if (songId) directUrlCache.delete(songId);
+    }
+  }
 
   try {
-    const directUrl = await getDirectAudioUrl(targetUrl);
+    directUrl = await getDirectAudioUrl(targetUrl);
+    if (songId) setCachedDirectUrl(songId, directUrl);
     return await streamFromDirectUrl(directUrl, song);
   } catch (err) {
     log(`[Audio Engine #1 Failed] ${song.title}: ${err.message}`);
   }
 
   try {
-    return await streamWithYtdlp(targetUrl, ["--extractor-args", "youtube:player_client=tv,mweb,ios,android"], song);
+    return await streamWithYtdlp(targetUrl, [], song);
   } catch (err) {
     log(`[Audio Engine #2 Failed] ${song.title}: ${err.message}`);
   }
@@ -778,10 +861,7 @@ async function advanceQueue(guildId, reason = "idle") {
 
   try {
     if (serverQueue.songs.length > 0) {
-      const finishedSong = serverQueue.songs.shift();
-      if (finishedSong) {
-        // log(`[Queue Advance] Server: ${serverQueue.guildName} | Finished: ${finishedSong.title} | Reason: ${reason}`);
-      }
+      serverQueue.songs.shift();
     }
 
     if (reason === "error") {
@@ -839,8 +919,6 @@ async function playNextSong(guildId) {
         serverQueue.playedIds.add(songId);
         serverQueue.playedKeys.add(songKey);
         serverQueue.playedUrls.add(songUrl);
-
-        // log(`[Autoplay] Server: ${serverQueue.guildName} | ${nextSong.title} - ${nextSong.artist}`);
       } catch (err) {
         log(`[Autoplay Error] Server: ${serverQueue.guildName}: ${err.message}`);
         const embed = new EmbedBuilder()
@@ -884,7 +962,6 @@ async function playNextSong(guildId) {
   serverQueue.playing = true;
 
   try {
-    // log(`[Music Stream Ready] Server: ${serverQueue.guildName} | ${song.title} - ${song.artist}`);
     const resource = await createAudioResourceFromSong(song);
     const currentQueue = queues.get(guildId);
 
@@ -1075,8 +1152,6 @@ function runDiscord() {
         return message.channel.send({ embeds: [embed] });
       }
 
-      // log(`[Discord AI Chat] Server: ${message.guild.name} | From ${message.author.tag}: ${prompt}`);
-
       let typingInterval;
       try {
         await message.channel.sendTyping();
@@ -1096,7 +1171,6 @@ function runDiscord() {
           await message.channel.send(parts[i]);
         }
       } catch (err) {
-        // log(`Discord AI Error: ${err.message}`);
         await message.channel.send("Failed to process request.").catch(() => {});
       } finally {
         if (typingInterval) {
@@ -1241,7 +1315,6 @@ function runDiscord() {
             const sq = queues.get(currentGuildId);
             if (!sq) return;
 
-            // log(`[Audio Idle] Server: ${sq.guildName} | Current: ${sq.currentSong?.title || "Unknown"}`);
             sq.playing = false;
             destroyAudioResource(sq.currentResource);
             sq.currentResource = null;
@@ -1404,8 +1477,6 @@ function runDiscord() {
       }
 
       const currentSong = serverQueue.songs[0];
-      // log(`[Skip Command] Server: ${message.guild.name} | Skipped by ${message.author.tag}`);
-
       const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
       const embed = new EmbedBuilder()
         .setColor("#FFFF00")
