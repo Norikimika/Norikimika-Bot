@@ -13,6 +13,7 @@ const {
   EmbedBuilder,
   PermissionFlagsBits,
   ActivityType,
+  ChannelType,
 } = require("discord.js");
 
 const {
@@ -69,6 +70,7 @@ const AUDIO_CONFIG = {
 };
 
 const queues = new Map();
+const tempVoiceChannels = new Set();
 
 // ================== IN-MEMORY CACHES ==================
 const directUrlCache = new Map();
@@ -1014,7 +1016,7 @@ async function playNextSong(guildId) {
   }
 }
 
-// ================== PRESENCE / ACTIVITY UPDATER ==================
+// ================== PRESENCE & HANDLERS ==================
 function getActiveUsersCount(client) {
   const activeUserIds = new Set();
 
@@ -1068,7 +1070,7 @@ function setupVoiceConnectionHandlers(connection, guildId, voiceChannelId, adapt
   });
 }
 
-// ================== DISCORD ENGINE & COMMAND HANDLERS ==================
+// ================== DISCORD ENGINE & EVENT HANDLERS ==================
 function runDiscord() {
   const discordClient = new Client({
     intents: [
@@ -1081,7 +1083,7 @@ function runDiscord() {
     partials: [Partials.Channel],
   });
 
-  discordClient.once("clientReady", () => {
+  discordClient.once("clientReady", async () => {
     log(`Online as: ${discordClient.user.tag}`);
 
     const updateActivity = () => {
@@ -1093,6 +1095,98 @@ function runDiscord() {
 
     updateActivity();
     setInterval(updateActivity, 30000);
+
+    for (const guild of discordClient.guilds.cache.values()) {
+      try {
+        const channels = await guild.channels.fetch();
+
+        const existingTrigger = channels.find(
+          (c) => c?.type === ChannelType.GuildVoice && c.name.toLowerCase().includes("┃custom")
+        );
+
+        if (!existingTrigger) {
+          const voiceCategory = channels.find(
+            (c) => c?.type === ChannelType.GuildCategory && c.name.toLowerCase().includes("voice")
+          );
+
+          const createdChannel = await guild.channels.create({
+            name: "➕┃custom",
+            type: ChannelType.GuildVoice,
+            parent: voiceCategory ? voiceCategory.id : null,
+            position: 0,
+          });
+
+          await createdChannel.setPosition(0).catch(() => {});
+
+          log(`[Auto Setup] Created trigger channel at top in guild: ${guild.name}`);
+        } else {
+          await existingTrigger.setPosition(0).catch(() => {});
+        }
+
+        for (const channel of channels.values()) {
+          if (
+            channel?.type === ChannelType.GuildVoice &&
+            channel.name.startsWith("🔊┃") &&
+            channel.members.size === 0
+          ) {
+            await channel.delete("Cleanup empty custom voice channel on startup").catch(() => {});
+          }
+        }
+      } catch (err) {
+        log(`[Startup Auto-Setup Error] Guild ${guild.name}: ${err.message}`);
+      }
+    }
+  });
+
+  discordClient.on("voiceStateUpdate", async (oldState, newState) => {
+    const joinedChannel = newState.channel;
+    const leftChannel = oldState.channel;
+
+    const isTrigger = joinedChannel && joinedChannel.name.toLowerCase().includes("┃custom");
+
+    if (isTrigger && newState.member) {
+      try {
+        const guild = newState.guild;
+        const member = newState.member;
+
+        const createdChannel = await guild.channels.create({
+          name: `🔊┃${member.displayName}`,
+          type: ChannelType.GuildVoice,
+          parent: joinedChannel.parentId || null,
+          permissionOverwrites: [
+            {
+              id: member.id,
+              allow: [
+                PermissionFlagsBits.ManageChannels,
+                PermissionFlagsBits.Connect,
+                PermissionFlagsBits.Speak,
+                PermissionFlagsBits.MuteMembers,
+                PermissionFlagsBits.DeafenMembers,
+                PermissionFlagsBits.MoveMembers,
+              ],
+            },
+          ],
+        });
+
+        tempVoiceChannels.add(createdChannel.id);
+        await member.voice.setChannel(createdChannel);
+        log(`[Custom Voice] Created "${createdChannel.name}" for ${member.user.tag}`);
+      } catch (err) {
+        log(`[Custom Voice Error] Failed to create dynamic channel: ${err.message}`);
+      }
+    }
+
+    if (leftChannel && tempVoiceChannels.has(leftChannel.id)) {
+      if (leftChannel.members.size === 0) {
+        try {
+          tempVoiceChannels.delete(leftChannel.id);
+          await leftChannel.delete("Custom voice channel is empty");
+          log(`[Custom Voice] Deleted empty channel "${leftChannel.name}"`);
+        } catch (err) {
+          log(`[Custom Voice Error] Failed to delete channel: ${err.message}`);
+        }
+      }
+    }
   });
 
   discordClient.on("messageCreate", async (message) => {
