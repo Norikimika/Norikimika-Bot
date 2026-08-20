@@ -42,6 +42,7 @@ const CHAT_ID = parseInt(process.env.CHAT_ID);
 const TOPIC_ID = parseInt(process.env.TOPIC_ID);
 const TOPIC_ID_MUSIC = parseInt(process.env.TOPIC_ID_MUSIC);
 const TOPIC_ID_MUSIC2 = parseInt(process.env.TOPIC_ID_MUSIC2);
+const TOPIC_ID_TIKTOK = parseInt(process.env.TOPIC_ID_TIKTOK);
 
 const DEFAULT_RETRIES = 2;
 const DEFAULT_RETRY_DELAY = 2000;
@@ -144,6 +145,45 @@ async function safeReplyWithAudio(ctx, getAudio, options = {}, retries = DEFAULT
       return await ctx.replyWithAudio(audio, options);
     } catch (err) {
       appendLogLine(`safeReplyWithAudio error (chat ${ctx.chat?.id || "unknown"}): ${err && (err.stack || err.message)}`);
+      if (i < retries) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+    }
+  }
+  return false;
+}
+
+async function safeReplyWithVideo(ctx, getVideo, options = {}, retries = DEFAULT_RETRIES) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const video = typeof getVideo === "function" ? getVideo() : getVideo;
+      return await ctx.replyWithVideo(video, options);
+    } catch (err) {
+      appendLogLine(`safeReplyWithVideo error (chat ${ctx.chat?.id || "unknown"}): ${err && (err.stack || err.message)}`);
+      if (i < retries) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+    }
+  }
+  return false;
+}
+
+async function safeReplyWithPhoto(ctx, getPhoto, options = {}, retries = DEFAULT_RETRIES) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const photo = typeof getPhoto === "function" ? getPhoto() : getPhoto;
+      return await ctx.replyWithPhoto(photo, options);
+    } catch (err) {
+      appendLogLine(`safeReplyWithPhoto error (chat ${ctx.chat?.id || "unknown"}): ${err && (err.stack || err.message)}`);
+      if (i < retries) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+    }
+  }
+  return false;
+}
+
+async function safeReplyWithMediaGroup(ctx, getMediaGroup, options = {}, retries = DEFAULT_RETRIES) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const mediaGroup = typeof getMediaGroup === "function" ? getMediaGroup() : getMediaGroup;
+      return await ctx.replyWithMediaGroup(mediaGroup, options);
+    } catch (err) {
+      appendLogLine(`safeReplyWithMediaGroup error (chat ${ctx.chat?.id || "unknown"}): ${err && (err.stack || err.message)}`);
       if (i < retries) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
     }
   }
@@ -1508,6 +1548,199 @@ bot.hears(/^\/approve/i, topicOnly, adminOnly, async (ctx) => {
   );
 });
 
+// ================== TIKTOK DOWNLOADER ==================
+async function updateTTStatus(ctx, messageId, { title, uploader, status }) {
+  for (let i = 0; i <= DEFAULT_RETRIES; i++) {
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        messageId,
+        undefined,
+        `<b>🎬 TikTok Info</b>\n` +
+          `<blockquote>` +
+          `<b>👤 Author:</b>\n-> <code>${escapeHTML(uploader || "Unknown")}</code>\n` +
+          `<b>📝 Title:</b>\n-> <code>${escapeHTML(title || "TikTok Post")}</code>\n` +
+          `<b>📦 Status:</b>\n-> <code>${status}</code>` +
+          `</blockquote>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    } catch (err) {
+      if (err.description && err.description.includes("message is not modified")) return;
+      appendLogLine(`updateTTStatus error: ${err.message}`);
+      if (i < DEFAULT_RETRIES) await new Promise((r) => setTimeout(r, DEFAULT_RETRY_DELAY));
+    }
+  }
+}
+
+bot.command("tt", topicOnly, adminOnly, async (ctx) => {
+  const threadId = ctx.message?.message_thread_id;
+  const targetTopicId = TOPIC_ID_TIKTOK || threadId;
+  const text = ctx.message?.text?.trim() || "";
+  let argUrl = text.replace(/^\/tt(@\w+)?\s*/i, "").trim();
+  let replyText = ctx.message?.reply_to_message?.text?.trim() || "";
+
+  const combinedText = `${argUrl} ${replyText}`.trim();
+  const urlMatch = combinedText.match(/https?:\/\/(?:www\.|vm\.|vt\.|v\.)?tiktok\.com\/[^\s]+/i) || combinedText.match(/https?:\/\/[^\s]+/i);
+  const targetUrl = urlMatch ? urlMatch[0] : null;
+
+  if (!targetUrl) {
+    return safeReply(ctx, "❌ Please provide a TikTok URL or reply to a message containing a TikTok link.", {
+      reply_to_message_id: ctx.message?.message_id,
+      message_thread_id: threadId,
+    });
+  }
+
+  const typing = startTyping(ctx, targetTopicId, "upload_document");
+  const tempDir = path.join(__dirname, `tt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
+  let infoMessage = null;
+
+  try {
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    infoMessage = await ctx.reply(
+      `<b>🎬 TikTok Info</b>\n<blockquote><b>👤 Author:</b>\n-> <code>Fetching...</code>\n<b>📝 Title:</b>\n-> <code>Fetching...</code>\n<b>📦 Status:</b>\n-> <code>Downloading</code></blockquote>`,
+      { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
+    );
+
+    const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(targetUrl)}&hd=1`;
+    const apiRes = await fetch(apiUrl);
+    const apiJson = await apiRes.json();
+
+    if (!apiJson || apiJson.code !== 0 || !apiJson.data) {
+      throw new Error(apiJson?.msg || "Failed to fetch media from TikTok API");
+    }
+
+    const data = apiJson.data;
+    let title = data.title || "TikTok Post";
+    let uploader = data.author?.nickname || data.author?.unique_id || "Unknown";
+
+    if (title.length > 80) title = title.substring(0, 80) + "...";
+
+    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Downloading" });
+
+    const isImages = Array.isArray(data.images) && data.images.length > 0;
+    const downloadedFiles = [];
+    let audioPath = null;
+
+    if (isImages) {
+      for (let i = 0; i < data.images.length; i++) {
+        const imgUrl = data.images[i];
+        const imgRes = await fetch(imgUrl);
+        const buffer = Buffer.from(await imgRes.arrayBuffer());
+        const filePath = path.join(tempDir, `photo_${String(i + 1).padStart(2, "0")}.jpg`);
+        fs.writeFileSync(filePath, buffer);
+        downloadedFiles.push(filePath);
+      }
+
+      const audioUrl = data.music_info?.play || data.music;
+      if (audioUrl) {
+        try {
+          const audioRes = await fetch(audioUrl);
+          const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+          audioPath = path.join(tempDir, "audio.mp3");
+          fs.writeFileSync(audioPath, audioBuffer);
+        } catch {}
+      }
+    } else {
+      const videoUrl = data.hdplay || data.play;
+      if (!videoUrl) throw new Error("No video URL found in API response");
+
+      const videoRes = await fetch(videoUrl);
+      const videoBuffer = Buffer.from(await videoRes.arrayBuffer());
+      const filePath = path.join(tempDir, "video.mp4");
+      fs.writeFileSync(filePath, videoBuffer);
+      downloadedFiles.push(filePath);
+    }
+
+    if (downloadedFiles.length === 0) {
+      throw new Error("No media downloaded from TikWM response");
+    }
+
+    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Sending" });
+
+    const captionText =
+      `<b>🎬 TikTok Download</b>\n` +
+      `<blockquote>` +
+      `<b>👤 Author:</b>\n-> <code>${escapeHTML(uploader)}</code>\n` +
+      `<b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>` +
+      `</blockquote>`;
+
+    if (!isImages) {
+      await safeReplyWithVideo(
+        ctx,
+        () => ({ source: fs.createReadStream(downloadedFiles[0]) }),
+        {
+          caption: captionText,
+          parse_mode: "HTML",
+          message_thread_id: targetTopicId,
+        }
+      );
+    } else {
+      if (downloadedFiles.length === 1) {
+        await safeReplyWithPhoto(
+          ctx,
+          () => ({ source: fs.createReadStream(downloadedFiles[0]) }),
+          {
+            caption: captionText,
+            parse_mode: "HTML",
+            message_thread_id: targetTopicId,
+          }
+        );
+      } else {
+        const chunkSize = 10;
+        for (let i = 0; i < downloadedFiles.length; i += chunkSize) {
+          const chunk = downloadedFiles.slice(i, i + chunkSize);
+          const mediaGroup = chunk.map((photoPath, idx) => {
+            const item = {
+              type: "photo",
+              media: { source: fs.createReadStream(photoPath) },
+            };
+            if (i === 0 && idx === 0) {
+              item.caption = captionText;
+              item.parse_mode = "HTML";
+            }
+            return item;
+          });
+
+          await safeReplyWithMediaGroup(
+            ctx,
+            () => mediaGroup,
+            { message_thread_id: targetTopicId }
+          );
+        }
+      }
+
+      if (audioPath && fs.existsSync(audioPath)) {
+        await safeReplyWithAudio(
+          ctx,
+          () => ({ source: fs.createReadStream(audioPath) }),
+          {
+            title: title || "TikTok Audio",
+            performer: uploader || "TikTok",
+            message_thread_id: targetTopicId,
+          }
+        );
+      }
+    }
+
+    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Success" });
+
+  } catch (err) {
+    appendLogLine(`[TT ERROR] ${err.stack || err.message}`);
+    if (infoMessage) {
+      await updateTTStatus(ctx, infoMessage.message_id, { title: "Error", uploader: "Unknown", status: "Failed" });
+    }
+  } finally {
+    stopTyping(typing);
+    try {
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    } catch {}
+  }
+});
+
 // ================== HELP COMMAND ==================
 bot.hears(/^\/(\w+)/, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
@@ -1530,6 +1763,8 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "<blockquote><b>✹ Download Music</b>\n" +
       "-> <code>/music [title]</code>\n" +
       "-> <code>/music2 [title]</code></blockquote>\n" +
+      "<blockquote><b>✹ Download TikTok</b>\n" +
+      "-> <code>/tt [link]</code></blockquote>\n" +
       "<blockquote><b>✹ Data Usage</b>\n" +
       "-> /usage</blockquote>\n" +
       "<blockquote><b>✹ Playback Controller</b>\n" +
