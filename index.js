@@ -1489,8 +1489,10 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
       const price = escapeHTML((row[2] || "-").replace(/\r/, ""));
       const rawCapital = (row[5] || "-").replace(/\r/g, "").trim();
       const capital = escapeHTML(rawCapital.toUpperCase() === "#VALUE!" ? "-" : rawCapital);
+      const rawProfit = (row[6] || "-").replace(/\r/g, "").trim();
+      const profit = escapeHTML(rawProfit.toUpperCase() === "#VALUE!" ? "-" : rawProfit);
 
-      const item = `<blockquote>Name : ${name}\nContents : ${contents}\nPrice : ${price}\nCapital : ${capital}</blockquote>\n`;
+      const item = `<blockquote>Name : ${name}\nContents : ${contents}\nPrice : ${price}\nCapital : <tg-spoiler>${capital}</tg-spoiler>\nProfit : <tg-spoiler>${profit}</tg-spoiler></blockquote>\n`;
 
       if (current.length + item.length > 3800) {
         chunks.push(current.trim());
