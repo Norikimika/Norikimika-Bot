@@ -405,77 +405,6 @@ async function fetchVideoInfo(videoId) {
   }
 }
 
-// ================== 9ROUTER AI CHAT SERVICE ==================
-async function process9RouterRequest(prompt) {
-  try {
-    const rawUrl = process.env.NINE_ROUTER_URL;
-    if (!rawUrl) throw new Error("NINE_ROUTER_URL is missing in .env file!");
-
-    const apiKey = process.env.NINE_ROUTER_API_KEY;
-    if (!apiKey) throw new Error("NINE_ROUTER_API_KEY is missing in .env file!");
-
-    const model = process.env.NINE_ROUTER_MODEL;
-    if (!model) throw new Error("NINE_ROUTER_MODEL is missing in .env file!");
-
-    const baseUrl = rawUrl.replace(/\/+$/, "");
-    const endpoint = baseUrl.endsWith("/chat/completions")
-      ? baseUrl
-      : baseUrl.endsWith("/v1")
-      ? `${baseUrl}/chat/completions`
-      : `${baseUrl}/v1/chat/completions`;
-
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: "You are Zero Two, a helpful, friendly, and smart AI assistant." },
-          { role: "user", content: prompt },
-        ],
-        stream: false,
-      }),
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`9Router API HTTP ${res.status}: ${errText}`);
-    }
-
-    const rawText = await res.text();
-
-    try {
-      const data = JSON.parse(rawText);
-      return data?.choices?.[0]?.message?.content || null;
-    } catch {
-      let aggregatedContent = "";
-      const lines = rawText.split("\n");
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
-          try {
-            const parsed = JSON.parse(trimmed.slice(6));
-            aggregatedContent +=
-              parsed.choices?.[0]?.delta?.content ||
-              parsed.choices?.[0]?.message?.content ||
-              "";
-          } catch {}
-        }
-      }
-
-      if (aggregatedContent) return aggregatedContent;
-      throw new Error(`Invalid JSON response: ${rawText.slice(0, 100)}...`);
-    }
-  } catch (err) {
-    log(`[9Router Error] ${err.message}`);
-    throw err;
-  }
-}
-
 // ================== AUDIO STREAMING ENGINES ==================
 function getDirectAudioUrl(targetUrl, extraArgs = []) {
   return new Promise((resolve, reject) => {
@@ -1206,8 +1135,6 @@ function runDiscord() {
         .setColor("#0099FF")
         .setTitle(`Available Commands - ${message.guild.name}`)
         .setDescription(
-          "**AI**\n" +
-          "`!a` - Ask AI a question or prompt\n\n" +
           "**Music**\n" +
           "`!p` - Play a track by link or search term\n" +
           "`!q` - Display the current song queue\n" +
@@ -1219,59 +1146,6 @@ function runDiscord() {
         .setFooter({ text: "Skips and stops are restricted to the track requester or admins." });
 
       return message.channel.send({ embeds: [embed] });
-    }
-
-    if (command === "a") {
-      const argPrompt = args.join(" ").trim();
-      let replyText = "";
-
-      if (message.reference?.messageId) {
-        try {
-          const referencedMsg = await message.channel.messages.fetch(message.reference.messageId);
-          replyText = referencedMsg?.content?.trim() || "";
-        } catch {}
-      }
-
-      let prompt = "";
-      if (argPrompt && replyText) {
-        prompt = `${argPrompt}: ${replyText}`;
-      } else if (argPrompt) {
-        prompt = argPrompt;
-      } else if (replyText) {
-        prompt = replyText;
-      }
-
-      if (!prompt) {
-        const embed = new EmbedBuilder().setColor("#FF0000").setDescription("Please provide a question or prompt!");
-        return message.channel.send({ embeds: [embed] });
-      }
-
-      let typingInterval;
-      try {
-        await message.channel.sendTyping();
-        typingInterval = setInterval(() => {
-          message.channel.sendTyping().catch(() => {});
-        }, 5000);
-
-        const responseText = await process9RouterRequest(prompt);
-
-        if (typingInterval) {
-          clearInterval(typingInterval);
-          typingInterval = null;
-        }
-
-        const parts = chunkText(responseText, 1900);
-        for (let i = 0; i < parts.length; i++) {
-          await message.channel.send(parts[i]);
-        }
-      } catch (err) {
-        await message.channel.send("Failed to process request.").catch(() => {});
-      } finally {
-        if (typingInterval) {
-          clearInterval(typingInterval);
-        }
-      }
-      return;
     }
 
     if (command === "q") {
