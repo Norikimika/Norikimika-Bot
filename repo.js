@@ -96,6 +96,11 @@ const GITHUB_REPOS = [
     owner: "decolua",
     repo: "9router",
     branch: "master"
+  },
+  {
+    owner: "anomalyco",
+    repo: "opencode",
+    branch: "dev"
   }
 ];
 

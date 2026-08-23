@@ -635,18 +635,9 @@ function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return "??:??";
 
   const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
+  const s = Math.floor(seconds % 60);
 
   return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-function execPromise(command) {
-  return new Promise((resolve, reject) => {
-    exec(command, (err, stdout) => {
-      if (err) return reject(err);
-      resolve(stdout);
-    });
-  });
 }
 
 async function updateMusicStatus(ctx, messageId, { title, performer, duration, status }) {
@@ -658,10 +649,10 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
         undefined,
         `<b>🎵 Music Info</b>\n` +
           `<blockquote>` +
-          `<b>📝 Title:</b>\n-> <code>${title}</code>\n` +
-          `<b>👤 Artist:</b>\n-> <code>${performer}</code>\n` +
+          `<b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>\n` +
+          `<b>👤 Artist:</b>\n-> <code>${escapeHTML(performer)}</code>\n` +
           `<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n` +
-          `<b>📦 Status:</b>\n-> <code>${status}</code>` +
+          `<b>📦 Status:</b>\n-> <code>${escapeHTML(status)}</code>` +
           `</blockquote>`,
         { parse_mode: "HTML" }
       );
@@ -681,51 +672,98 @@ async function handleMusicCommand(ctx, targetTopicId) {
   const text = ctx.message.text?.trim() || "";
   const query = text.replace(/^\/music2?(@\w+)?\s*/i, "").trim();
 
+  const replyOpts = {
+    reply_to_message_id: ctx.message?.message_id,
+    message_thread_id: threadId,
+  };
+
   if (!query) {
-    return safeReply(ctx, "❌ Please provide a song title or YouTube link.", {
-      reply_to_message_id: ctx.message?.message_id,
-      message_thread_id: threadId,
-    });
+    return safeReply(ctx, "❌ Please provide a song title or link.", replyOpts);
   }
 
-  const typing = startTyping(ctx, threadId);
+  let typing = startTyping(ctx, threadId);
 
   try {
-    const ytArgs = ["-f", "bestaudio/ba", "-j", query.startsWith("http") ? query : `ytsearch1:${query}`];
+    let searchArg = query;
+    if (!query.startsWith("http")) {
+      if (query.toLowerCase().startsWith("sc:")) {
+        const cleanQuery = query.replace(/^sc:/i, "").trim();
+        searchArg = `scsearch1:${cleanQuery}`;
+      } else {
+        searchArg = `ytsearch1:${query}`;
+      }
+    }
+
+    const ytArgs = ["-f", "bestaudio/ba", "--no-playlist", "-j", searchArg];
     const { stdout } = await execFilePromise("yt-dlp", ytArgs);
 
     const info = JSON.parse(stdout);
 
     const title = info.track || info.title || "Unknown Title";
-    const performer = info.artist || info.uploader || "Unknown Artist";
+    const performer = info.artist || info.uploader || info.uploader_id || "Unknown Artist";
     const duration = formatDuration(info.duration);
-    const videoUrl = `https://youtu.be/${info.id}`;
-    const tempFile = path.join(__dirname, `${info.id}.webm`);
-    const thumbBase = path.join(__dirname, info.id);
+    const mediaUrl = info.webpage_url || (query.startsWith("http") ? query : info.url);
+
+    const fileId = `${Date.now()}_${info.id}`;
+    const tempFile = path.join(__dirname, `${fileId}.webm`);
+    const thumbBase = path.join(__dirname, fileId);
     const thumbFile = `${thumbBase}.jpg`;
 
     let infoMessage;
     try {
       infoMessage = await ctx.reply(
         `<b>🎵 Music Info</b>\n<blockquote><b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>\n<b>👤 Artist:</b>\n-> <code>${escapeHTML(performer)}</code>\n<b>⏳ Duration:</b>\n-> <code>${duration}</code>\n<b>📦 Status:</b>\n-> <code>Downloading</code></blockquote>`,
-        { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
+        { parse_mode: "HTML", ...replyOpts }
       );
     } catch (err) { 
-      stopTyping(typing);
+      if (typing) stopTyping(typing);
       return; 
     }
 
     try {
-      await execFilePromise("yt-dlp", ["-f", "bestaudio/ba", "-o", tempFile, videoUrl]);
-      await execFilePromise("yt-dlp", ["--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg", "-o", thumbBase, videoUrl]);
+      await execFilePromise("yt-dlp", [
+        "-f", "bestaudio/ba",
+        "--no-playlist",
+        "-o", tempFile,
+        "--write-thumbnail",
+        "--convert-thumbnails", "jpg",
+        "-o", `thumbnail:${thumbBase}`,
+        mediaUrl
+      ]);
+
+      if (fs.existsSync(tempFile)) {
+        const stats = fs.statSync(tempFile);
+        const maxSizeBytes = 49 * 1024 * 1024;
+        if (stats.size > maxSizeBytes) {
+          await updateMusicStatus(ctx, infoMessage.message_id, { 
+            title, 
+            performer, 
+            duration, 
+            status: "Too Large" 
+          });
+          return;
+        }
+      } else {
+        throw new Error("Downloaded audio file not found.");
+      }
 
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Sending" });
+
+      if (typing) {
+        stopTyping(typing);
+        typing = null;
+      }
+      try {
+        await ctx.telegram.sendChatAction(ctx.chat.id, "upload_audio", {
+          message_thread_id: targetTopicId || threadId,
+        });
+      } catch {}
 
       const audioOptions = {
         title,
         performer,
         duration: info.duration,
-        message_thread_id: targetTopicId,
+        message_thread_id: targetTopicId || threadId,
       };
 
       if (fs.existsSync(thumbFile)) {
@@ -742,11 +780,13 @@ async function handleMusicCommand(ctx, targetTopicId) {
       try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch {}
       try { if (fs.existsSync(thumbFile)) fs.unlinkSync(thumbFile); } catch {}
       try { if (fs.existsSync(thumbBase + ".webp")) fs.unlinkSync(thumbBase + ".webp"); } catch {}
+      try { if (fs.existsSync(thumbBase + ".png")) fs.unlinkSync(thumbBase + ".png"); } catch {}
     }
   } catch (e) {
-    return safeReply(ctx, "❌ Failed to fetch music.");
+    appendLogLine(`[FETCH ERROR] ${e.stack || e.message}`);
+    return safeReply(ctx, "❌ Failed to fetch music.", replyOpts);
   } finally {
-    stopTyping(typing);
+    if (typing) stopTyping(typing);
   }
 }
 
@@ -1107,6 +1147,15 @@ function buildStruk(data) {
   if (data.type === "transfer") return buildStrukTransfer(data);
   if (data.type === "pulsa") return buildStrukPulsa(data);
   return buildStrukPLN(data);
+}
+
+function execPromise(command) {
+  return new Promise((resolve, reject) => {
+    exec(command, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(stdout);
+    });
+  });
 }
 
 async function buildStrukImage(struk) {
