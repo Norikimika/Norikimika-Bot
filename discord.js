@@ -4,7 +4,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 
 const {
   Client,
@@ -61,7 +61,7 @@ const AUDIO_CONFIG = {
   channels: 2,
   highWaterMark: 1 << 21,
   ytDlpTimeout: 20000,
-  ffmpegStartupTimeout: 12000,
+  ffmpegStartupTimeout: 30000,
   maxConsecutiveFailures: 3,
   failureDelay: 1500,
   autoplayTimeout: 25000,
@@ -72,32 +72,44 @@ const AUDIO_CONFIG = {
 const queues = new Map();
 const tempVoiceChannels = new Set();
 
+// ================== OPUS OFFLOAD ==================
+let libOpusSupport = null;
+function ffmpegHasLibOpus() {
+  if (libOpusSupport !== null) return libOpusSupport;
+  try {
+    const out = execFileSync("ffmpeg", ["-hide_banner", "-encoders"], { encoding: "utf8", timeout: 5000 });
+    libOpusSupport = /\blibopus\b/.test(out);
+  } catch {
+    libOpusSupport = false;
+  }
+  log(`[Audio Codec] ffmpeg libopus: ${libOpusSupport ? "yes (ogg-opus mode)" : "no (pcm fallback)"}`);
+  return libOpusSupport;
+}
+
+function getAudioOutArgs() {
+  return ffmpegHasLibOpus()
+    ? {
+        args: [
+          "-c:a", "libopus",
+          "-b:a", "128k",
+          "-compression_level", "3",
+          "-frame_duration", "20",
+          "-vbr", "off",
+          "-f", "ogg",
+        ],
+        inputType: StreamType.OggOpus,
+      }
+    : { args: ["-c:a", "pcm_s16le", "-f", "s16le"], inputType: StreamType.Raw };
+}
+
 // ================== IN-MEMORY CACHES ==================
-const directUrlCache = new Map();
 const videoInfoCache = new Map();
 const radioCache = new Map();
 
 const CACHE_TTL = {
-  directUrl: 30 * 60 * 1000,
   videoInfo: 60 * 60 * 1000,
   radio: 60 * 60 * 1000,
 };
-
-function getCachedDirectUrl(videoId) {
-  if (!videoId) return null;
-  const item = directUrlCache.get(videoId);
-  if (item && Date.now() < item.expiresAt) return item.directUrl;
-  directUrlCache.delete(videoId);
-  return null;
-}
-
-function setCachedDirectUrl(videoId, directUrl) {
-  if (!videoId || !directUrl) return;
-  directUrlCache.set(videoId, {
-    directUrl,
-    expiresAt: Date.now() + CACHE_TTL.directUrl,
-  });
-}
 
 function getCachedVideoInfo(videoId) {
   if (!videoId) return null;
@@ -177,7 +189,10 @@ function normalizeUrl(url) {
 
 function cleanArtist(value) {
   if (!value) return "Unknown Artist";
-  return String(value).replace(/\s+/g, " ").trim();
+  return String(value)
+    .replace(/\s*[-–—:]\s*(?:topic|official|vevo).*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim() || "Unknown Artist";
 }
 
 function cleanTitle(title, artist) {
@@ -186,10 +201,19 @@ function cleanTitle(title, artist) {
 
   if (cleanArtistName && cleanArtistName !== "Unknown Artist") {
     const escapedArtist = cleanArtistName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    value = value.replace(new RegExp(`^${escapedArtist}\\s*[-–—:]\\s*`, "i"), "");
+    value = value
+      .replace(new RegExp(`^${escapedArtist}\\s*[-–—:]\\s*`, "i"), "")
+      .replace(new RegExp(`\\s*[-–—:]\\s*${escapedArtist}\\b.*$`, "i"), "");
   }
 
-  return value.trim();
+  value = value
+    .replace(/\s*[\(\[][^\]\)]*(?:official|lyric|lirik|audio|video|mv|visualizer|remix|cover|lagu)[^\]\)]*[\)\]]/gi, "")
+    .replace(/\s*[-–—:|]\s*(?:official|lyric|lirik|audio|video|mv|visualizer|remix|cover|lagu).*$/gi, "")
+    .replace(/\s+lyrics?$/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return value || title;
 }
 
 function normalizeSongMetadata(song) {
@@ -211,10 +235,22 @@ function getSongId(song) {
   return song?.id || extractVideoId(song?.url);
 }
 
+function normalizeSongKey(title, artist) {
+  const normTitle = String(title || "")
+    .toLowerCase()
+    .replace(/[\(\[][^\]\)]*[\)\]]/g, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .trim();
+  const normArtist = String(artist || "")
+    .toLowerCase()
+    .replace(/topic|official|channel|vevo/gi, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .trim();
+  return `${normArtist}:${normTitle}`;
+}
+
 function getSongKey(song) {
-  const id = getSongId(song);
-  if (id) return `yt:${id}`;
-  return `${song?.artist || ""}:${song?.title || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+  return normalizeSongKey(song?.title, song?.artist);
 }
 
 function getSongUrlKey(song) {
@@ -242,6 +278,30 @@ function canControlQueue(message, serverQueue) {
 }
 
 // ================== YT-DLP PROCESS & DATA FETCHERS ==================
+function isBotCheck(message) {
+  return (
+    /confirm you.?re not a bot|Sign in to confirm/i.test(message || "") ||
+    /page needs to be reloaded|Precondition check failed|Requested format is not available|No video formats found|unable to download video data|HTTP Error (?:403|429)/i.test(
+      message || ""
+    )
+  );
+}
+
+const YT_FALLBACK_CLIENTS = ["web_safari", "mweb", "tv"];
+const YT_PRIMARY_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=android_vr"];
+
+function hasClientArg(extraArgs = []) {
+  return extraArgs.some((a) => String(a).includes("player_client"));
+}
+
+function nextBotCheckArgs(extraArgs = []) {
+  const used = extraArgs
+    .filter((a) => String(a).startsWith("youtube:player_client="))
+    .map((a) => String(a).split("=")[1]);
+  const next = YT_FALLBACK_CLIENTS.find((c) => !used.includes(c));
+  return next ? ["--extractor-args", `youtube:player_client=${next}`] : null;
+}
+
 function spawnYtDlp(args, timeoutMs = AUDIO_CONFIG.ytDlpTimeout) {
   return new Promise((resolve, reject) => {
     const proc = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -405,151 +465,14 @@ async function fetchVideoInfo(videoId) {
   }
 }
 
-// ================== AUDIO STREAMING ENGINES ==================
-function getDirectAudioUrl(targetUrl, extraArgs = []) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "-g", "-f", "ba/bestaudio/b/best",
-      "--no-playlist", "--no-warnings",
-      "--no-check-certificates", "--no-cache-dir",
-      ...extraArgs, targetUrl,
-    ];
-
-    const proc = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const timeoutId = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { proc.kill("SIGKILL"); } catch {}
-      reject(new Error("yt-dlp timed out while resolving audio URL"));
-    }, AUDIO_CONFIG.ytDlpTimeout);
-
-    const cleanup = () => clearTimeout(timeoutId);
-
-    proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-      if (stderr.length > 3000) stderr = stderr.slice(-3000);
-    });
-
-    proc.once("error", (err) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error(`yt-dlp process error: ${err.message}`));
-    });
-
-    proc.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-
-      if (code !== 0) {
-        reject(new Error(`yt-dlp exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`));
-        return;
-      }
-
-      const directUrl = stdout.trim().split(/\r?\n/).find((line) => /^https?:\/\//i.test(line.trim()));
-      if (!directUrl) {
-        reject(new Error("yt-dlp returned no direct audio URL"));
-        return;
-      }
-
-      resolve(directUrl.trim());
-    });
-  });
-}
-
-function streamFromDirectUrl(directUrl, song = null) {
-  return new Promise((resolve, reject) => {
-    const ffmpegProcess = spawn("ffmpeg", [
-      "-hide_banner", "-loglevel", "warning",
-      "-reconnect", "1", "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
-      "-i", directUrl,
-      "-vn", "-ac", String(AUDIO_CONFIG.channels),
-      "-ar", String(AUDIO_CONFIG.sampleRate),
-      "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1"
-    ], { stdio: ["ignore", "pipe", "pipe"] });
-
-    let settled = false;
-    let started = false;
-    let stderr = "";
-
-    const startTimeout = setTimeout(() => {
-      if (settled) return;
-      fail(`FFmpeg startup timeout${stderr ? `: ${stderr.slice(-800)}` : ""}`);
-    }, AUDIO_CONFIG.ffmpegStartupTimeout);
-
-    function cleanup() {
-      clearTimeout(startTimeout);
-      if (!ffmpegProcess.killed) {
-        try { ffmpegProcess.kill("SIGKILL"); } catch {}
-      }
-    }
-
-    function fail(message) {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error(message));
-    }
-
-    ffmpegProcess.stdout.once("data", (chunk) => {
-      if (settled) return;
-      started = true;
-      settled = true;
-      clearTimeout(startTimeout);
-
-      ffmpegProcess.stdout.pause();
-      ffmpegProcess.stdout.unshift(chunk);
-
-      const resource = createAudioResource(ffmpegProcess.stdout, {
-        inputType: StreamType.Raw,
-        inlineVolume: false,
-        silencePaddingFrames: 5,
-        highWaterMark: AUDIO_CONFIG.highWaterMark,
-        metadata: {
-          title: song?.title || null,
-          artist: song?.artist || null,
-          id: song?.id || null,
-          url: song?.url || null,
-        },
-      });
-
-      resource.ffmpegProcess = ffmpegProcess;
-      resolve(resource);
-    });
-
-    ffmpegProcess.stderr.on("data", (chunk) => {
-      const message = chunk.toString().trim();
-      if (message) {
-        stderr = `${stderr}\n${message}`.slice(-3000);
-      }
-    });
-
-    ffmpegProcess.once("error", (err) => {
-      fail(`FFmpeg process error: ${err.message}`);
-    });
-
-    ffmpegProcess.once("close", (code) => {
-      if (!started && !settled) {
-        fail(`FFmpeg exited before producing audio (code ${code})${stderr ? `: ${stderr.slice(-800)}` : ""}`);
-      }
-    });
-  });
-}
-
 function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
   return new Promise((resolve, reject) => {
+    const out = getAudioOutArgs();
     const ytdlpProcess = spawn("yt-dlp", [
       "-o", "-", "-f", "ba/bestaudio/b/best",
       "--no-playlist", "--no-warnings",
       "--no-check-certificates", "--no-cache-dir",
+      ...(hasClientArg(extraArgs) ? [] : YT_PRIMARY_CLIENT_ARGS),
       ...extraArgs, targetUrl
     ], { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -559,17 +482,26 @@ function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
       "-i", "pipe:0",
       "-vn", "-ac", String(AUDIO_CONFIG.channels),
       "-ar", String(AUDIO_CONFIG.sampleRate),
-      "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1"
+      ...out.args, "pipe:1"
     ], { stdio: ["pipe", "pipe", "pipe"] });
 
     let settled = false;
     let started = false;
     let stderr = "";
 
-    const startTimeout = setTimeout(() => {
+    let startTimeout = setTimeout(() => {
       if (settled) return;
-      fail(`yt-dlp/FFmpeg startup timeout${stderr ? `: ${stderr.slice(-800)}` : ""}`);
+      fail(`yt-dlp/FFmpeg startup idle timeout${stderr ? `: ${stderr.slice(-800)}` : ""}`);
     }, AUDIO_CONFIG.ffmpegStartupTimeout);
+
+    function bumpStartTimeout() {
+      if (settled || started) return;
+      clearTimeout(startTimeout);
+      startTimeout = setTimeout(() => {
+        if (settled) return;
+        fail(`yt-dlp/FFmpeg startup idle timeout${stderr ? `: ${stderr.slice(-800)}` : ""}`);
+      }, AUDIO_CONFIG.ffmpegStartupTimeout);
+    }
 
     function cleanup() {
       clearTimeout(startTimeout);
@@ -607,7 +539,7 @@ function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
       ffmpegProcess.stdout.unshift(chunk);
 
       const resource = createAudioResource(ffmpegProcess.stdout, {
-        inputType: StreamType.Raw,
+        inputType: out.inputType,
         inlineVolume: false,
         silencePaddingFrames: 5,
         highWaterMark: AUDIO_CONFIG.highWaterMark,
@@ -626,6 +558,7 @@ function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
 
     ytdlpProcess.stderr.on("data", (chunk) => {
       const message = chunk.toString().trim();
+      bumpStartTimeout();
       if (message && !message.includes("WARNING")) {
         stderr = `${stderr}\n[yt-dlp] ${message}`.slice(-3000);
       }
@@ -641,6 +574,18 @@ function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
     ytdlpProcess.once("error", (err) => fail(`yt-dlp process error: ${err.message}`));
     ffmpegProcess.once("error", (err) => fail(`FFmpeg process error: ${err.message}`));
 
+    ytdlpProcess.once("close", (code) => {
+      if (started || settled || code === 0) return;
+      if (isBotCheck(stderr)) {
+        const retryArgs = nextBotCheckArgs(extraArgs);
+        if (retryArgs) {
+          settled = true;
+          cleanup();
+          streamWithYtdlp(targetUrl, [...extraArgs, ...retryArgs], song).then(resolve, reject);
+        }
+      }
+    });
+
     ffmpegProcess.once("close", (code) => {
       if (!started && !settled) {
         fail(`FFmpeg exited before producing audio (code ${code})${stderr ? `: ${stderr.slice(-800)}` : ""}`);
@@ -653,35 +598,14 @@ async function createAudioResourceFromSong(song) {
   if (!isValidSong(song)) throw new Error("Invalid song object");
 
   const targetUrl = normalizeUrl(song.url);
-  const songId = getSongId(song);
-
-  let directUrl = song.directUrl || getCachedDirectUrl(songId);
-
-  if (directUrl) {
-    try {
-      return await streamFromDirectUrl(directUrl, song);
-    } catch (err) {
-      log(`[Cached Stream Failed] ${song.title}: ${err.message}. Refetching direct URL...`);
-      directUrl = null;
-      if (songId) directUrlCache.delete(songId);
-    }
-  }
-
-  try {
-    directUrl = await getDirectAudioUrl(targetUrl);
-    if (songId) setCachedDirectUrl(songId, directUrl);
-    return await streamFromDirectUrl(directUrl, song);
-  } catch (err) {
-    log(`[Audio Engine #1 Failed] ${song.title}: ${err.message}`);
-  }
 
   try {
     return await streamWithYtdlp(targetUrl, [], song);
   } catch (err) {
-    log(`[Audio Engine #2 Failed] ${song.title}: ${err.message}`);
+    log(`[Audio Stream Failed] ${song.title}: ${err.message}`);
   }
 
-  throw new Error(`All audio streaming engines failed for "${song.title}"`);
+  throw new Error(`Audio streaming failed for "${song.title}"`);
 }
 
 function destroyAudioResource(resource) {
