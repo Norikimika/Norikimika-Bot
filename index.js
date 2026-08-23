@@ -193,7 +193,17 @@ async function safeReplyWithMediaGroup(ctx, getMediaGroup, options = {}, retries
 // ================== ADMIN CHECK ==================
 bot.use(async (ctx, next) => {
   const user = ctx.from?.username || ctx.from?.id || "unknown";
-  const msg = ctx.message?.text || "<non-text>";
+  let msg;
+  if (ctx.callbackQuery) {
+    msg = `[button] ${ctx.callbackQuery.data}`;
+  } else if (ctx.message?.text) {
+    msg = ctx.message.text;
+  } else if (ctx.message?.caption) {
+    msg = `[${ctx.message.photo ? "photo" : ctx.message.video ? "video" : "media"}+caption] ${ctx.message.caption}`;
+  } else {
+    const types = ["photo", "video", "sticker", "voice", "audio", "document", "animation", "video_note", "contact", "location"];
+    msg = `[${types.find((t) => ctx.message?.[t]) || "non-text"}]`;
+  }
   const line = `From ${user}: ${msg}`;
   logStream.write(`[${new Date().toLocaleString('id-ID')}] ${line}\n`);
   await next();
@@ -1446,14 +1456,14 @@ bot.hears(/^\/approve/i, topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== TIKTOK DOWNLOADER ==================
-async function updateTTStatus(ctx, messageId, { title, uploader, status }) {
+async function updateTTStatus(ctx, messageId, { title, uploader, status, platform = "TikTok" }) {
   for (let i = 0; i <= DEFAULT_RETRIES; i++) {
     try {
       await ctx.telegram.editMessageText(
         ctx.chat.id,
         messageId,
         undefined,
-        `<b>🎬 TikTok Info</b>\n` +
+        `<b>🎬 ${platform} Info</b>\n` +
           `<blockquote>` +
           `<b>👤 Author:</b>\n-> <code>${escapeHTML(uploader || "Unknown")}</code>\n` +
           `<b>📝 Title:</b>\n-> <code>${escapeHTML(title || "TikTok Post")}</code>\n` +
@@ -1478,15 +1488,18 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
   let replyText = ctx.message?.reply_to_message?.text?.trim() || "";
 
   const combinedText = `${argUrl} ${replyText}`.trim();
-  const urlMatch = combinedText.match(/https?:\/\/(?:www\.|vm\.|vt\.|v\.)?tiktok\.com\/[^\s]+/i) || combinedText.match(/https?:\/\/[^\s]+/i);
+  const urlMatch = combinedText.match(/https?:\/\/(?:www\.|vm\.|vt\.|v\.)?(?:tiktok|douyin|iesdouyin)\.com\/[^\s]+/i) || combinedText.match(/https?:\/\/[^\s]+/i);
   const targetUrl = urlMatch ? urlMatch[0] : null;
 
   if (!targetUrl) {
-    return safeReply(ctx, "❌ Please provide a TikTok URL or reply to a message containing a TikTok link.", {
+    return safeReply(ctx, "❌ Please provide a TikTok/Douyin URL or reply to a message containing one.", {
       reply_to_message_id: ctx.message?.message_id,
       message_thread_id: threadId,
     });
   }
+
+  const isDouyin = /(?:douyin|iesdouyin)\.com/i.test(targetUrl);
+  const platformLabel = isDouyin ? "Douyin" : "TikTok";
 
   const typing = startTyping(ctx, targetTopicId, "upload_document");
   const tempDir = path.join(__dirname, `tt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
@@ -1496,33 +1509,63 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
     fs.mkdirSync(tempDir, { recursive: true });
 
     infoMessage = await ctx.reply(
-      `<b>🎬 TikTok Info</b>\n<blockquote><b>👤 Author:</b>\n-> <code>Fetching...</code>\n<b>📝 Title:</b>\n-> <code>Fetching...</code>\n<b>📦 Status:</b>\n-> <code>Downloading</code></blockquote>`,
+      `<b>🎬 ${platformLabel} Info</b>\n<blockquote><b>👤 Author:</b>\n-> <code>Fetching...</code>\n<b>📝 Title:</b>\n-> <code>Fetching...</code>\n<b>📦 Status:</b>\n-> <code>Downloading</code></blockquote>`,
       { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
     );
 
-    const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(targetUrl)}&hd=1`;
-    const apiRes = await fetch(apiUrl);
-    const apiJson = await apiRes.json();
+    let title, uploader, videoUrl = null, images = [], musicUrl = null;
 
-    if (!apiJson || apiJson.code !== 0 || !apiJson.data) {
-      throw new Error(apiJson?.msg || "Failed to fetch media from TikTok API");
+    if (isDouyin) {
+      const apiUrl = `https://douyin.wtf/api/hybrid/video_data?url=${encodeURIComponent(targetUrl)}&minimal=true`;
+      const apiRes = await fetch(apiUrl);
+      const apiJson = await apiRes.json();
+
+      if (!apiJson || apiJson.code !== 200 || !apiJson.data) {
+        throw new Error(apiJson?.message || "Failed to fetch media from Douyin API");
+      }
+
+      const data = apiJson.data;
+      title = data.desc || "Douyin Post";
+      uploader = data.author?.nickname || data.author?.unique_id || "Unknown";
+      const vd = data.video_data || {};
+      videoUrl = vd.nwm_video_url || vd.nwm_video_url_HQ || vd.wm_video_url || vd.wm_video_url_HQ || null;
+      const imgData = data.image_data?.no_watermark_image_list || data.image_data?.watermark_image_list;
+      if (Array.isArray(imgData) && imgData.length > 0) {
+        images = imgData;
+      } else if (Array.isArray(data.images)) {
+        images = data.images.map((img) => (img?.url_list || []).pop() || (img?.url_list || [])[0]).filter(Boolean);
+      } else {
+        images = [];
+      }
+      musicUrl = data.music?.play_url?.url_list?.[0] || null;
+    } else {
+      const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(targetUrl)}&hd=1`;
+      const apiRes = await fetch(apiUrl);
+      const apiJson = await apiRes.json();
+
+      if (!apiJson || apiJson.code !== 0 || !apiJson.data) {
+        throw new Error(apiJson?.msg || "Failed to fetch media from TikTok API");
+      }
+
+      const data = apiJson.data;
+      title = data.title || "TikTok Post";
+      uploader = data.author?.nickname || data.author?.unique_id || "Unknown";
+      videoUrl = data.hdplay || data.play || null;
+      images = Array.isArray(data.images) ? data.images : [];
+      musicUrl = data.music_info?.play || data.music || null;
     }
-
-    const data = apiJson.data;
-    let title = data.title || "TikTok Post";
-    let uploader = data.author?.nickname || data.author?.unique_id || "Unknown";
 
     if (title.length > 80) title = title.substring(0, 80) + "...";
 
-    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Downloading" });
+    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Downloading", platform: platformLabel });
 
-    const isImages = Array.isArray(data.images) && data.images.length > 0;
+    const isImages = images.length > 0;
     const downloadedFiles = [];
     let audioPath = null;
 
     if (isImages) {
-      for (let i = 0; i < data.images.length; i++) {
-        const imgUrl = data.images[i];
+      for (let i = 0; i < images.length; i++) {
+        const imgUrl = images[i];
         const imgRes = await fetch(imgUrl);
         const buffer = Buffer.from(await imgRes.arrayBuffer());
         const filePath = path.join(tempDir, `photo_${String(i + 1).padStart(2, "0")}.jpg`);
@@ -1530,17 +1573,15 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
         downloadedFiles.push(filePath);
       }
 
-      const audioUrl = data.music_info?.play || data.music;
-      if (audioUrl) {
+      if (musicUrl) {
         try {
-          const audioRes = await fetch(audioUrl);
+          const audioRes = await fetch(musicUrl);
           const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
           audioPath = path.join(tempDir, "audio.mp3");
           fs.writeFileSync(audioPath, audioBuffer);
         } catch {}
       }
     } else {
-      const videoUrl = data.hdplay || data.play;
       if (!videoUrl) throw new Error("No video URL found in API response");
 
       const videoRes = await fetch(videoUrl);
@@ -1551,13 +1592,13 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
     }
 
     if (downloadedFiles.length === 0) {
-      throw new Error("No media downloaded from TikWM response");
+      throw new Error(`No media downloaded from ${platformLabel} response`);
     }
 
-    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Sending" });
+    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Sending", platform: platformLabel });
 
     const captionText =
-      `<b>🎬 TikTok Download</b>\n` +
+      `<b>🎬 ${platformLabel} Download</b>\n` +
       `<blockquote>` +
       `<b>👤 Author:</b>\n-> <code>${escapeHTML(uploader)}</code>\n` +
       `<b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>` +
@@ -1613,20 +1654,20 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
           ctx,
           () => ({ source: fs.createReadStream(audioPath) }),
           {
-            title: title || "TikTok Audio",
-            performer: uploader || "TikTok",
+            title: title || `${platformLabel} Audio`,
+            performer: uploader || platformLabel,
             message_thread_id: targetTopicId,
           }
         );
       }
     }
 
-    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Success" });
+    await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Success", platform: platformLabel });
 
   } catch (err) {
     appendLogLine(`[TT ERROR] ${err.stack || err.message}`);
     if (infoMessage) {
-      await updateTTStatus(ctx, infoMessage.message_id, { title: "Error", uploader: "Unknown", status: "Failed" });
+      await updateTTStatus(ctx, infoMessage.message_id, { title: "Error", uploader: "Unknown", status: "Failed", platform: platformLabel });
     }
   } finally {
     stopTyping(typing);
@@ -1657,7 +1698,7 @@ bot.hears(/^\/(\w+)/, async (ctx) => {
       "<blockquote><b>✹ Download Music</b>\n" +
       "-> <code>/music [title]</code>\n" +
       "-> <code>/music2 [title]</code></blockquote>\n" +
-      "<blockquote><b>✹ Download TikTok</b>\n" +
+      "<blockquote><b>✹ Download TikTok/Douyin</b>\n" +
       "-> <code>/tt [link]</code></blockquote>\n" +
       "<blockquote><b>✹ Data Usage</b>\n" +
       "-> /usage</blockquote>\n" +
