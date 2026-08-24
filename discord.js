@@ -345,6 +345,143 @@ function spawnYtDlp(args, timeoutMs = AUDIO_CONFIG.ytDlpTimeout) {
   });
 }
 
+// ================== APPLE MUSIC RESOLVER ==================
+const APPLE_URL_RE = /music\.apple\.com\/[a-z]{2}\/(song|album)\/(?:[^/?]+\/)?(\d{6,})/i;
+
+function extractAppleMusic(query) {
+  const m = String(query || "").match(APPLE_URL_RE);
+  return m ? { type: m[1].toLowerCase(), id: m[2] } : null;
+}
+
+async function fetchAppleMusicTracks(type, id) {
+  const url = type === "song"
+    ? `https://itunes.apple.com/lookup?id=${id}`
+    : `https://itunes.apple.com/lookup?id=${id}&entity=song`;
+  const data = JSON.parse(await httpsGetText(url));
+  if (!data.results?.length) throw new Error("Apple Music: not found");
+
+  if (type === "song") {
+    const t = data.results.find((r) => r.wrapperType === "track");
+    if (!t?.trackName) throw new Error("Apple Music: no track data");
+    return [{ title: t.trackName, artist: t.artistName }];
+  }
+
+  const tracks = data.results
+    .filter((r) => r.wrapperType === "track")
+    .map((t) => ({ title: t.trackName, artist: t.artistName }))
+    .slice(0, SPOTIFY_MAX_TRACKS);
+  if (!tracks.length) throw new Error("Apple Music: album has no tracks");
+  return tracks;
+}
+
+// ================== SOUNDCLOUD RESOLVER ==================
+const SOUNDCLOUD_URL_RE = /https?:\/\/(?:www\.|m\.)?soundcloud\.com\/(?!pages\b|discover\b)([a-zA-Z0-9_-]+)\/(?!sets?\b)([a-zA-Z0-9_-]+)/i;
+
+function extractSoundCloud(query) {
+  const m = String(query || "").match(SOUNDCLOUD_URL_RE);
+  return m ? { url: m[0] } : null;
+}
+
+async function fetchSoundCloudTrack(scUrl) {
+  const j = JSON.parse(await httpsGetText(`https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(scUrl)}`));
+  const idx = j.title.lastIndexOf(" by ");
+  if (idx === -1) throw new Error("SoundCloud: unexpected oEmbed title");
+  return [{ title: j.title.slice(0, idx), artist: j.title.slice(idx + 4).trim() }];
+}
+
+// ================== SPOTIFY RESOLVER ==================
+const SPOTIFY_URL_RE = /open\.spotify\.com\/(?:intl-[a-z]{2}\/)?(track|album|playlist)\/([A-Za-z0-9]+)/i;
+const SPOTIFY_MAX_TRACKS = 50;
+
+function extractSpotify(query) {
+  const m = String(query || "").match(SPOTIFY_URL_RE);
+  return m ? { type: m[1].toLowerCase(), id: m[2] } : null;
+}
+
+function httpsGetText(urlStr, timeoutMs = 10000) {
+  const https = require("https");
+  return new Promise((resolve, reject) => {
+    const req = https.get(urlStr, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124" }, timeout: timeoutMs }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode} from ${urlStr.split("?")[0]}`));
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    });
+    req.on("timeout", () => { try { req.destroy(new Error("timeout")); } catch {} });
+    req.on("error", reject);
+  });
+}
+
+async function fetchSpotifyTracks(type, id) {
+  const html = await httpsGetText(`https://open.spotify.com/embed/${type}/${id}`);
+  const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
+  if (!m) throw new Error("Spotify embed data not found");
+  const entity = JSON.parse(m[1])?.props?.pageProps?.state?.data?.entity;
+  if (!entity) throw new Error("Spotify entity missing");
+
+  if (type === "track") {
+    return [{ title: entity.name, artist: (entity.artists || []).map((a) => a.name).join(", ") }];
+  }
+
+  return (entity.trackList || [])
+    .slice(0, SPOTIFY_MAX_TRACKS)
+    .map((t) => ({ title: t.title, artist: String(t.subtitle || "").split(/,\s*/)[0] }))
+    .filter((t) => t.title);
+}
+
+async function searchPool(jobs, workerCount = 3) {
+  const results = new Array(jobs.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < jobs.length) {
+      const index = cursor++;
+      try {
+        results[index] = await jobs[index]();
+      } catch {
+        results[index] = null;
+      }
+      await delay(300);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(workerCount, jobs.length) }, worker));
+  return results.filter(Boolean);
+}
+
+async function resolveMetaToSongs(tracks, requesterData, sourceLabel) {
+  if (!tracks.length) throw new Error(`No playable ${sourceLabel} tracks found`);
+
+  log(`[${sourceLabel}] Resolving ${tracks.length} track(s)`);
+
+  const jobs = tracks.map((t) => async () => {
+    const hits = await searchYtMusic(`${t.artist} - ${t.title}`, 1).catch(() => []);
+    return hits[0] || null;
+  });
+
+  const found = await searchPool(jobs);
+  const songs = found.map((hit) => normalizeSongMetadata({ ...hit, requestedBy: requesterData, isManual: true })).filter(isValidSong);
+
+  log(`[${sourceLabel}] Matched ${songs.length}/${tracks.length} track(s) on YouTube`);
+  return songs;
+}
+
+async function resolveSpotifyToSongs(spotify, requesterData) {
+  const tracks = await fetchSpotifyTracks(spotify.type, spotify.id);
+  return resolveMetaToSongs(tracks, requesterData, `Spotify ${spotify.type}`);
+}
+
+async function resolveAppleToSongs(apple, requesterData) {
+  const tracks = await fetchAppleMusicTracks(apple.type, apple.id);
+  return resolveMetaToSongs(tracks, requesterData, `AppleMusic ${apple.type}`);
+}
+
+async function resolveSoundCloudToSongs(sc, requesterData) {
+  const tracks = await fetchSoundCloudTrack(sc.url);
+  return resolveMetaToSongs(tracks, requesterData, "SoundCloud");
+}
+
 function buildTrackFromYtDlpItem(item) {
   const id = item?.id || extractVideoId(item?.webpage_url) || extractVideoId(item?.url);
 
@@ -1132,8 +1269,17 @@ function runDiscord() {
         let songsToAdd = [];
         const requesterData = { id: message.author.id, tag: message.author.tag };
         const directVideoId = extractVideoId(query);
+        const spotify = extractSpotify(query);
+        const apple = extractAppleMusic(query);
+        const soundcloud = extractSoundCloud(query);
 
-        if (isPlaylist && !directVideoId) {
+        if (spotify) {
+          songsToAdd = await resolveSpotifyToSongs(spotify, requesterData);
+        } else if (apple) {
+          songsToAdd = await resolveAppleToSongs(apple, requesterData);
+        } else if (soundcloud) {
+          songsToAdd = await resolveSoundCloudToSongs(soundcloud, requesterData);
+        } else if (isPlaylist && !directVideoId) {
           const playlistTracks = await getPlaylistTracks(query);
           songsToAdd = playlistTracks.map((track) => normalizeSongMetadata({ ...track, requestedBy: requesterData, isManual: true }));
         } else if (directVideoId) {
@@ -1257,7 +1403,13 @@ function runDiscord() {
         log(`[Queue Added] Server: ${message.guild.name} | Added ${newSongs.length} tracks`);
 
         if (wasPlaying) {
-          if (isPlaylist && !directVideoId) {
+          if (spotify || apple || soundcloud) {
+            const label = spotify ? `Spotify ${spotify.type}` : apple ? `Apple Music ${apple.type}` : "SoundCloud";
+            const embed = new EmbedBuilder()
+              .setColor("#00FF00")
+              .setDescription(`Added **${newSongs.length}** tracks from ${label} to queue!`);
+            await message.channel.send({ embeds: [embed] });
+          } else if (isPlaylist && !directVideoId) {
             const embed = new EmbedBuilder()
               .setColor("#00FF00")
               .setDescription(`Added **${newSongs.length}** tracks from playlist to queue!`);
@@ -1277,7 +1429,13 @@ function runDiscord() {
             await message.channel.send({ embeds: [embed] });
           }
         } else {
-          if (isPlaylist && !directVideoId) {
+          if (spotify || apple || soundcloud) {
+            const label = spotify ? `Spotify ${spotify.type}` : apple ? `Apple Music ${apple.type}` : "SoundCloud";
+            const embed = new EmbedBuilder()
+              .setColor("#00FF00")
+              .setDescription(`Added **${songsToAdd.length}** tracks from ${label} to queue!`);
+            await message.channel.send({ embeds: [embed] });
+          } else if (isPlaylist && !directVideoId) {
             const embed = new EmbedBuilder()
               .setColor("#00FF00")
               .setDescription(`Added **${songsToAdd.length}** tracks from playlist to queue!`);
