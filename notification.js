@@ -507,17 +507,25 @@ class NotificationMonitor {
                     logger.info(`Sending: ${app_name} - ${n.title}`);
                     const message = this.format_message(n, app_name);
 
+                    // Fire TTS immediately in parallel; do not wait for Telegram
+                    let tts_promise = null;
+                    if (this.config.monitored_packages[pkg].tts_enabled) {
+                        tts_promise = Promise.resolve()
+                            .then(() => this.stop_media_playback())
+                            .then(() => this.speak_notification(n.title, n.text))
+                            .catch((e) => logger.error(`TTS pipeline error: ${e.message}`));
+                    }
+
                     const successfully_sent = await this.send_telegram_message(message, topic_id);
                     if (successfully_sent) {
                         this.mark_notification_sent(pkg, n.title, n.text, n.timestamp);
-
-                        if (this.config.monitored_packages[pkg].tts_enabled) {
-                            this.stop_media_playback();
-                            await this.speak_notification(n.title, n.text);
-                        }
                         logger.info("Sent & marked");
                     } else {
                         logger.warning("Failed to send to Telegram");
+                    }
+
+                    if (tts_promise) {
+                        await tts_promise;
                     }
                 }
             } else {
