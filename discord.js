@@ -711,22 +711,25 @@ function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
     ytdlpProcess.once("error", (err) => fail(`yt-dlp process error: ${err.message}`));
     ffmpegProcess.once("error", (err) => fail(`FFmpeg process error: ${err.message}`));
 
+    function tryRotate() {
+      if (settled || !isBotCheck(stderr)) return false;
+      const retryArgs = nextBotCheckArgs(extraArgs);
+      if (!retryArgs) return false;
+      settled = true;
+      cleanup();
+      streamWithYtdlp(targetUrl, [...extraArgs, ...retryArgs], song).then(resolve, reject);
+      return true;
+    }
+
     ytdlpProcess.once("close", (code) => {
       if (started || settled || code === 0) return;
-      if (isBotCheck(stderr)) {
-        const retryArgs = nextBotCheckArgs(extraArgs);
-        if (retryArgs) {
-          settled = true;
-          cleanup();
-          streamWithYtdlp(targetUrl, [...extraArgs, ...retryArgs], song).then(resolve, reject);
-        }
-      }
+      tryRotate();
     });
 
     ffmpegProcess.once("close", (code) => {
-      if (!started && !settled) {
-        fail(`FFmpeg exited before producing audio (code ${code})${stderr ? `: ${stderr.slice(-800)}` : ""}`);
-      }
+      if (started || settled) return;
+      if (tryRotate()) return;
+      fail(`FFmpeg exited before producing audio (code ${code})${stderr ? `: ${stderr.slice(-800)}` : ""}`);
     });
   });
 }
