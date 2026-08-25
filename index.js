@@ -14,7 +14,7 @@ const execFilePromise = util.promisify(execFile);
 
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
-const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'bot.log');
+const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'telegram.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
 
 function appendLogLine(line) {
