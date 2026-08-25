@@ -65,7 +65,6 @@ const CONFIG = {
     telegram_retry_backoff: 2
 };
 
-// Validate Required Configs
 const REQUIRED = ["telegram_bot_token", "telegram_chat_id"];
 for (const r of REQUIRED) {
     if (!CONFIG[r]) {
@@ -441,22 +440,33 @@ class NotificationMonitor {
     }
 
     speak_notification(title, text) {
-        return new Promise((resolve, reject) => {
-            const speech = `${title}. ${text}`;
-            logger.info(`TTS: ${speech}`);
+        if (!this._tts_queue) this._tts_queue = Promise.resolve();
+        const speech = `${title}. ${text}`;
+        logger.info(`TTS: ${speech}`);
+
+        const run = () => new Promise((resolve, reject) => {
             execFile(
                 "termux-tts-speak",
                 ["-l", "id", speech],
-                (error, stdout, stderr) => {
-                    if (error) {
-                        logger.error(`TTS error: ${error.message}`);
-                        reject(error);
-                        return;
-                    }
-                    resolve(true);
-                }
+                { timeout: 15000 },
+                (error) => error ? reject(error) : resolve()
             );
         });
+
+        const task = () =>
+            Promise.resolve()
+                .then(() => this.stop_media_playback())
+                .then(() => sleep(500))
+                .then(run)
+                .catch((e) => {
+                    logger.warning(`TTS attempt failed (${e.message}), retrying once`);
+                    return sleep(1000).then(run);
+                })
+                .then(() => sleep(Math.min(30000, speech.length * 90 + 1500)))
+                .catch((e) => logger.error(`TTS error: ${e.message}`));
+
+        this._tts_queue = this._tts_queue.then(task);
+        return this._tts_queue;
     }
 
     stop_media_playback() {
@@ -507,12 +517,9 @@ class NotificationMonitor {
                     logger.info(`Sending: ${app_name} - ${n.title}`);
                     const message = this.format_message(n, app_name);
 
-                    // Fire TTS immediately in parallel; do not wait for Telegram
                     let tts_promise = null;
                     if (this.config.monitored_packages[pkg].tts_enabled) {
-                        tts_promise = Promise.resolve()
-                            .then(() => this.stop_media_playback())
-                            .then(() => this.speak_notification(n.title, n.text))
+                        tts_promise = this.speak_notification(n.title, n.text)
                             .catch((e) => logger.error(`TTS pipeline error: ${e.message}`));
                     }
 
