@@ -1003,9 +1003,9 @@ function buildStruk(data) {
   return buildStrukPLN(data);
 }
 
-function execPromise(command) {
+function execPromise(command, timeout = 20000) {
   return new Promise((resolve, reject) => {
-    exec(command, (err, stdout) => {
+    exec(command, { timeout }, (err, stdout) => {
       if (err) return reject(err);
       resolve(stdout);
     });
@@ -1150,6 +1150,7 @@ async function analyzeReceipt(base64Image) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: AbortSignal.timeout(60000),
       body: JSON.stringify({
         model,
         messages: [
@@ -1221,22 +1222,14 @@ async function analyzeReceipt(base64Image) {
   }
 }
 
-bot.on("photo", adminOnly, async (ctx) => {
-  const currentThreadId = ctx.message?.message_thread_id ?? null;
-
-  if (TOPIC_ID_INTAKE !== null && currentThreadId !== TOPIC_ID_INTAKE) return;
-
-  const targetThreadId = (TOPIC_ID_PREVIEW !== null && !isNaN(TOPIC_ID_PREVIEW))
-    ? TOPIC_ID_PREVIEW
-    : currentThreadId;
-
+async function processReceipt(ctx, targetThreadId) {
   const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
   const typing = startTyping(ctx, targetThreadId, "upload_photo");
 
   try {
     const file = await ctx.telegram.getFile(fileId);
     const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-    const imgRes = await fetch(fileUrl);
+    const imgRes = await fetch(fileUrl, { signal: AbortSignal.timeout(15000) });
     const base64Image = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
 
     let parsed;
@@ -1312,6 +1305,19 @@ bot.on("photo", adminOnly, async (ctx) => {
   } finally {
     stopTyping(typing);
   }
+}
+
+bot.on("photo", adminOnly, async (ctx) => {
+  const currentThreadId = ctx.message?.message_thread_id ?? null;
+  if (TOPIC_ID_INTAKE !== null && currentThreadId !== TOPIC_ID_INTAKE) return;
+
+  const targetThreadId = (TOPIC_ID_PREVIEW !== null && !isNaN(TOPIC_ID_PREVIEW))
+    ? TOPIC_ID_PREVIEW
+    : currentThreadId;
+
+  processReceipt(ctx, targetThreadId).catch((err) =>
+    appendLogLine(`Receipt background error: ${err.message}`)
+  );
 });
 
 // ================== PRICE ==================
