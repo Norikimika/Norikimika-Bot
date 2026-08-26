@@ -1578,15 +1578,6 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
         fs.writeFileSync(filePath, buffer);
         downloadedFiles.push(filePath);
       }
-
-      if (musicUrl) {
-        try {
-          const audioRes = await fetch(musicUrl);
-          const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
-          audioPath = path.join(tempDir, "audio.mp3");
-          fs.writeFileSync(audioPath, audioBuffer);
-        } catch {}
-      }
     } else {
       if (!videoUrl) throw new Error("No video URL found in API response");
 
@@ -1595,6 +1586,15 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
       const filePath = path.join(tempDir, "video.mp4");
       fs.writeFileSync(filePath, videoBuffer);
       downloadedFiles.push(filePath);
+    }
+
+    if (musicUrl) {
+      try {
+        const audioRes = await fetch(musicUrl);
+        const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+        audioPath = path.join(tempDir, "audio.mp3");
+        fs.writeFileSync(audioPath, audioBuffer);
+      } catch {}
     }
 
     if (downloadedFiles.length === 0) {
@@ -1654,18 +1654,18 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
           );
         }
       }
+    }
 
-      if (audioPath && fs.existsSync(audioPath)) {
-        await safeReplyWithAudio(
-          ctx,
-          () => ({ source: fs.createReadStream(audioPath) }),
-          {
-            title: title || `${platformLabel} Audio`,
-            performer: uploader || platformLabel,
-            message_thread_id: targetTopicId,
-          }
-        );
-      }
+    if (audioPath && fs.existsSync(audioPath)) {
+      await safeReplyWithAudio(
+        ctx,
+        () => ({ source: fs.createReadStream(audioPath) }),
+        {
+          title: title || `${platformLabel} Audio`,
+          performer: uploader || platformLabel,
+          message_thread_id: targetTopicId,
+        }
+      );
     }
 
     await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Success", platform: platformLabel });
