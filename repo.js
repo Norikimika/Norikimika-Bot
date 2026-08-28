@@ -101,6 +101,11 @@ const GITHUB_REPOS = [
     owner: "anomalyco",
     repo: "opencode",
     branch: "dev"
+  },
+  {
+    owner: "NousResearch",
+    repo: "hermes-agent",
+    branch: "main"
   }
 ];
 
