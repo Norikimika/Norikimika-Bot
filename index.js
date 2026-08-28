@@ -38,6 +38,20 @@ process.on("unhandledRejection", (reason) => {
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+bot.telegram.setMyCommands([
+  { command: "p", description: "Check product price" },
+  { command: "help", description: "Show command list" },
+  { command: "speed", description: "Run internet speed test" },
+  { command: "battery", description: "Show battery status" },
+  { command: "usage", description: "Show data usage" },
+  { command: "playback", description: "Control media playback" },
+  { command: "approve", description: "Approve request" },
+  { command: "tt", description: "Download TikTok/Douyin video" },
+  { command: "music", description: "Download music (server 1)" },
+  { command: "music2", description: "Download music (server 2)" },
+  { command: "reboot", description: "Reboot device" },
+]).catch((e) => appendLogLine(`setMyCommands failed: ${e.message}`));
+
 const CHAT_ID = parseInt(process.env.CHAT_ID);
 const TOPIC_ID = parseInt(process.env.TOPIC_ID);
 const TOPIC_ID_MUSIC = parseInt(process.env.TOPIC_ID_MUSIC);
