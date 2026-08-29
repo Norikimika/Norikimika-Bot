@@ -444,28 +444,32 @@ class NotificationMonitor {
         const speech = `${title}. ${text}`;
         logger.info(`TTS: ${speech}`);
 
-        const run = () => new Promise((resolve, reject) => {
+        const run = (attempt = 1) => new Promise((resolve) => {
             execFile(
                 "termux-tts-speak",
                 ["-l", "id", speech],
-                { timeout: 15000 },
-                (error) => error ? reject(error) : resolve()
+                { timeout: 20000 },
+                (error) => {
+                    if (error) logger.warning(`TTS attempt ${attempt} failed: ${error.message}`);
+                    resolve(!error); // true = success, false = failed
+                }
             );
         });
 
-        const task = () =>
-            Promise.resolve()
-                .then(() => this.stop_media_playback())
-                .then(() => sleep(500))
-                .then(run)
-                .catch((e) => {
-                    logger.warning(`TTS attempt failed (${e.message}), retrying once`);
-                    return sleep(1000).then(run);
-                })
-                .then(() => sleep(Math.min(30000, speech.length * 90 + 1500)))
-                .catch((e) => logger.error(`TTS error: ${e.message}`));
+        const task = async () => {
+            for (let i = 1; i <= 3; i++) {
+                if (i === 1) {
+                    try { await this.stop_media_playback(); } catch {}
+                    await sleep(500);
+                } else {
+                    await sleep(1500);
+                }
+                if (await run(i)) break;
+            }
+            await sleep(Math.min(30000, speech.length * 90 + 1500));
+        };
 
-        this._tts_queue = this._tts_queue.then(task);
+        this._tts_queue = this._tts_queue.then(task).catch((e) => logger.error(`TTS error: ${e.message}`));
         return this._tts_queue;
     }
 
