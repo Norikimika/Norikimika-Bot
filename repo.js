@@ -242,45 +242,58 @@ async function checkGithubUpdates(state) {
     const latestSha = latestCommit.sha;
     const lastSha = state[lastShaKey];
 
-    if (latestSha === lastSha) {
-      // log(`✅ ${repo.repo} (${repo.branch}): No new commit`);
+    // Check Release
+    let releaseChanged = false;
+    let releaseData = null;
+    try {
+      const releaseResp = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/releases/latest`, { headers });
+      if (releaseResp.ok) {
+        releaseData = await releaseResp.json();
+        const releaseId = releaseData.id?.toString();
+        const releaseAssetKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_RELEASE_ASSETS_${index}`;
+        const currentAssetSig = (releaseData.assets || []).map(a => `${a.id}:${a.updated_at}`).join('|');
+        const lastReleaseId = state[releaseIdKey];
+        const lastAssetSig = state[releaseAssetKey];
+
+        if (releaseId && (releaseId !== lastReleaseId || currentAssetSig !== lastAssetSig)) {
+          releaseChanged = true;
+          state[releaseIdKey] = releaseId;
+          state[releaseAssetKey] = currentAssetSig;
+        }
+      }
+    } catch (e) {
+      log(`⚠️ Release check failed: ${e.message}`);
+    }
+
+    const hasNewCommit = latestSha !== lastSha;
+
+    if (!hasNewCommit && !releaseChanged) {
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }
 
     let actionsText = "";
-    try {
-      const actionsUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/actions/runs?per_page=5&branch=${encodedBranch}`;
-      const actionsResp = await fetch(actionsUrl, { headers });
+    if (hasNewCommit) {
+      try {
+        const actionsUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/actions/runs?per_page=5&branch=${encodedBranch}`;
+        const actionsResp = await fetch(actionsUrl, { headers });
 
-      if (actionsResp.ok) {
-        const actionsData = await actionsResp.json();
-        const run = actionsData.workflow_runs.find(r => r.head_sha === latestSha);
-        if (run) {
-          actionsText = "<b>✹ Workflow</b>\n" + ARROW + ` <i><a href="${escapeHtml(run.html_url)}">Run</a></i>`;
+        if (actionsResp.ok) {
+          const actionsData = await actionsResp.json();
+          const run = actionsData.workflow_runs.find(r => r.head_sha === latestSha);
+          if (run) {
+            actionsText = "<b>✹ Workflow</b>\n" + ARROW + ` <i><a href="${escapeHtml(run.html_url)}">Run</a></i>`;
+          }
         }
+      } catch (e) {
+        log(`⚠️ Workflow check failed: ${e.message}`);
       }
-    } catch (e) {
-      log(`⚠️ Workflow check failed: ${e.message}`);
     }
 
     let releaseText = "";
-    let latestReleaseId = null;
-    try {
-      const releaseResp = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/releases/latest`, { headers });
-
-      if (releaseResp.ok) {
-        const releaseData = await releaseResp.json();
-        latestReleaseId = releaseData.id?.toString();
-        const lastReleaseId = state[releaseIdKey];
-
-        if (latestReleaseId && latestReleaseId !== lastReleaseId) {
-          const name = escapeHtml(releaseData.name || releaseData.tag_name);
-          releaseText = "<b>✹ Release</b>\n" + ARROW + ` <i><a href="${escapeHtml(releaseData.html_url)}">${name}</a></i>`;
-        }
-      }
-    } catch (e) {
-      log(`⚠️ Release check failed: ${e.message}`);
+    if (releaseChanged && releaseData) {
+      const name = escapeHtml(releaseData.name || releaseData.tag_name);
+      releaseText = "<b>✹ Release</b>\n" + ARROW + ` <i><a href="${escapeHtml(releaseData.html_url)}">${name}</a></i>`;
     }
 
     const MAX_COMMIT_LENGTH = 150;
@@ -289,7 +302,7 @@ async function checkGithubUpdates(state) {
       commitMessage = commitMessage.substring(0, MAX_COMMIT_LENGTH) + "...";
     }
 
-    const message = [
+    const messageParts = [
       "<b>🎉 GitHub Update Detected</b>",
       "<b>✹ Username</b>",
       `${ARROW} <i>${escapeHtml(repo.owner)}</i>`,
@@ -298,18 +311,27 @@ async function checkGithubUpdates(state) {
       "<b>✹ Branch</b>",
       `${ARROW} <i>${escapeHtml(repo.branch)}</i>`,
       repo.path ? "<b>✹ Path</b>\n" + ARROW + " <i>" + escapeHtml(repo.path) + "</i>" : "",
-      "<b>✹ Commit</b>",
-      "<blockquote>" + escapeHtml(commitMessage) + "</blockquote>",
-      `${ARROW} <i><a href="${escapeHtml(latestCommit.html_url)}">View</a></i>`,
-      actionsText,
-      releaseText,
-    ].filter(Boolean).join("\n");
+    ];
+
+    if (hasNewCommit) {
+      messageParts.push(
+        "<b>✹ Commit</b>",
+        "<blockquote>" + escapeHtml(commitMessage) + "</blockquote>",
+        `${ARROW} <i><a href="${escapeHtml(latestCommit.html_url)}">View</a></i>`
+      );
+      if (actionsText) messageParts.push(actionsText);
+    }
+
+    if (releaseText) {
+      messageParts.push(releaseText);
+    }
+
+    const message = messageParts.filter(Boolean).join("\n");
 
     try {
       await sendToTelegram(message);
       
-      state[lastShaKey] = latestSha;
-      if (latestReleaseId) state[releaseIdKey] = latestReleaseId;
+      if (hasNewCommit) state[lastShaKey] = latestSha;
       
       log(`📨 Sent update for ${repo.repo} and saved state`);
     } catch (err) {
