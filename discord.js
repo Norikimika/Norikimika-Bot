@@ -1076,6 +1076,8 @@ function runDiscord() {
     partials: [Partials.Channel],
   });
 
+  discordClient.ws.setMaxListeners(30);
+
   discordClient.once("clientReady", async () => {
     log(`Online as: ${discordClient.user.tag}`);
 
