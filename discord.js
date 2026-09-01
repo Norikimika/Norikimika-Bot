@@ -1190,6 +1190,9 @@ function runDiscord() {
     const content = message.content.trim();
     if (!content.startsWith("!")) return;
 
+    // Send typing indicator while processing command
+    message.channel.sendTyping().catch(() => {});
+
     const args = content.slice(1).trim().split(/ +/);
     const command = args.shift()?.toLowerCase();
     const voiceChannel = message.member?.voice?.channel;
