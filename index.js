@@ -27,6 +27,11 @@ function appendLogLine(line) {
 }
 
 process.on("uncaughtException", (err) => {
+  if (err && /Unexpected server response: 5\d\d/.test(err.message || "")) {
+    console.warn("WebSocket gateway 5xx ignored:", err.message);
+    appendLogLine(`[Warning] WebSocket gateway 5xx: ${err.message}`);
+    return;
+  }
   console.error("Uncaught Exception:", err);
   appendLogLine(`Uncaught Exception: ${err.stack || err.message}`);
 });
