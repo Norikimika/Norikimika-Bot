@@ -848,9 +848,16 @@ function rupiah(num) {
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 }
 
+function truncateMiddle(text, maxLen) {
+  const str = String(text || "-");
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen);
+}
+
 function padC(text, W) {
-  if (text.length >= W) return text;
-  return " ".repeat(Math.floor((W - text.length) / 2)) + text;
+  const str = truncateMiddle(text, W);
+  if (str.length >= W) return str;
+  return " ".repeat(Math.floor((W - str.length) / 2)) + str;
 }
 
 function padR(label, value, W) {
@@ -930,11 +937,11 @@ function buildStrukPLN(data) {
     padR("TANGGAL", data.tanggal || "-", W),
     padR("WAKTU", witaTime, W),
     DA,
-    `ID PEL     : ${data.idPel || "-"}`,
-    `NO METER   : ${data.noMeter || "-"}`,
-    `NAMA       : ${data.nama || "-"}`,
-    `TARIF/DAYA : ${data.tarif || "-"}`,
-    `JML KWH    : ${data.jmlKwh || "-"}`,
+    `ID PEL     : ${truncateMiddle(data.idPel, 18)}`,
+    `NO METER   : ${truncateMiddle(data.noMeter, 18)}`,
+    `NAMA       : ${truncateMiddle(data.nama, 18)}`,
+    `TARIF/DAYA : ${truncateMiddle(data.tarif, 18)}`,
+    `JML KWH    : ${truncateMiddle(data.jmlKwh, 18)}`,
     DA,
     padC("TOKEN", W),
     padC(tl1, W),
@@ -968,9 +975,9 @@ function buildStrukTransfer(data) {
     padR("WAKTU", witaTime, W),
     DA,
     padC("DATA PENERIMA", W),
-    `TUJUAN   : ${data.bankTujuan || "-"}`,
-    `NOMOR    : ${data.noRekening || "-"}`,
-    `PENERIMA : ${data.penerima || "-"}`,
+    `TUJUAN   : ${truncateMiddle(data.bankTujuan, 10)}`,
+    `NOMOR    : ${truncateMiddle(data.noRekening, 12)}`,
+    `PENERIMA : ${truncateMiddle(data.penerima, 21)}`,
     DA,
     padR("NOMINAL", `Rp ${data.nominal || "0"}`, W),
     padR("ADMIN", `Rp ${admin.str}`, W),
@@ -1001,8 +1008,8 @@ function buildStrukPulsa(data) {
     padR("WAKTU", witaTime, W),
     DA,
     padC("DATA PENERIMA", W),
-    `TUJUAN   : ${data.providerTujuan || "-"}`,
-    `NOMOR    : ${data.noProvider || "-"}`,
+    `TUJUAN   : ${truncateMiddle(data.providerTujuan, 18)}`,
+    `NOMOR    : ${truncateMiddle(data.noProvider, 18)}`,
     DA,
     padR("NOMINAL", `Rp ${roundedNominal}`, W),
     padR("ADMIN", `Rp ${admin.str}`, W),
@@ -1274,7 +1281,6 @@ async function processReceipt(ctx, targetThreadId) {
         .replace(/\bDana\b/g, '')
         .replace(/\bDnid\b/g, '')
         .replace(/\s+/g, ' ')
-        .replace(/\bDANA\b/g, '')
         .trim();
     }
 
