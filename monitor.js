@@ -245,9 +245,9 @@ async function runAutoSpeedtest() {
 function startMonitor() {
   log("Starting monitor service...");
   
-  cron.schedule("0 0 * * *", sendUsageReport, { scheduled: true });
-  cron.schedule("0 0,12 * * *", runAutoSpeedtest, { scheduled: true });
-  cron.schedule("* * * * *", checkBatteryLevel);
+  cron.schedule("0 0 * * *", sendUsageReport, { scheduled: true, recoverMissedExecutions: false });
+  cron.schedule("0 0,12 * * *", runAutoSpeedtest, { scheduled: true, recoverMissedExecutions: false });
+  cron.schedule("* * * * *", checkBatteryLevel, { scheduled: true, recoverMissedExecutions: false });
 }
 
 module.exports = startMonitor;
