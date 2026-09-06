@@ -1800,11 +1800,9 @@ const runNotification = require('./notification.js');
 const runDiscord = require('./discord.js');
 
 async function loop() {
-  try {
-    await runRepo();
-  } catch (err) {
+  runRepo().catch((err) => {
     appendLogLine(`Repo Error: ${err.message}`);
-  }
+  });
   setTimeout(loop, 300000);
 }
 
