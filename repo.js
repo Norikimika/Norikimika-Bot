@@ -206,8 +206,8 @@ async function checkGithubUpdates(state) {
 
   for (let index = 0; index < GITHUB_REPOS.length; index++) {
     const repo = GITHUB_REPOS[index];
-    const lastShaKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_COMMIT_SHA_${index}`;
-    const releaseIdKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_RELEASE_ID_${index}`;
+    const lastShaKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_COMMIT_SHA`;
+    const releaseIdKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_RELEASE_ID`;
     const pathParam = repo.path ? `&path=${encodeURIComponent(repo.path)}` : "";
     const encodedBranch = encodeURIComponent(repo.branch);
     const commitUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}/commits?sha=${encodedBranch}${pathParam}`;
@@ -245,7 +245,7 @@ async function checkGithubUpdates(state) {
       if (releaseResp.ok) {
         releaseData = await releaseResp.json();
         const releaseId = releaseData.id?.toString();
-        const releaseAssetKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_RELEASE_ASSETS_${index}`;
+        const releaseAssetKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_RELEASE_ASSETS`;
         const currentAssetSig = (releaseData.assets || []).map(a => `${a.id}:${a.updated_at}`).join('|');
         const lastReleaseId = state[releaseIdKey];
         const lastAssetSig = state[releaseAssetKey];
@@ -351,7 +351,7 @@ async function checkGitlabUpdates(state) {
 
   for (let index = 0; index < GITLAB_REPOS.length; index++) {
     const repo = GITLAB_REPOS[index];
-    const lastShaKeyPrefix = `GITLAB_${repo.owner}_${repo.repo}_LAST_COMMIT_SHA_${index}`;
+    const lastShaKeyPrefix = `GITLAB_${repo.owner}_${repo.repo}_LAST_COMMIT_SHA`;
     const encodedPath = encodeURIComponent(`${repo.owner}/${repo.repo}`);
 
     let branches = [];
