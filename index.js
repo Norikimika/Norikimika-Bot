@@ -976,7 +976,7 @@ function buildStrukTransfer(data) {
     DA,
     padC("DATA PENERIMA", W),
     `TUJUAN   : ${truncateMiddle(data.bankTujuan, 10)}`,
-    `NOMOR    : ${truncateMiddle(data.noRekening, 12)}`,
+    `NOMOR    : ${truncateMiddle(data.noRekening, 15)}`,
     `PENERIMA : ${truncateMiddle(data.penerima, 21)}`,
     DA,
     padR("NOMINAL", `Rp ${data.nominal || "0"}`, W),
