@@ -1652,8 +1652,6 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
           ctx,
           () => ({ source: fs.createReadStream(downloadedFiles[0]) }),
           {
-            caption: captionText,
-            parse_mode: "HTML",
             message_thread_id: targetTopicId,
           }
         );
@@ -1662,15 +1660,10 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
         for (let i = 0; i < downloadedFiles.length; i += chunkSize) {
           const chunk = downloadedFiles.slice(i, i + chunkSize);
           const mediaGroup = chunk.map((photoPath, idx) => {
-            const item = {
+            return {
               type: "photo",
               media: { source: fs.createReadStream(photoPath) },
             };
-            if (i === 0 && idx === 0) {
-              item.caption = captionText;
-              item.parse_mode = "HTML";
-            }
-            return item;
           });
 
           await safeReplyWithMediaGroup(
