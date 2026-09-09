@@ -1063,11 +1063,116 @@ function setupVoiceConnectionHandlers(connection, guildId, voiceChannelId, adapt
   });
 }
 
+// ================== SERVER STATS CHANNELS ==================
+const STATS_DEFS = [
+  { key: "all", label: "🧩┃all members" },
+  { key: "humans", label: "🪢┃members" },
+  { key: "bots", label: "🤖┃bots" },
+];
+
+const STATS_CATEGORY_NAME = "╰┈➤ Stats";
+let statsUpdateRunning = false;
+
+async function updateServerStatsChannels(client) {
+  if (statsUpdateRunning) return;
+  statsUpdateRunning = true;
+
+  try {
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        let allCount = null;
+        let botCount = null;
+        let humanCount = null;
+
+        try {
+          const fetched = await guild.members.fetch();
+          botCount = fetched.filter((m) => m.user.bot).size;
+          humanCount = fetched.filter((m) => !m.user.bot).size;
+          allCount = fetched.size;
+        } catch (e) {
+          log(`[Stats] Skipped ${guild.name}, member fetch failed (check GUILD MEMBERS intent): ${e.message}`);
+          continue;
+        }
+
+        if (botCount === null || humanCount === null || allCount === null) continue;
+
+        const values = { all: allCount, humans: humanCount, bots: botCount };
+        const everyone = guild.roles.everyone.id;
+        const botMemberId = guild.members.me?.id || client.user.id;
+
+        const channels = await guild.channels.fetch();
+
+        const categories = channels.filter(
+          (c) => c?.type === ChannelType.GuildCategory && /stats/i.test(c.name)
+        );
+
+        let category = categories.first();
+
+        if (!category) {
+          category = await guild.channels.create({
+            name: STATS_CATEGORY_NAME,
+            type: ChannelType.GuildCategory,
+            permissionOverwrites: [
+              { id: everyone, deny: [PermissionFlagsBits.Connect, PermissionFlagsBits.SendMessages] },
+              { id: botMemberId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.ManageChannels] },
+            ],
+          });
+        }
+
+        // Hapus kategori stats ganda kalau ada
+        for (const extra of categories.values()) {
+          if (extra.id === category.id) continue;
+          await extra.delete("Removing duplicate stats category").catch(() => {});
+        }
+
+        for (const def of STATS_DEFS) {
+          const targetName = `${def.label}: ${values[def.key]}`;
+
+          const matches = channels.filter(
+            (c) =>
+              c?.type === ChannelType.GuildVoice &&
+              c.parentId === category.id &&
+              c.name.split(":")[0].trim() === def.label
+          );
+
+          const channel = matches.first();
+
+          if (!channel) {
+            await guild.channels.create({
+              name: targetName,
+              type: ChannelType.GuildVoice,
+              parent: category.id,
+              permissionOverwrites: [
+                { id: everyone, deny: [PermissionFlagsBits.Connect, PermissionFlagsBits.SendMessages] },
+                { id: botMemberId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.ManageChannels] },
+              ],
+            });
+          } else {
+            if (channel.name !== targetName) {
+              await channel.setName(targetName).catch((e) => log(`[Stats] Rename failed: ${e.message}`));
+            }
+            // Hapus channel stats ganda
+            for (const extra of matches.values()) {
+              if (extra.id === channel.id) continue;
+              await extra.delete("Removing duplicate stats channel").catch(() => {});
+            }
+          }
+        }
+      } catch (err) {
+        log(`[Stats] Error in ${guild?.name || "unknown"}: ${err.message}`);
+      }
+    }
+  } finally {
+    statsUpdateRunning = false;
+  }
+}
+
 // ================== DISCORD ENGINE & EVENT HANDLERS ==================
 function runDiscord() {
   const discordClient = new Client({
     intents: [
       GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
@@ -1091,10 +1196,14 @@ function runDiscord() {
     updateActivity();
     setInterval(updateActivity, 30000);
 
+    updateServerStatsChannels(discordClient).catch((e) => log(`[Stats] Initial error: ${e.message}`));
+    setInterval(() => {
+      updateServerStatsChannels(discordClient).catch((e) => log(`[Stats] Interval error: ${e.message}`));
+    }, 300000);
+
     for (const guild of discordClient.guilds.cache.values()) {
       try {
         const channels = await guild.channels.fetch();
-
         const existingTrigger = channels.find(
           (c) => c?.type === ChannelType.GuildVoice && c.name.toLowerCase().includes("┃custom")
         );
