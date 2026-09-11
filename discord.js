@@ -1064,11 +1064,15 @@ function setupVoiceConnectionHandlers(connection, guildId, voiceChannelId, adapt
   });
 }
 
-// ================== WELCOME MESSAGE ==================
+// ================== WELCOME & GOODBYE ==================
 const WELCOME_CHANNEL_ID = process.env.DISCORD_WELCOME_CHANNEL_ID;
 const WELCOME_TEXT = process.env.DISCORD_WELCOME_TEXT;
 const WELCOME_BG_FILE = process.env.DISCORD_WELCOME_BG_FILE;
 const WELCOME_TITLE = process.env.DISCORD_WELCOME_TITLE;
+const GOODBYE_CHANNEL_ID = process.env.DISCORD_GOODBYE_CHANNEL_ID;
+const GOODBYE_TEXT = process.env.DISCORD_GOODBYE_TEXT;
+const GOODBYE_BG_FILE = process.env.DISCORD_GOODBYE_BG_FILE;
+const GOODBYE_TITLE = process.env.DISCORD_GOODBYE_TITLE;
 
 let canvasLib = null;
 function getCanvasLib() {
@@ -1101,7 +1105,12 @@ async function fetchImageBuffer(url, label) {
   return buf;
 }
 
-async function buildWelcomeImage(member, canvas) {
+async function buildWelcomeImage(member, canvas, opts = {}) {
+  const title = opts.title || WELCOME_TITLE;
+  const text = opts.text || WELCOME_TEXT;
+  const bgFile = opts.bgFile || WELCOME_BG_FILE;
+  const label = opts.label || "Welcome";
+  const titleColor = opts.titleColor || "#7dd3fc";
   const fontFamily = await resolveWelcomeFont(canvas);
   const W = 800, H = 400;
   const cv = canvas.createCanvas(W, H);
@@ -1110,11 +1119,11 @@ async function buildWelcomeImage(member, canvas) {
   const avatarUrl = member.user.displayAvatarURL({ extension: "png", size: 256 });
   const avatarBuf = await fetchImageBuffer(avatarUrl, "avatar");
 
-  const localPath = path.isAbsolute(WELCOME_BG_FILE)
-    ? WELCOME_BG_FILE
-    : path.join(__dirname, WELCOME_BG_FILE);
+  const localPath = path.isAbsolute(bgFile)
+    ? bgFile
+    : path.join(__dirname, bgFile);
   const bg = await canvas.loadImage(localPath);
-  log(`[Welcome] banner local ${localPath} ${bg.width}x${bg.height}`);
+  log(`[${label}] banner local ${localPath} ${bg.width}x${bg.height}`);
 
   const scale = Math.max(W / bg.width, H / bg.height);
   const dw = bg.width * scale;
@@ -1161,14 +1170,14 @@ async function buildWelcomeImage(member, canvas) {
     rows.push(`${text}@${size}px`);
   };
 
-  drawShrinkFit(WELCOME_TITLE, 48, 20, "#7dd3fc", 245);
+  drawShrinkFit(title, 48, 20, titleColor, 245);
   drawShrinkFit(member.user.username, 40, 16, "#ffffff", 295);
-  drawShrinkFit(WELCOME_TEXT, 30, 14, "#facc15", 345);
+  drawShrinkFit(text, 30, 14, "#facc15", 345);
 
   ctx.shadowBlur = 0;
 
   const bandChecks = [
-    { y: [230, 250], ok: (r, g, b) => b > 180 && g > 150 },
+    { y: [230, 250], ok: (r, g, b) => (b > 180 && g > 150) || (r > 200 && g < 150) },
     { y: [280, 300], ok: (r, g, b) => r > 200 && g > 200 && b > 200 },
     { y: [330, 350], ok: (r, g, b) => r > 180 && g > 150 && b < 130 },
   ];
@@ -1182,7 +1191,7 @@ async function buildWelcomeImage(member, canvas) {
   }).length;
 
   if (filled < 3) {
-    log(`[Welcome] WARNING: only ${filled}/3 text rows rendered (${rows.join(", ")})`);
+    log(`[${label}] WARNING: only ${filled}/3 text rows rendered (${rows.join(", ")})`);
   }
 
   return cv.toBuffer("image/png");
@@ -1219,6 +1228,45 @@ async function handleMemberJoin(member) {
   }).catch((e) => log(`[Welcome] Send failed: ${e.message}`));
 
   log(`[Welcome] Sent for ${member.user.tag} in ${member.guild.name}`);
+}
+
+async function handleMemberLeave(member) {
+  if (!GOODBYE_CHANNEL_ID) {
+    log("[Goodbye] DISCORD_GOODBYE_CHANNEL_ID not set in .env");
+    return;
+  }
+  if (!GOODBYE_BG_FILE || !GOODBYE_TEXT || !GOODBYE_TITLE) {
+    log("[Goodbye] DISCORD_GOODBYE_BG_FILE / _TEXT / _TITLE not set in .env");
+    return;
+  }
+
+  const canvas = getCanvasLib();
+  if (!canvas) {
+    log("[Goodbye] @napi-rs/canvas not installed");
+    return;
+  }
+
+  const channel = await member.guild.channels.fetch(GOODBYE_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) {
+    log(`[Goodbye] Channel ${GOODBYE_CHANNEL_ID} not found or not text-based`);
+    return;
+  }
+
+  const imageBuf = await buildWelcomeImage(member, canvas, {
+    title: GOODBYE_TITLE,
+    text: GOODBYE_TEXT,
+    bgFile: GOODBYE_BG_FILE,
+    label: "Goodbye",
+    titleColor: "#ef4444",
+  });
+  const attachment = new AttachmentBuilder(imageBuf, { name: "goodbye.png" });
+
+  await channel.send({
+    content: `See you <@${member.id}>`,
+    files: [attachment],
+  }).catch((e) => log(`[Goodbye] Send failed: ${e.message}`));
+
+  log(`[Goodbye] Sent for ${member.user.tag} in ${member.guild.name}`);
 }
 
 // ================== SERVER STATS CHANNELS ==================
@@ -1475,6 +1523,10 @@ function runDiscord() {
 
   discordClient.on("guildMemberAdd", (member) => {
     handleMemberJoin(member).catch((e) => log(`[Welcome] Unhandled: ${e.message}`));
+  });
+
+  discordClient.on("guildMemberRemove", (member) => {
+    handleMemberLeave(member).catch((e) => log(`[Goodbye] Unhandled: ${e.message}`));
   });
 
   discordClient.on("messageCreate", async (message) => {
