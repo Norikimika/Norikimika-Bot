@@ -237,7 +237,6 @@ async function checkGithubUpdates(state) {
     const latestSha = latestCommit.sha;
     const lastSha = state[lastShaKey];
 
-    // Check Release
     let releaseChanged = false;
     let releaseData = null;
     try {

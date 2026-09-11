@@ -451,7 +451,7 @@ class NotificationMonitor {
                 { timeout: 20000 },
                 (error) => {
                     if (error) logger.warning(`TTS attempt ${attempt} failed: ${error.message}`);
-                    resolve(!error); // true = success, false = failed
+                    resolve(!error);
                 }
             );
         });

@@ -14,6 +14,7 @@ const {
   PermissionFlagsBits,
   ActivityType,
   ChannelType,
+  AttachmentBuilder,
 } = require("discord.js");
 
 const {
@@ -1063,6 +1064,163 @@ function setupVoiceConnectionHandlers(connection, guildId, voiceChannelId, adapt
   });
 }
 
+// ================== WELCOME MESSAGE ==================
+const WELCOME_CHANNEL_ID = process.env.DISCORD_WELCOME_CHANNEL_ID;
+const WELCOME_TEXT = process.env.DISCORD_WELCOME_TEXT;
+const WELCOME_BG_FILE = process.env.DISCORD_WELCOME_BG_FILE;
+const WELCOME_TITLE = process.env.DISCORD_WELCOME_TITLE;
+
+let canvasLib = null;
+function getCanvasLib() {
+  if (canvasLib) return canvasLib;
+  try {
+    canvasLib = require("@napi-rs/canvas");
+  } catch {
+    canvasLib = false;
+  }
+  return canvasLib;
+}
+
+let welcomeFontFamily = null;
+async function resolveWelcomeFont(canvas) {
+  if (welcomeFontFamily) return welcomeFontFamily;
+  welcomeFontFamily = "Noto Serif";
+  log(`[Welcome] using font: ${welcomeFontFamily}`);
+  return welcomeFontFamily;
+}
+
+async function fetchImageBuffer(url, label) {
+  const res = await fetch(url, {
+    redirect: "follow",
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; WelcomeBot/1.0)" },
+  });
+  log(`[Welcome] ${label} HTTP ${res.status} ${res.headers.get("content-type") || ""}`);
+  if (!res.ok) throw new Error(`${label} HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  log(`[Welcome] ${label} ${buf.length} bytes`);
+  return buf;
+}
+
+async function buildWelcomeImage(member, canvas) {
+  const fontFamily = await resolveWelcomeFont(canvas);
+  const W = 800, H = 400;
+  const cv = canvas.createCanvas(W, H);
+  const ctx = cv.getContext("2d");
+
+  const avatarUrl = member.user.displayAvatarURL({ extension: "png", size: 256 });
+  const avatarBuf = await fetchImageBuffer(avatarUrl, "avatar");
+
+  const localPath = path.isAbsolute(WELCOME_BG_FILE)
+    ? WELCOME_BG_FILE
+    : path.join(__dirname, WELCOME_BG_FILE);
+  const bg = await canvas.loadImage(localPath);
+  log(`[Welcome] banner local ${localPath} ${bg.width}x${bg.height}`);
+
+  const scale = Math.max(W / bg.width, H / bg.height);
+  const dw = bg.width * scale;
+  const dh = bg.height * scale;
+  ctx.drawImage(bg, (W - dw) / 2, (H - dh) / 2, dw, dh);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  ctx.fillRect(0, 0, W, H);
+
+  const AV_SIZE = 150;
+  const avY = 30;
+  const avX = (W - AV_SIZE) / 2;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(W / 2, avY + AV_SIZE / 2, AV_SIZE / 2, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.clip();
+  const avatar = await canvas.loadImage(avatarBuf);
+  ctx.drawImage(avatar, avX, avY, AV_SIZE, AV_SIZE);
+  ctx.restore();
+
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.arc(W / 2, avY + AV_SIZE / 2, AV_SIZE / 2, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.textAlign = "center";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+  ctx.shadowBlur = 12;
+
+  const maxWidth = W - 60;
+  const rows = [];
+  const drawShrinkFit = (text, startSize, minSize, color, y) => {
+    let size = startSize;
+    ctx.font = `bold ${size}px "${fontFamily}"`;
+    while (ctx.measureText(text).width > maxWidth && size > minSize) {
+      size -= 2;
+      ctx.font = `bold ${size}px "${fontFamily}"`;
+    }
+    ctx.fillStyle = color;
+    ctx.fillText(text, W / 2, y);
+    rows.push(`${text}@${size}px`);
+  };
+
+  drawShrinkFit(WELCOME_TITLE, 48, 20, "#7dd3fc", 245);
+  drawShrinkFit(member.user.username, 40, 16, "#ffffff", 295);
+  drawShrinkFit(WELCOME_TEXT, 30, 14, "#facc15", 345);
+
+  ctx.shadowBlur = 0;
+
+  const bandChecks = [
+    { y: [230, 250], ok: (r, g, b) => b > 180 && g > 150 },
+    { y: [280, 300], ok: (r, g, b) => r > 200 && g > 200 && b > 200 },
+    { y: [330, 350], ok: (r, g, b) => r > 180 && g > 150 && b < 130 },
+  ];
+  const filled = bandChecks.filter(({ y: [y0, y1], ok }) => {
+    const d = ctx.getImageData(0, y0, W, y1 - y0).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (ok(d[i], d[i + 1], d[i + 2])) n++;
+    }
+    return n > 20;
+  }).length;
+
+  if (filled < 3) {
+    log(`[Welcome] WARNING: only ${filled}/3 text rows rendered (${rows.join(", ")})`);
+  }
+
+  return cv.toBuffer("image/png");
+}
+
+async function handleMemberJoin(member) {
+  if (!WELCOME_CHANNEL_ID) {
+    log("[Welcome] DISCORD_WELCOME_CHANNEL_ID not set in .env");
+    return;
+  }
+  if (!WELCOME_BG_FILE || !WELCOME_TEXT || !WELCOME_TITLE) {
+    log("[Welcome] DISCORD_WELCOME_BG_FILE / _TEXT / _TITLE not set in .env");
+    return;
+  }
+
+  const canvas = getCanvasLib();
+  if (!canvas) {
+    log("[Welcome] @napi-rs/canvas not installed");
+    return;
+  }
+
+  const channel = await member.guild.channels.fetch(WELCOME_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) {
+    log(`[Welcome] Channel ${WELCOME_CHANNEL_ID} not found or not text-based`);
+    return;
+  }
+
+  const imageBuf = await buildWelcomeImage(member, canvas);
+  const attachment = new AttachmentBuilder(imageBuf, { name: "welcome.png" });
+
+  await channel.send({
+    content: `You are member **#${member.guild.memberCount}** <@${member.id}>`,
+    files: [attachment],
+  }).catch((e) => log(`[Welcome] Send failed: ${e.message}`));
+
+  log(`[Welcome] Sent for ${member.user.tag} in ${member.guild.name}`);
+}
+
 // ================== SERVER STATS CHANNELS ==================
 const STATS_DEFS = [
   { key: "all", label: "🧩┃all members" },
@@ -1142,7 +1300,6 @@ async function updateServerStatsChannels(client) {
           });
         }
 
-        // Hapus kategori stats ganda kalau ada
         for (const extra of categories.values()) {
           if (extra.id === category.id) continue;
           await extra.delete("Removing duplicate stats category").catch(() => {});
@@ -1174,7 +1331,6 @@ async function updateServerStatsChannels(client) {
             if (channel.name !== targetName) {
               await channel.setName(targetName).catch((e) => log(`[Stats] Rename failed: ${e.message}`));
             }
-            // Hapus channel stats ganda
             for (const extra of matches.values()) {
               if (extra.id === channel.id) continue;
               await extra.delete("Removing duplicate stats channel").catch(() => {});
@@ -1317,13 +1473,16 @@ function runDiscord() {
     }
   });
 
+  discordClient.on("guildMemberAdd", (member) => {
+    handleMemberJoin(member).catch((e) => log(`[Welcome] Unhandled: ${e.message}`));
+  });
+
   discordClient.on("messageCreate", async (message) => {
     if (message.author.bot || !message.guild) return;
 
     const content = message.content.trim();
     if (!content.startsWith("!")) return;
 
-    // Send typing indicator while processing command
     message.channel.sendTyping().catch(() => {});
 
     const args = content.slice(1).trim().split(/ +/);
