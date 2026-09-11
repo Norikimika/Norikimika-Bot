@@ -1299,7 +1299,18 @@ async function updateServerStatsChannels(client) {
         let offlineCount = null;
 
         try {
-          const fetched = await guild.members.fetch();
+          let fetched = null;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              fetched = await guild.members.fetch({ withPresences: true, time: 60000 });
+              break;
+            } catch (e) {
+              if (attempt === 3) throw e;
+              const waitMs = Math.min(parseInt(e.message?.match(/Retry after ([\d.]+) seconds/)?.[1] || "5", 10) * 1000 + 1000, 60000);
+              log(`[Stats] Retry ${attempt}/3 member fetch for ${guild.name}: ${e.message}`);
+              await new Promise((r) => setTimeout(r, waitMs));
+            }
+          }
           botCount = fetched.filter((m) => m.user.bot).size;
           humanCount = fetched.filter((m) => !m.user.bot).size;
           allCount = fetched.size;
@@ -1311,11 +1322,11 @@ async function updateServerStatsChannels(client) {
             (m) => !m.presence || m.presence.status === "offline" || m.presence.status === "invisible"
           ).size;
         } catch (e) {
-          log(`[Stats] Skipped ${guild.name}, member fetch failed (check GUILD MEMBERS intent): ${e.message}`);
-          continue;
+          log(`[Stats] Full fetch failed for ${guild.name}, degraded mode: ${e.message}`);
+          allCount = guild.memberCount ?? null;
         }
 
-        if (botCount === null || humanCount === null || allCount === null) continue;
+        if (allCount === null) continue;
 
         const values = {
           all: allCount,
@@ -1354,6 +1365,7 @@ async function updateServerStatsChannels(client) {
         }
 
         for (const def of STATS_DEFS) {
+          if (values[def.key] === null || values[def.key] === undefined) continue;
           const targetName = `${def.label}: ${values[def.key]}`;
 
           const matches = channels.filter(
@@ -1411,6 +1423,9 @@ function runDiscord() {
 
   discordClient.ws.setMaxListeners(30);
 
+  let lastStatsRun = 0;
+  const STATS_MIN_INTERVAL = 5 * 60 * 1000;
+
   discordClient.once("clientReady", async () => {
     log(`Online as: ${discordClient.user.tag}`);
 
@@ -1424,10 +1439,14 @@ function runDiscord() {
     updateActivity();
     setInterval(updateActivity, 30000);
 
-    updateServerStatsChannels(discordClient).catch((e) => log(`[Stats] Initial error: ${e.message}`));
-    setInterval(() => {
+    const runStats = () => {
+      const now = Date.now();
+      if (now - lastStatsRun < STATS_MIN_INTERVAL) return;
+      lastStatsRun = now;
       updateServerStatsChannels(discordClient).catch((e) => log(`[Stats] Interval error: ${e.message}`));
-    }, 300000);
+    };
+    runStats();
+    setInterval(runStats, 300000);
 
     for (const guild of discordClient.guilds.cache.values()) {
       try {
