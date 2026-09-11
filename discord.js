@@ -1066,10 +1066,10 @@ function setupVoiceConnectionHandlers(connection, guildId, voiceChannelId, adapt
 // ================== SERVER STATS CHANNELS ==================
 const STATS_DEFS = [
   { key: "all", label: "🧩┃all members" },
-  { key: "online", label: "🟢┃online" },
-  { key: "idle", label: "🟡┃idle" },
-  { key: "dnd", label: "🔴┃dnd" },
-  { key: "offline", label: "⚫┃offline" },
+  { key: "online", label: "🍏┃online" },
+  { key: "idle", label: "🍋┃idle" },
+  { key: "dnd", label: "🌶️┃dnd" },
+  { key: "offline", label: "♣️┃offline" },
   { key: "humans", label: "🪢┃members" },
   { key: "bots", label: "🤖┃bots" },
 ];
@@ -1254,7 +1254,7 @@ function runDiscord() {
         for (const channel of channels.values()) {
           if (
             channel?.type === ChannelType.GuildVoice &&
-            channel.name.startsWith("🔊┃") &&
+            channel.name.startsWith("🦕┃") &&
             channel.members.size === 0
           ) {
             await channel.delete("Cleanup empty custom voice channel on startup").catch(() => {});
@@ -1278,7 +1278,7 @@ function runDiscord() {
         const member = newState.member;
 
         const createdChannel = await guild.channels.create({
-          name: `🔊┃${member.displayName}`,
+          name: `🦕┃${member.displayName}`,
           type: ChannelType.GuildVoice,
           parent: joinedChannel.parentId || null,
           permissionOverwrites: [
