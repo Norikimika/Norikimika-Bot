@@ -1272,10 +1272,6 @@ async function handleMemberLeave(member) {
 // ================== SERVER STATS CHANNELS ==================
 const STATS_DEFS = [
   { key: "all", label: "🧩┃all members" },
-  { key: "online", label: "🍏┃online" },
-  { key: "idle", label: "🍋┃idle" },
-  { key: "dnd", label: "🌶️┃dnd" },
-  { key: "offline", label: "♣️┃offline" },
   { key: "humans", label: "🪢┃members" },
   { key: "bots", label: "🤖┃bots" },
 ];
@@ -1293,16 +1289,12 @@ async function updateServerStatsChannels(client) {
         let allCount = null;
         let botCount = null;
         let humanCount = null;
-        let onlineCount = null;
-        let idleCount = null;
-        let dndCount = null;
-        let offlineCount = null;
 
         try {
           let fetched = null;
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-              fetched = await guild.members.fetch({ withPresences: true, time: 60000 });
+              fetched = await guild.members.fetch({ time: 60000 });
               break;
             } catch (e) {
               if (attempt === 3) throw e;
@@ -1314,13 +1306,6 @@ async function updateServerStatsChannels(client) {
           botCount = fetched.filter((m) => m.user.bot).size;
           humanCount = fetched.filter((m) => !m.user.bot).size;
           allCount = fetched.size;
-
-          onlineCount = fetched.filter((m) => m.presence?.status === "online").size;
-          idleCount = fetched.filter((m) => m.presence?.status === "idle").size;
-          dndCount = fetched.filter((m) => m.presence?.status === "dnd").size;
-          offlineCount = fetched.filter(
-            (m) => !m.presence || m.presence.status === "offline" || m.presence.status === "invisible"
-          ).size;
         } catch (e) {
           log(`[Stats] Full fetch failed for ${guild.name}, degraded mode: ${e.message}`);
           allCount = guild.memberCount ?? null;
@@ -1330,10 +1315,6 @@ async function updateServerStatsChannels(client) {
 
         const values = {
           all: allCount,
-          online: onlineCount,
-          idle: idleCount,
-          dnd: dndCount,
-          offline: offlineCount,
           humans: humanCount,
           bots: botCount,
         };
@@ -1412,7 +1393,6 @@ function runDiscord() {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMembers,
-      GatewayIntentBits.GuildPresences,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.DirectMessages,
