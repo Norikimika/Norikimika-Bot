@@ -72,6 +72,8 @@ const AUDIO_CONFIG = {
 
 const queues = new Map();
 const tempVoiceChannels = new Set();
+const aloneTimers = new Map();
+const ALONE_TIMEOUT = 5 * 60 * 1000;
 
 // ================== OPUS OFFLOAD ==================
 let libOpusSupport = null;
@@ -818,9 +820,52 @@ function warmAutoplayCandidate(serverQueue, baseSong) {
 }
 
 // ================== QUEUE MANAGEMENT & PLAYBACK CONTROL ==================
+function clearAloneTimer(guildId) {
+  const t = aloneTimers.get(guildId);
+  if (t) {
+    clearTimeout(t);
+    aloneTimers.delete(guildId);
+  }
+}
+
+function refreshAloneTimer(guildId, guild) {
+  clearAloneTimer(guildId);
+  const serverQueue = queues.get(guildId);
+  if (!serverQueue || !guild) return;
+  let channel = null;
+  try {
+    channel = serverQueue.connection?.joinConfig?.channelId
+      ? guild.channels.cache.get(serverQueue.connection.joinConfig.channelId)
+      : guild.members.me?.voice?.channel;
+  } catch {}
+  if (!channel) return;
+  const humans = [...channel.members.values()].filter((m) => !m.user.bot);
+  if (humans.length > 0) return;
+  if (!serverQueue.playing && serverQueue.songs.length === 0 && !serverQueue.currentSong) return;
+  log(`[Alone] Server: ${guild.name || guildId} | no humans, stopping music in 5 min`);
+  aloneTimers.set(guildId, setTimeout(() => {
+    aloneTimers.delete(guildId);
+    const sq = queues.get(guildId);
+    if (!sq) return;
+    try {
+      const ch = sq.connection?.joinConfig?.channelId
+        ? guild.channels.cache.get(sq.connection.joinConfig.channelId)
+        : guild.members.me?.voice?.channel;
+      const h = ch ? [...ch.members.values()].filter((m) => !m.user.bot) : [];
+      if (h.length > 0) return;
+    } catch {}
+    sq.autoplay = false;
+    sq.lastSong = null;
+    destroyServerQueue(guildId, false);
+    log(`[Alone] Server: ${sq.guildName || guildId} | stopped music, voice empty 5 min (staying in voice)`);
+  }, ALONE_TIMEOUT));
+}
+
 function destroyServerQueue(guildId, deleteQueue = false) {
   const serverQueue = queues.get(guildId);
   if (!serverQueue) return;
+
+  clearAloneTimer(guildId);
 
   serverQueue.transitioning = true;
   serverQueue.playing = false;
@@ -1518,6 +1563,9 @@ function runDiscord() {
         }
       }
     }
+
+    const vGuild = oldState.guild || newState.guild;
+    if (vGuild) refreshAloneTimer(vGuild.id, vGuild);
   });
 
   discordClient.on("guildMemberAdd", (member) => {
