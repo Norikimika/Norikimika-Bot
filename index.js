@@ -1545,7 +1545,7 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
       { parse_mode: "HTML", reply_to_message_id: ctx.message?.message_id, message_thread_id: threadId }
     );
 
-    let title, uploader, videoUrl = null, images = [], musicUrl = null;
+    let title, uploader, videoUrl = null, images = [], liveVideos = [], liveRaw = [], musicUrl = null;
 
     if (isDouyin) {
       const apiUrl = `https://douyin.wtf/api/hybrid/video_data?url=${encodeURIComponent(targetUrl)}&minimal=true`;
@@ -1584,6 +1584,8 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
       uploader = data.author?.nickname || data.author?.unique_id || "Unknown";
       videoUrl = data.hdplay || data.play || null;
       images = Array.isArray(data.images) ? data.images : [];
+      liveRaw = Array.isArray(data.live_images) ? data.live_images : [];
+      liveVideos = liveRaw.filter(Boolean);
       musicUrl = data.music_info?.play || data.music || null;
     }
 
@@ -1592,10 +1594,30 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
     await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Downloading", platform: platformLabel });
 
     const isImages = images.length > 0;
+    const isLive = liveVideos.length > 0;
     const downloadedFiles = [];
+    const slides = [];
     let audioPath = null;
 
-    if (isImages) {
+    if (isLive) {
+      const n = Math.max(images.length, liveRaw.length);
+      for (let i = 0; i < n; i++) {
+        const tag = String(i + 1).padStart(2, "0");
+        if (liveRaw[i]) {
+          const vidRes = await fetch(liveRaw[i]);
+          const buffer = Buffer.from(await vidRes.arrayBuffer());
+          const filePath = path.join(tempDir, `slide_${tag}.mp4`);
+          fs.writeFileSync(filePath, buffer);
+          slides.push({ kind: "video", path: filePath });
+        } else if (images[i]) {
+          const imgRes = await fetch(images[i]);
+          const buffer = Buffer.from(await imgRes.arrayBuffer());
+          const filePath = path.join(tempDir, `slide_${tag}.jpg`);
+          fs.writeFileSync(filePath, buffer);
+          slides.push({ kind: "photo", path: filePath });
+        }
+      }
+    } else if (isImages) {
       for (let i = 0; i < images.length; i++) {
         const imgUrl = images[i];
         const imgRes = await fetch(imgUrl);
@@ -1604,7 +1626,7 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
         fs.writeFileSync(filePath, buffer);
         downloadedFiles.push(filePath);
       }
-    } else {
+    } else if (!isLive) {
       if (!videoUrl) throw new Error("No video URL found in API response");
 
       const videoRes = await fetch(videoUrl);
@@ -1623,26 +1645,33 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
       } catch {}
     }
 
-    if (downloadedFiles.length === 0) {
+    if (downloadedFiles.length === 0 && slides.length === 0) {
       throw new Error(`No media downloaded from ${platformLabel} response`);
     }
 
     await updateTTStatus(ctx, infoMessage.message_id, { title, uploader, status: "Sending", platform: platformLabel });
 
-    const captionText =
-      `<b>🎬 ${platformLabel} Download</b>\n` +
-      `<blockquote>` +
-      `<b>👤 Author:</b>\n-> <code>${escapeHTML(uploader)}</code>\n` +
-      `<b>📝 Title:</b>\n-> <code>${escapeHTML(title)}</code>` +
-      `</blockquote>`;
-
-    if (!isImages) {
+    if (isLive) {
+      if (slides.length > 0) {
+        const chunkSize = 10;
+        for (let i = 0; i < slides.length; i += chunkSize) {
+          const chunk = slides.slice(i, i + chunkSize);
+          const mediaGroup = chunk.map((s) => ({
+            type: s.kind,
+            media: { source: fs.createReadStream(s.path) },
+          }));
+          await safeReplyWithMediaGroup(
+            ctx,
+            () => mediaGroup,
+            { message_thread_id: targetTopicId }
+          );
+        }
+      }
+    } else if (!isImages) {
       await safeReplyWithVideo(
         ctx,
         () => ({ source: fs.createReadStream(downloadedFiles[0]) }),
         {
-          caption: captionText,
-          parse_mode: "HTML",
           message_thread_id: targetTopicId,
         }
       );
@@ -1655,7 +1684,7 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
             message_thread_id: targetTopicId,
           }
         );
-      } else {
+      } else if (downloadedFiles.length > 1) {
         const chunkSize = 10;
         for (let i = 0; i < downloadedFiles.length; i += chunkSize) {
           const chunk = downloadedFiles.slice(i, i + chunkSize);
