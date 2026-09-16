@@ -42,12 +42,6 @@ const CONFIG = {
             keywords: [],
             tts_enabled: false
         },
-        "com.gojek.gopaymerchant": {
-            name: "GoPay Merchant",
-            topic_id: parseInt(process.env.TOPIC_ID_GOPAY || "15210", 10),
-            keywords: ["Norikimika"],
-            tts_enabled: false
-        },
         "com.andi.alquran.id": {
             name: "Al-Qur'an Indonesia",
             topic_id: parseInt(process.env.TOPIC_ID_AL_QURAN || "34084", 10),
