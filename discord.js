@@ -1337,14 +1337,14 @@ async function updateServerStatsChannels(client) {
 
         try {
           let fetched = null;
-          for (let attempt = 1; attempt <= 3; attempt++) {
+          for (let attempt = 1; attempt <= 2; attempt++) {
             try {
-              fetched = await guild.members.fetch({ time: 60000 });
+              fetched = await guild.members.fetch({ time: 30000 });
               break;
             } catch (e) {
-              if (attempt === 3) throw e;
-              const waitMs = Math.min(parseInt(e.message?.match(/Retry after ([\d.]+) seconds/)?.[1] || "5", 10) * 1000 + 1000, 60000);
-              log(`[Stats] Retry ${attempt}/3 member fetch for ${guild.name}: ${e.message}`);
+              if (attempt === 2) throw e;
+              const waitMs = Math.min(parseInt(e.message?.match(/Retry after ([\d.]+) seconds/)?.[1] || "30", 10) * 1000 + 1000, 60000);
+              log(`[Stats] Retry ${attempt}/2 member fetch for ${guild.name}: ${e.message}`);
               await new Promise((r) => setTimeout(r, waitMs));
             }
           }
@@ -1566,6 +1566,7 @@ function runDiscord() {
 
     const vGuild = oldState.guild || newState.guild;
     if (vGuild) refreshAloneTimer(vGuild.id, vGuild);
+
   });
 
   discordClient.on("guildMemberAdd", (member) => {
