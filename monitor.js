@@ -57,11 +57,36 @@ async function sendToTelegram(message, topicId) {
 }
 
 // ================== STATE VARIABLES ==================
-let battery80Sent = false;
-let battery20Sent = false;
-let lastStatus = "UNKNOWN";
-let chargeStartTime = Date.now(); 
-let useStartTime = Date.now(); 
+const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'monitor.json');
+
+let monitorState = {
+  battery80Sent: false,
+  battery20Sent: false,
+  lastStatus: "UNKNOWN",
+  chargeStartTime: Date.now(),
+  useStartTime: Date.now(),
+};
+
+try {
+  if (fs.existsSync(STATE_FILE)) {
+    const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
+    if (raw) {
+      monitorState = { ...monitorState, ...JSON.parse(raw) };
+    }
+  }
+} catch (err) {
+  log(`⚠️ monitor.json corrupted, resetting. ${err.message}`);
+}
+
+function saveMonitorState() {
+  try {
+    const tmp = STATE_FILE + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(monitorState, null, 2));
+    fs.renameSync(tmp, STATE_FILE);
+  } catch (err) {
+    log(`Failed to save monitor state: ${err.message}`);
+  }
+}
 
 // ================== UTILITIES ==================
 function formatDuration(startTime) {
@@ -169,25 +194,35 @@ async function checkBatteryLevel() {
       const temperature = Math.round(data.temperature);
 
       if (status === "CHARGING" || status === "FULL") {
-        if (lastStatus === "DISCHARGING" || lastStatus === "NOT_CHARGING") {
-          chargeStartTime = Date.now();
+        if (monitorState.lastStatus === "DISCHARGING" || monitorState.lastStatus === "NOT_CHARGING") {
+          monitorState.chargeStartTime = Date.now();
+          saveMonitorState();
         }
       } else if (status === "DISCHARGING" || status === "NOT_CHARGING") {
-        if (lastStatus === "CHARGING" || lastStatus === "FULL") {
-          useStartTime = Date.now();
+        if (monitorState.lastStatus === "CHARGING" || monitorState.lastStatus === "FULL") {
+          monitorState.useStartTime = Date.now();
+          saveMonitorState();
         }
       }
 
       if (status !== "UNKNOWN") {
-        lastStatus = status;
+        monitorState.lastStatus = status;
+        saveMonitorState();
       }
 
-      if (level < 80) battery80Sent = false;
-      if (level > 20) battery20Sent = false;
+      if (level < 100 && monitorState.battery80Sent) {
+        monitorState.battery80Sent = false;
+        saveMonitorState();
+      }
+      if (level > 20 && monitorState.battery20Sent) {
+        monitorState.battery20Sent = false;
+        saveMonitorState();
+      }
 
-      if (level >= 80 && !battery80Sent) {
-        battery80Sent = true;
-        const chargeDuration = formatDuration(chargeStartTime);
+      if (level >= 100 && !monitorState.battery80Sent) {
+        monitorState.battery80Sent = true;
+        saveMonitorState();
+        const chargeDuration = formatDuration(monitorState.chargeStartTime);
 
         await sendToTelegram(
           `<b>🔋 Battery Fully Charged</b>\n<blockquote>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C\nDuration : ${chargeDuration}</blockquote>`,
@@ -195,9 +230,10 @@ async function checkBatteryLevel() {
         );
       }
 
-      if (level <= 20 && !battery20Sent) {
-        battery20Sent = true;
-        const usageDuration = formatDuration(useStartTime);
+      if (level <= 20 && !monitorState.battery20Sent) {
+        monitorState.battery20Sent = true;
+        saveMonitorState();
+        const usageDuration = formatDuration(monitorState.useStartTime);
 
         await sendToTelegram(
           `<b>🪫 Low Battery Warning</b>\n<blockquote>Percentage : ${level}%\nStatus : ${status}\nTemperature : ${temperature}°C\nDuration : ${usageDuration}</blockquote>`,
