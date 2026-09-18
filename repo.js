@@ -259,9 +259,31 @@ async function checkGithubUpdates(state) {
       log(`⚠️ Release check failed: ${e.message}`);
     }
 
+    let tagChanged = false;
+    let latestTagName = null;
+    let latestTagUrl = null;
+    let tagKey = null;
+    try {
+      const tagsResp = await fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}/tags?per_page=1`, { headers });
+      if (tagsResp.ok) {
+        const tagsData = await tagsResp.json();
+        const topTag = Array.isArray(tagsData) && tagsData.length > 0 ? tagsData[0] : null;
+        if (topTag?.name) {
+          tagKey = `GITHUB_${repo.owner}_${repo.repo}_LAST_TAG`;
+          latestTagName = topTag.name;
+          latestTagUrl = `https://github.com/${repo.owner}/${repo.repo}/releases/tag/${encodeURIComponent(topTag.name)}`;
+          if (topTag.name !== state[tagKey]) {
+            tagChanged = true;
+          }
+        }
+      }
+    } catch (e) {
+      log(`⚠️ Tag check failed: ${e.message}`);
+    }
+
     const hasNewCommit = latestSha !== lastSha;
 
-    if (!hasNewCommit && !releaseChanged) {
+    if (!hasNewCommit && !releaseChanged && !tagChanged) {
       await new Promise(r => setTimeout(r, 2000));
       continue;
     }
@@ -288,6 +310,13 @@ async function checkGithubUpdates(state) {
     if (releaseChanged && releaseData) {
       const name = escapeHtml(releaseData.name || releaseData.tag_name);
       releaseText = "<b>✹ Release</b>\n" + ARROW + ` <i><a href="${escapeHtml(releaseData.html_url)}">${name}</a></i>`;
+    }
+
+    if (tagChanged && latestTagName) {
+      const tagLink = latestTagUrl
+        ? `<i><a href="${escapeHtml(latestTagUrl)}">${escapeHtml(latestTagName)}</a></i>`
+        : `<i>${escapeHtml(latestTagName)}</i>`;
+      releaseText += (releaseText ? "\n" : "") + "<b>✹ Tag</b>\n" + ARROW + ` ${tagLink}`;
     }
 
     const MAX_COMMIT_LENGTH = 150;
@@ -326,6 +355,7 @@ async function checkGithubUpdates(state) {
       await sendToTelegram(message);
       
       if (hasNewCommit) state[lastShaKey] = latestSha;
+      if (tagChanged && tagKey) state[tagKey] = latestTagName;
       
       log(`📨 Sent update for ${repo.repo} and saved state`);
     } catch (err) {
