@@ -277,6 +277,68 @@ async function runAutoSpeedtest() {
   });
 }
 
+// ================== OPENROUTER MODELS ==================
+const MODELS_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'openrouter_models.json');
+const MODELS_API = 'https://openrouter.ai/api/v1/models';
+
+async function checkOpenRouterModels() {
+  log("Checking OpenRouter models...");
+  try {
+    const res = await fetch(MODELS_API);
+    if (!res.ok) {
+      log(`OpenRouter models fetch failed: ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    const current = (data.data || [])
+      .map(m => ({ id: m.id, name: m.name, created: m.created, description: m.description }))
+      .sort((a, b) => (a.id > b.id ? 1 : -1));
+    if (!current.length) return;
+
+    let known = [];
+    try {
+      if (fs.existsSync(MODELS_FILE)) {
+        known = JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8'));
+      }
+    } catch (err) {
+      log(`openrouter_models.json corrupted, starting fresh. ${err.message}`);
+    }
+
+    const knownSet = new Set(known.map(m => m.id));
+    const newModels = current.filter(m => !knownSet.has(m.id));
+
+    fs.writeFileSync(MODELS_FILE, JSON.stringify(current, null, 2));
+
+    if (!known.length) {
+      log(`OpenRouter models initialized with ${current.length} models`);
+      return;
+    }
+
+    if (newModels.length) {
+      newModels.sort((a, b) => (a.created || 0) - (b.created || 0));
+      const list = newModels.slice(0, 20).map(m => {
+        const date = m.created
+          ? new Date(m.created * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+          : 'Unknown';
+        const desc = m.description
+          ? escapeHTML(m.description.length > 180 ? m.description.slice(0, 180).trim() + '…' : m.description)
+          : '<i>No description</i>';
+        return `• <b>${escapeHTML(m.name || m.id)}</b>\n  <i>${escapeHTML(m.id)}</i> — ${date}\n  ${desc}`;
+      }).join('\n\n');
+      const extra = newModels.length > 20 ? `\n…and ${newModels.length - 20} more` : '';
+      await sendToTelegram(
+        `<b>🧠 New OpenRouter Models</b> (${newModels.length})\n<blockquote>${list}${extra}</blockquote>`,
+        TOPIC_ID_STATUS
+      );
+      log(`OpenRouter: ${newModels.length} new model(s)`);
+    } else {
+      log("OpenRouter: no new models");
+    }
+  } catch (err) {
+    log(`OpenRouter models check failed: ${err.message}`);
+  }
+}
+
 // ================== MAIN SCHEDULER ==================
 function startMonitor() {
   log("Starting monitor service...");
@@ -284,6 +346,7 @@ function startMonitor() {
   cron.schedule("0 0 * * *", sendUsageReport, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("0 0,12 * * *", runAutoSpeedtest, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("* * * * *", checkBatteryLevel, { scheduled: true, recoverMissedExecutions: false });
+  cron.schedule("0 4 * * *", checkOpenRouterModels, { scheduled: true, recoverMissedExecutions: false });
 }
 
 module.exports = startMonitor;
