@@ -321,15 +321,106 @@ async function checkOpenRouterModels() {
           ? new Date(m.created * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
           : 'Unknown';
         const desc = m.description
-          ? escapeHTML(m.description.length > 180 ? m.description.slice(0, 180).trim() + '…' : m.description)
-          : '<i>No description</i>';
-        return `• <b>${escapeHTML(m.name || m.id)}</b>\n  <i>${escapeHTML(m.id)}</i> — ${date}\n  ${desc}`;
-      }).join('\n\n');
-      const extra = newModels.length > 20 ? `\n…and ${newModels.length - 20} more` : '';
-      await sendToTelegram(
-        `<b>🧠 New OpenRouter Models</b> (${newModels.length})\n<blockquote>${list}${extra}</blockquote>`,
-        TOPIC_ID_STATUS
-      );
+          ? (m.description.length > 180 ? m.description.slice(0, 180).trim() + '…' : m.description)
+          : 'No description';
+        return { n: m.name || m.id, i: m.id, d: date, t: desc };
+      });
+      const extra = newModels.length > 20 ? `...and ${newModels.length - 20} more` : '';
+
+      // render image (Linear-style cards, JS-only via @napi-rs/canvas)
+      const imgPath = path.join(os.tmpdir(), 'openrouter_models.png');
+      try {
+        const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
+        const F = '/data/data/com.termux/files/usr/share/fonts/TTF/';
+        GlobalFonts.registerFromPath(F + 'DejaVuSans.ttf', 'Body');
+        GlobalFonts.registerFromPath(F + 'DejaVuSans-Bold.ttf', 'Bold');
+        GlobalFonts.registerFromPath(F + 'DejaVuSans-Oblique.ttf', 'Italic');
+
+        const W = 640, pad = 32;
+        const tF = '38px Bold', mF = '19px Body', sF = '18px Italic', pF = '15px Bold';
+        const cardH = 18 + 38 + 16 + 18 + 14 + 3 * (19 + 8) + pad;
+        const H = pad + 70 + list.length * (cardH + 20) + (extra ? pad + 30 : 0) + pad;
+        const c = createCanvas(W, H), ctx = c.getContext('2d');
+
+        const wrap = (text, font, maxW) => {
+          ctx.font = font;
+          const out = [];
+          let line = '';
+          for (const w of text.split(' ')) {
+            const t = (line + ' ' + w).trim();
+            if (ctx.measureText(t).width <= maxW) line = t;
+            else { out.push(line); line = w; }
+          }
+          if (line) out.push(line);
+          return out;
+        };
+
+        ctx.fillStyle = '#08090a';
+        ctx.fillRect(0, 0, W, H);
+        let y = pad;
+        ctx.fillStyle = '#f7f8f8'; ctx.font = tF;
+        ctx.fillText('New OpenRouter Models', pad, y + 30);
+        y += 48;
+        ctx.fillStyle = '#8a8f98'; ctx.font = mF;
+        ctx.fillText(`${list.length} new models added`, pad, y + 19);
+        y += 43;
+
+        for (const m of list) {
+          ctx.fillStyle = '#191a1b';
+          ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(pad, y, W - pad * 2, cardH, 12);
+          ctx.fill(); ctx.stroke();
+
+          let cy = y + 18;
+          ctx.font = pF;
+          const pw = ctx.measureText('NEW').width + 18;
+          ctx.fillStyle = '#5e6ad2';
+          ctx.beginPath();
+          ctx.roundRect(pad + 18, cy, pw, 26, 999);
+          ctx.fill();
+          ctx.fillStyle = '#f7f8f8';
+          ctx.fillText('NEW', pad + 27, cy + 18);
+
+          ctx.fillStyle = '#f7f8f8'; ctx.font = tF;
+          ctx.fillText(m.n, pad + 34 + pw, cy + 30);
+          cy += 54;
+
+          ctx.fillStyle = '#8a8f98'; ctx.font = sF;
+          ctx.fillText(`${m.i}  ·  ${m.d}`, pad + 18, cy + 18);
+          cy += 32;
+
+          ctx.fillStyle = '#d0d6e0'; ctx.font = mF;
+          for (const line of wrap(m.t, mF, W - pad * 2 - 36)) {
+            ctx.fillText(line, pad + 18, cy + 19);
+            cy += 27;
+          }
+          y += cardH + 20;
+        }
+
+        if (extra) {
+          ctx.fillStyle = '#8a8f98'; ctx.font = sF;
+          ctx.fillText(extra, pad, y + 18);
+        }
+
+        fs.writeFileSync(imgPath, c.toBuffer('image/png'));
+        const FormData = (await import('form-data')).default;
+        const form = new FormData();
+        form.append('chat_id', TELEGRAM_CHAT_ID);
+        form.append('message_thread_id', TOPIC_ID_STATUS);
+        form.append('caption', `<b>🧠 New OpenRouter Models</b> (${newModels.length})`);
+        form.append('parse_mode', 'HTML');
+        form.append('photo', fs.createReadStream(imgPath));
+        const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+        if (!res.ok) log(`photo send failed: ${res.status}`);
+      } catch (err) {
+        log(`image render failed (${err.message}), fallback to text`);
+        await sendToTelegram(
+          `<b>🧠 New OpenRouter Models</b> (${newModels.length})\n<blockquote>${list.map(m => `<b>${m.n}</b>\n${m.i} — ${m.d}\n${m.t}`).join('\n\n')}${extra ? '\n\n' + extra : ''}</blockquote>`,
+          TOPIC_ID_STATUS
+        );
+      }
       log(`OpenRouter: ${newModels.length} new model(s)`);
     } else {
       log("OpenRouter: no new models");
