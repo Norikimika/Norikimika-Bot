@@ -288,12 +288,13 @@ async function checkOpenRouterModels() {
     }
     const data = await res.json();
     const cutoff = Date.now() / 1000 - 48 * 3600;
+    const lastNotified = monitorState.lastOpenRouterNotified || 0;
     const newModels = (data.data || [])
-      .filter(m => (m.created || 0) >= cutoff)
+      .filter(m => (m.created || 0) >= cutoff && (m.created || 0) > lastNotified)
       .sort((a, b) => (a.created || 0) - (b.created || 0));
 
     if (!newModels.length) {
-      log("OpenRouter: no new models in last 48h");
+      log("OpenRouter: no new models since last check");
       return;
     }
 
@@ -414,7 +415,12 @@ async function checkOpenRouterModels() {
       form.append('parse_mode', 'HTML');
       form.append('photo', fs.createReadStream(imgPath));
       const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
-      if (!res.ok) log(`photo send failed: ${res.status}`);
+      if (res.ok) {
+        monitorState.lastOpenRouterNotified = Math.max(...newModels.map(m => m.created || 0));
+        saveMonitorState();
+      } else {
+        log(`photo send failed: ${res.status}`);
+      }
     } catch (err) {
       log(`image render failed (${err.message})`);
     }
@@ -519,7 +525,7 @@ function startMonitor() {
   cron.schedule("0 0 * * *", sendUsageReport, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("0 0,12 * * *", runAutoSpeedtest, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("* * * * *", checkBatteryLevel, { scheduled: true, recoverMissedExecutions: false });
-  cron.schedule("0 4 * * *", checkOpenRouterModels, { scheduled: true, recoverMissedExecutions: false });
+  cron.schedule("*/15 * * * *", checkOpenRouterModels, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("0 5 * * *", checkTopWeekly, { scheduled: true, recoverMissedExecutions: false });
 }
 

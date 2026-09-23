@@ -4,7 +4,7 @@ const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fet
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, execFile } = require('child_process');
+const { execSync, execFile, execFileSync } = require('child_process');
 
 // ====== Paths ======
 const homeDir = os.homedir();
@@ -477,6 +477,18 @@ class NotificationMonitor {
         try {
             execSync("cmd media_session dispatch pause", { stdio: 'ignore' });
             logger.info("Media playback paused");
+
+            // set STREAM_MUSIC ke max biar TTS jelas
+            try {
+                const volumes = JSON.parse(execSync("termux-volume", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 }));
+                const music = volumes.find((v) => String(v.stream).toLowerCase() === "music");
+                if (music && music.max_volume > 0) {
+                    execFileSync("termux-volume", ["music", String(music.max_volume)], { stdio: 'ignore', timeout: 5000 });
+                    logger.info(`Music volume set to max (${music.max_volume})`);
+                }
+            } catch (e) {
+                logger.error(`Failed to set music volume: ${e.message}`);
+            }
         } catch (e) {
             logger.error(`Failed to stop media playback: ${e.message}`);
         }
