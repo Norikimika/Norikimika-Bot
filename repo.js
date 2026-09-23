@@ -101,6 +101,18 @@ const GITHUB_REPOS = [
     owner: "NousResearch",
     repo: "hermes-agent",
     branch: "main"
+  },
+  {
+    owner: "guillaumemeyer",
+    repo: "watermarks-remover",
+    branch: "main",
+    path: "skills"
+  },
+  {
+    owner: "miqdadbadjuber",
+    repo: "anti-slop",
+    branch: "main",
+    path: "skills"
   }
 ];
 

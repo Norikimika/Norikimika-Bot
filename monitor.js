@@ -1,6 +1,9 @@
 // ====================== CONFIG ======================
 require('dotenv').config();
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+const nativeFetch = globalThis.fetch;
+if (typeof nativeFetch !== 'function' || typeof globalThis.FormData !== 'function' || typeof globalThis.Blob !== 'function') {
+  throw new Error('Node 24+ with native fetch, FormData, and Blob required');
+}
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -41,7 +44,7 @@ async function sendToTelegram(message, topicId) {
   };
 
   try {
-    const res = await fetch(telegramUrl, {
+    const res = await nativeFetch(telegramUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -277,149 +280,239 @@ async function runAutoSpeedtest() {
   });
 }
 
+function renderNewModelsImage(list, totalCount = list.length, extra = '') {
+  const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
+  const F = '/data/data/com.termux/files/usr/share/fonts/TTF/';
+  GlobalFonts.registerFromPath(F + 'DejaVuSans.ttf', 'Body');
+  GlobalFonts.registerFromPath(F + 'DejaVuSans-Bold.ttf', 'Bold');
+  GlobalFonts.registerFromPath(F + 'DejaVuSansMono.ttf', 'Mono');
+  GlobalFonts.registerFromPath(F + 'DejaVuSansMono-Bold.ttf', 'MonoBold');
+
+  const W = 1200, pad = 48, headerH = 174, rowH = 152, gap = 8;
+  const contentW = W - pad * 2;
+  const H = headerH + list.length * (rowH + gap) - gap + 58;
+  const c = createCanvas(W, H), ctx = c.getContext('2d');
+  const colors = {
+    bg: '#050706', panel: '#0B0E0C', row: '#090C0A', line: '#202621',
+    white: '#F7F9F7', muted: '#A4ADA6', green: '#76B900', bright: '#B7F34A',
+    leader: '#10180C'
+  };
+  const canvas0 = createCanvas(W, 10), ctx0 = canvas0.getContext('2d');
+  const measure = (text, font, maxW) => {
+    ctx0.font = font;
+    const lines = [];
+    let line = '';
+    const pushWord = (word) => {
+      if (ctx0.measureText(word).width <= maxW) {
+        const next = line ? `${line} ${word}` : word;
+        if (ctx0.measureText(next).width <= maxW) line = next;
+        else { if (line) lines.push(line); line = word; }
+        return;
+      }
+      for (const char of word) {
+        const next = line + char;
+        if (ctx0.measureText(next).width <= maxW) line = next;
+        else { if (line) lines.push(line); line = char; }
+      }
+    };
+    for (const word of String(text).split(' ')) pushWord(word);
+    if (line) lines.push(line);
+    return lines;
+  };
+  const fitText = (text, font, maxW) => {
+    ctx0.font = font;
+    let value = String(text ?? '');
+    if (ctx0.measureText(value).width <= maxW) return value;
+    while (value.length && ctx0.measureText(`${value}…`).width > maxW) value = value.slice(0, -1);
+    return `${value}…`;
+  };
+  const formatContext = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 'Unknown';
+    if (n >= 1e6) return `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
+    if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+    return String(Math.round(n));
+  };
+  const formatPrice = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 'N/A';
+    if (n === 0) return 'Free';
+    const perMillion = n * 1e6;
+    return perMillion < 0.01 ? `$${perMillion.toFixed(4)}` : `$${perMillion.toFixed(2)}`;
+  };
+  const descriptionLines = (text) => {
+    const lines = measure(text, '20px Body', 1000);
+    if (lines.length <= 2) return lines;
+    return [lines[0], `${lines[1].replace(/[.,;:\s]+$/, '')}…`];
+  };
+
+  ctx.fillStyle = colors.bg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = colors.green;
+  ctx.fillRect(0, 0, W, 8);
+
+  const now = new Date();
+  const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Makassar', day: '2-digit', month: 'long', year: 'numeric'
+  }).formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+
+  ctx.fillStyle = colors.white;
+  ctx.font = '600 48px Body';
+  ctx.fillText('New OpenRouter Models', pad, 73);
+  ctx.font = '22px Mono';
+  ctx.fillStyle = colors.bright;
+  ctx.fillText('NEWEST RELEASES FIRST', pad, 111);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = colors.muted;
+  ctx.font = '18px Mono';
+  ctx.fillText(`${totalCount} new models`, W - pad, 72);
+  ctx.font = '16px Body';
+  ctx.fillText(`${dateParts.day} ${dateParts.month.toUpperCase()} ${dateParts.year}`, W - pad, 104);
+  ctx.textAlign = 'left';
+
+  ctx.fillStyle = colors.panel;
+  ctx.beginPath(); ctx.roundRect(pad, 130, contentW, 34, 2); ctx.fill();
+  ctx.fillStyle = colors.muted;
+  ctx.font = '600 14px Mono';
+  ctx.fillText('#', pad + 18, 153);
+  ctx.fillText('MODEL / PROVIDER / RELEASED', 146, 153);
+  ctx.textAlign = 'right';
+  ctx.fillText('CONTEXT', 700, 153);
+  ctx.fillText('INPUT / M', 835, 153);
+  ctx.fillText('OUTPUT / M', 1030, 153);
+  ctx.textAlign = 'left';
+
+  list.forEach((m, i) => {
+    const y = headerH + i * (rowH + gap);
+    ctx.fillStyle = i === 0 ? colors.leader : i % 2 ? colors.row : colors.bg;
+    ctx.fillRect(pad, y, contentW, rowH);
+    if (i === 0) {
+      ctx.fillStyle = colors.green;
+      ctx.fillRect(pad, y, 5, rowH);
+    }
+    ctx.fillStyle = i === 0 ? colors.bright : colors.muted;
+    ctx.font = '700 24px MonoBold';
+    ctx.fillText(String(i + 1).padStart(2, '0'), pad + 18, y + 48);
+    if (i === 0) {
+      ctx.fillStyle = colors.green;
+      ctx.font = '600 11px Mono';
+      ctx.fillText('LATEST', pad + 18, y + 72);
+    }
+
+    ctx.fillStyle = colors.white;
+    ctx.font = '600 30px Body';
+    ctx.fillText(fitText(m.n, '600 30px Body', 470), 146, y + 39);
+    ctx.fillStyle = colors.muted;
+    ctx.font = '16px Body';
+    ctx.fillText(fitText(`${m.i} · ${m.d}`, '16px Body', 520), 146, y + 65);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = colors.white;
+    ctx.font = '600 20px Mono';
+    ctx.fillText(formatContext(m.c), 700, y + 43);
+    ctx.fillText(formatPrice(m.p), 835, y + 43);
+    ctx.fillText(formatPrice(m.q), 1030, y + 43);
+    ctx.textAlign = 'left';
+
+    ctx.fillStyle = i === 0 ? '#DDE8DD' : '#C7D0C9';
+    ctx.font = '20px Body';
+    const desc = descriptionLines(m.t);
+    ctx.fillText(desc[0] || 'No description', 146, y + 96);
+    if (desc[1]) ctx.fillText(desc[1], 146, y + 122);
+
+    ctx.strokeStyle = colors.line;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, y + rowH);
+    ctx.lineTo(W - pad, y + rowH);
+    ctx.stroke();
+  });
+
+  if (extra) {
+    ctx.fillStyle = colors.muted;
+    ctx.font = '15px Body';
+    ctx.fillText(extra, pad, H - 25);
+  }
+  return c.toBuffer('image/png');
+}
+
 // ================== OPENROUTER MODELS ==================
+function stripLeadingModelName(name, description) {
+  const original = String(description ?? '').trim();
+  if (!original) return 'No description';
+
+  const candidates = [
+    String(name ?? '').trim(),
+    String(name ?? '').replace(/^[^:]+:[ \t]*/, '').trim()
+  ];
+  for (const candidate of [...new Set(candidates)]) {
+    if (!candidate || !original.toLowerCase().startsWith(candidate.toLowerCase())) continue;
+    let rest = original.slice(candidate.length).trimStart();
+    rest = rest.replace(/^[:,-][ \t]*/, '');
+    rest = rest.replace(/^(?:is|are)[ \t]+/i, '').trimStart();
+    if (rest) return rest;
+  }
+  return original;
+}
+
 async function checkOpenRouterModels() {
   log("Checking OpenRouter models...");
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/models?sort=newest&limit=50');
+    const res = await nativeFetch('https://openrouter.ai/api/v1/models?sort=newest&output_modalities=all&limit=1000');
     if (!res.ok) {
       log(`OpenRouter models fetch failed: ${res.status}`);
       return;
     }
     const data = await res.json();
+    const models = data.data || [];
     const cutoff = Date.now() / 1000 - 48 * 3600;
     const lastNotified = monitorState.lastOpenRouterNotified || 0;
-    const newModels = (data.data || [])
-      .filter(m => (m.created || 0) >= cutoff && (m.created || 0) > lastNotified)
-      .sort((a, b) => (a.created || 0) - (b.created || 0));
+    const notifiedIds = new Set(monitorState.notifiedOpenRouterModelIds || []);
+    const newModels = models
+      .filter(m => (m.created || 0) >= cutoff && ((m.created || 0) > lastNotified || !notifiedIds.has(m.id)))
+      .sort((a, b) => (b.created || 0) - (a.created || 0));
 
     if (!newModels.length) {
       log("OpenRouter: no new models since last check");
       return;
     }
 
-    const list = newModels.slice(0, 20).map(m => {
+    const visibleModels = newModels.slice(0, 20);
+    const list = visibleModels.map(m => {
       const date = m.created
         ? new Date(m.created * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
         : 'Unknown';
       const desc = m.description
-        ? (m.description.length > 180 ? m.description.slice(0, 180).trim().replace(/[.,;:\s]+$/, '') + '…' : m.description)
+        ? stripLeadingModelName(m.name || m.id, m.description)
         : 'No description';
-      return { n: m.name || m.id, i: m.id, d: date, t: desc };
+      const shortDesc = desc.length > 220
+        ? `${desc.slice(0, 220).trim().replace(/[.,;:\s]+$/, '')}…`
+        : desc;
+      return { n: m.name || m.id, i: m.id, d: date, t: shortDesc, c: m.context_length || m.top_provider?.context_length || 0, p: m.pricing?.prompt || '0', q: m.pricing?.completion || '0' };
     });
-    const extra = newModels.length > 20 ? `...and ${newModels.length - 20} more` : '';
+    const extra = newModels.length > 20 ? `${newModels.length - 20} more models in this update` : 'Source: OpenRouter';
 
-    // render image (Linear-style cards, JS-only via @napi-rs/canvas)
-    const imgPath = path.join(os.tmpdir(), 'openrouter_models.png');
     try {
-      const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
-      const F = '/data/data/com.termux/files/usr/share/fonts/TTF/';
-      GlobalFonts.registerFromPath(F + 'DejaVuSans.ttf', 'Body');
-      GlobalFonts.registerFromPath(F + 'DejaVuSans-Bold.ttf', 'Bold');
-      GlobalFonts.registerFromPath(F + 'DejaVuSans-Oblique.ttf', 'Italic');
-
-      const W = 640, pad = 32, gap = 16;
-      const tF = '24px Bold', tS = 24, mF = '18px Body', mS = 18, sF = '16px Italic', sS = 16, pF = '13px Bold';
-      const cw = W - pad * 2;
-      const inner = cw - 36; // card inner padding
-
-      const canvas0 = createCanvas(W, 10), ctx0 = canvas0.getContext('2d');
-      const measure = (text, font, maxW) => {
-        ctx0.font = font;
-        const out = [];
-        let line = '';
-        for (const w of text.split(' ')) {
-          const t = (line + ' ' + w).trim();
-          if (ctx0.measureText(t).width <= maxW) line = t;
-          else { out.push(line); line = w; }
-        }
-        if (line) out.push(line);
-        return out;
-      };
-
-      // pass 1: layout every card, collect lines + height
-      const layouts = list.map(m => {
-        const title = measure(m.n, tF, inner);
-        const desc = measure(m.t, mF, inner);
-        const h = 20 + 22 + 12 + (title.length * (tS + 6)) + 10 + (sS + 8) + 12 + (desc.length * (mS + 8)) + 20;
-        return { m, title, desc, h };
-      });
-      const maxH = Math.max(...layouts.map(l => l.h));
-      const H = pad + 36 + 8 + sS + 12 + layouts.length * (maxH + gap) - gap + pad;
-
-      const c = createCanvas(W, H), ctx = c.getContext('2d');
-      ctx.fillStyle = '#08090a';
-      ctx.fillRect(0, 0, W, H);
-
-      let y = pad;
-      ctx.fillStyle = '#f7f8f8'; ctx.font = '30px Bold';
-      ctx.fillText('New OpenRouter Models', pad, y + 30);
-      y += 44;
-      ctx.fillStyle = '#8a8f98'; ctx.font = sF;
-      ctx.fillText(`${list.length} new models added`, pad, y + 16);
-      y += 36;
-
-      for (const { m, title, desc } of layouts) {
-        ctx.fillStyle = '#191a1b';
-        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(pad, y, cw, maxH, 12);
-        ctx.fill(); ctx.stroke();
-
-        let cy = y + 20;
-        // pill
-        ctx.font = pF;
-        const pw = ctx.measureText('NEW').width + 20;
-        ctx.fillStyle = '#5e6ad2';
-        ctx.beginPath();
-        ctx.roundRect(pad + 18, cy, pw, 22, 999);
-        ctx.fill();
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText('NEW', pad + 28, cy + 15);
-        cy += 22 + 12;
-
-        // title
-        ctx.fillStyle = '#f7f8f8'; ctx.font = tF;
-        for (const line of title) {
-          ctx.fillText(line, pad + 18, cy + tS);
-          cy += tS + 6;
-        }
-        cy += 10;
-
-        // meta
-        ctx.fillStyle = '#8a8f98'; ctx.font = sF;
-        ctx.fillText(`${m.i}  ·  ${m.d}`, pad + 18, cy + sS);
-        cy += sS + 12;
-
-        // desc
-        ctx.fillStyle = '#d0d6e0'; ctx.font = mF;
-        for (const line of desc) {
-          ctx.fillText(line, pad + 18, cy + mS);
-          cy += mS + 8;
-        }
-        y += maxH + gap;
-      }
-
-      if (extra) {
-        ctx.fillStyle = '#8a8f98'; ctx.font = sF;
-        ctx.fillText(extra, pad, y + 16);
-      }
-
-      fs.writeFileSync(imgPath, c.toBuffer('image/png'));
-      const FormData = (await import('form-data')).default;
-      const form = new FormData();
+      const png = renderNewModelsImage(list, newModels.length, extra);
+      const form = new globalThis.FormData();
       form.append('chat_id', TELEGRAM_CHAT_ID);
       form.append('message_thread_id', TOPIC_ID_STATUS);
-      form.append('caption', `<b>🧠 New OpenRouter Models</b> (${newModels.length})`);
+      form.append('caption', `<b>New OpenRouter Models</b> (${newModels.length})`);
       form.append('parse_mode', 'HTML');
-      form.append('photo', fs.createReadStream(imgPath));
-      const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+      form.append('photo', new Blob([png], { type: 'image/png' }), 'openrouter_models.png');
+      const res = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+      const newestCreated = Math.max(...newModels.map(m => m.created || 0));
       if (res.ok) {
-        monitorState.lastOpenRouterNotified = Math.max(...newModels.map(m => m.created || 0));
+        const sentIds = new Set(monitorState.notifiedOpenRouterModelIds || []);
+        for (const model of visibleModels) sentIds.add(model.id);
+        monitorState.notifiedOpenRouterModelIds = [...sentIds].slice(-500);
+        monitorState.lastOpenRouterNotified = Math.max(
+          monitorState.lastOpenRouterNotified || 0,
+          newestCreated
+        );
         saveMonitorState();
       } else {
-        log(`photo send failed: ${res.status}`);
+        log(`document send failed: ${res.status}`);
       }
     } catch (err) {
       log(`image render failed (${err.message})`);
@@ -430,87 +523,172 @@ async function checkOpenRouterModels() {
   }
 }
 
-// ================== OPENROUTER TOP WEEKLY ==================
+// Weekly ranking: compact technical rows with one deliberate accent.
 function renderRankingsImage(rows) {
   const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
   const F = '/data/data/com.termux/files/usr/share/fonts/TTF/';
   GlobalFonts.registerFromPath(F + 'DejaVuSans.ttf', 'Body');
   GlobalFonts.registerFromPath(F + 'DejaVuSans-Bold.ttf', 'Bold');
-  GlobalFonts.registerFromPath(F + 'DejaVuSans-Oblique.ttf', 'Italic');
+  GlobalFonts.registerFromPath(F + 'DejaVuSansMono.ttf', 'Mono');
+  GlobalFonts.registerFromPath(F + 'DejaVuSansMono-Bold.ttf', 'MonoBold');
 
-  const W = 640, pad = 32, gap = 12;
-  const cardH = 62;
-  const H = pad + 48 + 26 + 10 + rows.length * (cardH + gap) - gap + pad;
+  const W = 1200, pad = 48, headerH = 190, rowH = 90, gap = 8;
+  const H = headerH + rows.length * (rowH + gap) - gap + 48;
   const c = createCanvas(W, H), ctx = c.getContext('2d');
+  const colors = {
+    bg: '#050706', panel: '#0B0E0C', line: '#202621', white: '#F7F9F7',
+    muted: '#A4ADA6', green: '#76B900', greenBright: '#B7F34A'
+  };
 
-  ctx.fillStyle = '#08090a';
+  ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, W, H);
-  let y = pad;
-  ctx.fillStyle = '#f7f8f8'; ctx.font = '30px Bold';
-  ctx.fillText('Top OpenRouter Models', pad, y + 30);
-  y += 40;
-  ctx.fillStyle = '#8a8f98'; ctx.font = '17px Italic';
-  ctx.fillText('Weekly usage by tokens processed', pad, y + 17);
-  y += 36;
+  ctx.fillStyle = colors.green;
+  ctx.fillRect(0, 0, W, 8);
 
+  const now = new Date();
+  const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Makassar', day: '2-digit', month: 'long', year: 'numeric'
+  }).formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  const start = new Date(Date.UTC(Number(dateParts.year), 0, 1));
+  const current = new Date(Date.UTC(Number(dateParts.year), new Date(`${dateParts.month} 1, ${dateParts.year}`).getUTCMonth(), Number(dateParts.day)));
+  const week = Math.ceil((((current - start) / 86400000) + start.getUTCDay() + 1) / 7);
+
+  ctx.fillStyle = colors.white;
+  ctx.font = '600 48px Body';
+  ctx.fillText('OpenRouter weekly', pad, 73);
+  ctx.font = '22px Mono';
+  ctx.fillStyle = colors.greenBright;
+  ctx.fillText('TOP 10 BY TOTAL TOKENS', pad, 111);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = colors.muted;
+  ctx.font = '18px Mono';
+  ctx.fillText(`WEEK ${String(week).padStart(2, '0')} / ${dateParts.year}`, W - pad, 72);
+  ctx.font = '16px Body';
+  ctx.fillText(`${dateParts.day} ${dateParts.month.toUpperCase()}`, W - pad, 104);
+  ctx.textAlign = 'left';
+
+  ctx.fillStyle = colors.panel;
+  ctx.beginPath(); ctx.roundRect(pad, 132, W - pad * 2, 34, 2); ctx.fill();
+  ctx.fillStyle = colors.muted;
+  ctx.font = '600 14px Mono';
+  ctx.fillText('RANK', pad + 18, 154);
+  ctx.fillText('MODEL / PROVIDER', 146, 154);
+  ctx.textAlign = 'right';
+  ctx.fillText('TOKENS PROCESSED', W - pad - 18, 154);
+  ctx.textAlign = 'left';
+
+  const fitText = (text, font, maxW) => {
+    ctx.font = font;
+    let value = String(text ?? '');
+    if (ctx.measureText(value).width <= maxW) return value;
+    while (value.length && ctx.measureText(`${value}…`).width > maxW) value = value.slice(0, -1);
+    return `${value}…`;
+  };
+  const formatTokens = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return 'N/A';
+    if (n >= 1e12) return `${(n / 1e12).toFixed(n % 1e12 ? 1 : 0)}T`;
+    if (n >= 1e9) return `${(n / 1e9).toFixed(n % 1e9 ? 1 : 0)}B`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(n % 1e3 ? 1 : 0)}K`;
+    return String(Math.round(n));
+  };
+
+  const maxTokens = Math.max(...rows.map(r => Number(r.tokens) || 0), 1);
+  const modelX = 146, modelMaxW = 590, barX = 780, barW = 190, numberX = W - pad - 18;
+  let y = headerH;
   rows.forEach((r, i) => {
-    ctx.fillStyle = '#191a1b';
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillStyle = i === 0 ? '#10180C' : i % 2 ? '#090C0A' : colors.bg;
+    ctx.fillRect(pad, y, W - pad * 2, rowH);
+    if (i === 0) {
+      ctx.fillStyle = colors.green;
+      ctx.fillRect(pad, y, 5, rowH);
+    }
+    ctx.fillStyle = i === 0 ? colors.greenBright : colors.muted;
+    ctx.font = '700 24px MonoBold';
+    ctx.fillText(String(i + 1).padStart(2, '0'), pad + 18, y + 51);
+    ctx.fillStyle = colors.white;
+    ctx.font = '600 27px Body';
+    ctx.fillText(fitText(r.name, '600 27px Body', modelMaxW), modelX, y + 39);
+    ctx.fillStyle = colors.muted;
+    ctx.font = '17px Body';
+    ctx.fillText(fitText(r.author, '17px Body', modelMaxW), modelX, y + 66);
+    const barWidth = Math.max(2, barW * (Number(r.tokens) || 0) / maxTokens);
+    ctx.fillStyle = colors.line;
+    ctx.fillRect(barX, y + 52, barW, 5);
+    ctx.fillStyle = i === 0 ? colors.greenBright : colors.green;
+    ctx.fillRect(barX, y + 52, barWidth, 5);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = colors.white;
+    ctx.font = '700 28px MonoBold';
+    ctx.fillText(formatTokens(r.tokens), numberX, y + 51);
+    ctx.fillStyle = colors.muted;
+    ctx.font = '13px Mono';
+    ctx.fillText('TOKENS', numberX, y + 73);
+    ctx.textAlign = 'left';
+    ctx.strokeStyle = colors.line;
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(pad, y, W - pad * 2, cardH, 12);
-    ctx.fill(); ctx.stroke();
-
-    // rank pill
-    const top = i < 3;
-    ctx.font = '18px Bold';
-    const rw = ctx.measureText(String(i + 1)).width + 30;
-    ctx.fillStyle = top ? '#5e6ad2' : 'rgba(255,255,255,0.06)';
-    ctx.beginPath();
-    ctx.roundRect(pad + 16, y + cardH / 2 - 16, rw, 32, 999);
-    ctx.fill();
-    ctx.fillStyle = top ? '#ffffff' : '#8a8f98';
-    ctx.fillText(String(i + 1), pad + 31, y + cardH / 2 + 6);
-
-    // name + provider
-    ctx.fillStyle = '#f7f8f8'; ctx.font = '21px Body';
-    ctx.fillText(r.name, pad + 16 + rw + 18, y + 27);
-    ctx.fillStyle = '#8a8f98'; ctx.font = '16px Italic';
-    ctx.fillText(r.author, pad + 16 + rw + 18, y + 49);
-
-    y += cardH + gap;
+    ctx.beginPath(); ctx.moveTo(pad, y + rowH); ctx.lineTo(W - pad, y + rowH); ctx.stroke();
+    y += rowH + gap;
   });
 
+  ctx.fillStyle = colors.muted;
+  ctx.font = '15px Body';
+  ctx.fillText('Prompt + completion tokens · Source: OpenRouter', pad, H - 24);
+  ctx.textAlign = 'right';
+  ctx.font = '600 15px Mono';
+  ctx.fillText('WEEKLY RANKING', W - pad, H - 24);
   return c.toBuffer('image/png');
 }
 
 async function checkTopWeekly() {
   log("Checking OpenRouter top weekly...");
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/models?sort=top-weekly&limit=10');
-    if (!res.ok) {
-      log(`Rankings fetch failed: ${res.status}`);
+    const [modelsRes, rankingsRes] = await Promise.all([
+      nativeFetch('https://openrouter.ai/api/v1/models?sort=top-weekly&limit=10'),
+      nativeFetch('https://openrouter.ai/api/frontend/v1/rankings/models?view=week&metric=tokens'),
+    ]);
+    if (!modelsRes.ok) {
+      log(`Rankings model fetch failed: ${modelsRes.status}`);
       return;
     }
-    const data = await res.json();
-    const rows = (data.data || []).slice(0, 10).map(m => ({
-      name: (m.name || m.id).replace(/^[^:]+:\s*/, ''),
-      author: (m.id || '').split('/')[0],
-    }));
+    if (!rankingsRes.ok) {
+      log(`Rankings token fetch failed: ${rankingsRes.status}`);
+      return;
+    }
+
+    const [modelsData, rankingsData] = await Promise.all([modelsRes.json(), rankingsRes.json()]);
+    const tokenTotals = new Map();
+    for (const item of rankingsData.data || []) {
+      const key = [item.model_permaslug, item.variant || 'standard'].join('|');
+      const total = Number(item.total_tokens ?? ((item.total_prompt_tokens || 0) + (item.total_completion_tokens || 0)));
+      if (Number.isFinite(total)) tokenTotals.set(key, (tokenTotals.get(key) || 0) + total);
+    }
+
+    const rows = (modelsData.data || []).slice(0, 10).map(m => {
+      const variant = m.id.endsWith(':free') ? 'free' : 'standard';
+      const canonicalSlug = m.canonical_slug || m.id.replace(/:free$/, '');
+      const key = [canonicalSlug, variant].join('|');
+      const tokens = tokenTotals.get(key);
+      return {
+        name: (m.name || m.id).replace(/^[^:]+:\s*/, ''),
+        author: (m.id || '').split('/')[0],
+        tokens: Number.isFinite(tokens) ? tokens : null,
+      };
+    });
     if (!rows.length) {
       log('Rankings: no rows parsed');
       return;
     }
     log(`Rankings: ${rows.length} models, #1 ${rows[0].name}`);
     const png = renderRankingsImage(rows);
-    const FormData = (await import('form-data')).default;
-    const form = new FormData();
+    const form = new globalThis.FormData();
     form.append('chat_id', TELEGRAM_CHAT_ID);
     form.append('message_thread_id', TOPIC_ID_STATUS);
-    form.append('caption', `<b>🏆 OpenRouter Top Weekly Models</b>`);
+    form.append('caption', `<b>OpenRouter Top Weekly Models</b>`);
     form.append('parse_mode', 'HTML');
-    form.append('photo', png, { filename: 'top_weekly.png', contentType: 'image/png' });
-    const send = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+    form.append('photo', new Blob([png], { type: 'image/png' }), 'top_weekly.png');
+    const send = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
     if (!send.ok) log(`top weekly photo send failed: ${send.status}`);
     else log('Rankings: weekly image sent');
   } catch (err) {
