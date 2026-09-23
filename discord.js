@@ -1339,7 +1339,7 @@ async function updateServerStatsChannels(client) {
           let fetched = null;
           for (let attempt = 1; attempt <= 2; attempt++) {
             try {
-              fetched = await guild.members.fetch({ time: 30000 });
+              fetched = await guild.members.fetch({ time: 90000 });
               break;
             } catch (e) {
               if (attempt === 2) throw e;
