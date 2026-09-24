@@ -523,7 +523,6 @@ async function checkOpenRouterModels() {
   }
 }
 
-// Weekly ranking: compact technical rows with one deliberate accent.
 function renderRankingsImage(rows) {
   const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
   const F = '/data/data/com.termux/files/usr/share/fonts/TTF/';

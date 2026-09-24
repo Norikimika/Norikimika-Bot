@@ -1820,6 +1820,7 @@ const runRepo = require('./repo.js');
 const runMonitor = require('./monitor.js');
 const runNotification = require('./notification.js');
 const runDiscord = require('./discord.js');
+const { startBingRewards } = require('./bing.js');
 
 async function loop() {
   runRepo().catch((err) => {
@@ -1832,5 +1833,6 @@ loop();
 runMonitor();
 runNotification();
 runDiscord();
+startBingRewards(cron);
 
 execFile("termux-tts-speak", ["Bot launched"]);

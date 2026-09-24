@@ -478,7 +478,6 @@ class NotificationMonitor {
             execSync("cmd media_session dispatch pause", { stdio: 'ignore' });
             logger.info("Media playback paused");
 
-            // set STREAM_MUSIC ke max biar TTS jelas
             try {
                 const volumes = JSON.parse(execSync("termux-volume", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 }));
                 const music = volumes.find((v) => String(v.stream).toLowerCase() === "music");
