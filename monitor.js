@@ -704,7 +704,7 @@ function startMonitor() {
   cron.schedule("0 0,12 * * *", runAutoSpeedtest, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("* * * * *", checkBatteryLevel, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("*/15 * * * *", checkOpenRouterModels, { scheduled: true, recoverMissedExecutions: false });
-  cron.schedule("0 5 * * *", checkTopWeekly, { scheduled: true, recoverMissedExecutions: false });
+  cron.schedule("0 1 * * *", checkTopWeekly, { scheduled: true, recoverMissedExecutions: false });
 }
 
 module.exports = startMonitor;
