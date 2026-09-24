@@ -659,22 +659,24 @@ async function checkTopWeekly() {
     const [modelsData, rankingsData] = await Promise.all([modelsRes.json(), rankingsRes.json()]);
     const tokenTotals = new Map();
     for (const item of rankingsData.data || []) {
-      const key = [item.model_permaslug, item.variant || 'standard'].join('|');
-      const total = Number(item.total_tokens ?? ((item.total_prompt_tokens || 0) + (item.total_completion_tokens || 0)));
-      if (Number.isFinite(total)) tokenTotals.set(key, (tokenTotals.get(key) || 0) + total);
+      const slug = item.variant_permaslug;
+      if (!slug) continue;
+      const total = (Number(item.total_prompt_tokens) || 0) + (Number(item.total_completion_tokens) || 0);
+      if (!Number.isFinite(total)) continue;
+      tokenTotals.set(slug, (tokenTotals.get(slug) || 0) + total);
     }
 
-    const rows = (modelsData.data || []).slice(0, 10).map(m => {
-      const variant = m.id.endsWith(':free') ? 'free' : 'standard';
-      const canonicalSlug = m.canonical_slug || m.id.replace(/:free$/, '');
-      const key = [canonicalSlug, variant].join('|');
-      const tokens = tokenTotals.get(key);
+    const rows = (modelsData.data || []).map(model => {
+      const canonicalSlug = model.canonical_slug || model.id.replace(/:[^/]+$/, '');
+      const variant = model.id.match(/:(free|batch)$/)?.[1] || 'standard';
+      const variantSlug = variant === 'standard' ? canonicalSlug : `${canonicalSlug}:${variant}`;
+      const tokens = tokenTotals.get(variantSlug);
       return {
-        name: (m.name || m.id).replace(/^[^:]+:\s*/, ''),
-        author: (m.id || '').split('/')[0],
+        name: (model.name || model.id).replace(/^[^:]+:\s*/, ''),
+        author: (model.id || '').split('/')[0],
         tokens: Number.isFinite(tokens) ? tokens : null,
       };
-    });
+    }).filter(row => row.tokens !== null).sort((a, b) => b.tokens - a.tokens).slice(0, 10);
     if (!rows.length) {
       log('Rankings: no rows parsed');
       return;
