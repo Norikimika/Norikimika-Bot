@@ -645,7 +645,7 @@ async function checkTopWeekly() {
   try {
     const [modelsRes, rankingsRes] = await Promise.all([
       nativeFetch('https://openrouter.ai/api/v1/models?sort=top-weekly&limit=10'),
-      nativeFetch('https://openrouter.ai/api/frontend/v1/rankings/models?view=week&metric=tokens'),
+      nativeFetch('https://openrouter.ai/api/frontend/v1/rankings/discovery?view=week&metric=tokens'),
     ]);
     if (!modelsRes.ok) {
       log(`Rankings model fetch failed: ${modelsRes.status}`);
@@ -658,25 +658,22 @@ async function checkTopWeekly() {
 
     const [modelsData, rankingsData] = await Promise.all([modelsRes.json(), rankingsRes.json()]);
     const tokenTotals = new Map();
-    for (const item of rankingsData.data || []) {
-      const slug = item.variant_permaslug;
-      if (!slug) continue;
-      const total = (Number(item.total_prompt_tokens) || 0) + (Number(item.total_completion_tokens) || 0);
+    for (const [key, entry] of Object.entries(rankingsData.data?.totals || {})) {
+      const model = key.replace(/:[a-z0-9-]+$/, '');
+      const total = Number(entry?.t) || 0;
       if (!Number.isFinite(total)) continue;
-      tokenTotals.set(slug, (tokenTotals.get(slug) || 0) + total);
+      tokenTotals.set(model, (tokenTotals.get(model) || 0) + total);
     }
 
     const rows = (modelsData.data || []).map(model => {
       const canonicalSlug = model.canonical_slug || model.id.replace(/:[^/]+$/, '');
-      const variant = model.id.match(/:(free|batch)$/)?.[1] || 'standard';
-      const variantSlug = variant === 'standard' ? canonicalSlug : `${canonicalSlug}:${variant}`;
-      const tokens = tokenTotals.get(variantSlug);
+      const tokens = tokenTotals.get(canonicalSlug);
       return {
         name: (model.name || model.id).replace(/^[^:]+:\s*/, ''),
         author: (model.id || '').split('/')[0],
         tokens: Number.isFinite(tokens) ? tokens : null,
       };
-    }).filter(row => row.tokens !== null).sort((a, b) => b.tokens - a.tokens).slice(0, 10);
+    }).filter(row => row.tokens !== null).slice(0, 10);
     if (!rows.length) {
       log('Rankings: no rows parsed');
       return;

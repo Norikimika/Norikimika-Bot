@@ -118,16 +118,10 @@ Times use the device or host scheduler timezone.
 
 ```text
 https://openrouter.ai/api/v1/models?sort=top-weekly&limit=10
-https://openrouter.ai/api/frontend/v1/rankings/models?view=week&metric=tokens
+https://openrouter.ai/api/frontend/v1/rankings/discovery?view=week&metric=tokens
 ```
 
-Total tokens are calculated from:
-
-```text
-total_prompt_tokens + total_completion_tokens
-```
-
-Standard models, `:free`, and `:batch` variants are mapped to their matching variant slugs. Rows are sorted by total tokens before the ten highest-ranked models are sent to Telegram.
+The models endpoint is the source of both the row order and the row names, so the chart keeps the same order as the site page. The discovery endpoint supplies the weekly token total for each model, and its `:free` and `:batch` entries are merged into their parent model so a model is not undercounted when most of its traffic runs on a free variant.
 
 The OpenRouter frontend rankings endpoint is not documented as a stable public API. Its schema, filters, and availability may change. The image caption states the source and formula used.
 
