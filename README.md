@@ -51,7 +51,7 @@ Main variables:
 - `TOPIC_ID_*`: Topics for usage, status, speed tests, music, TikTok, receipts, and updates.
 - `DISCORD_BOT_TOKEN`, channel IDs, titles, text, and background files: Discord configuration.
 - `DISCORD_CHATBOT_CHANNEL_ID`: Discord channel that receives automatic chatbot replies.
-- `NINE_ROUTER_CHATBOT_MODEL`: Provider model ID used only by the Discord chatbot. The assistant name is always `Zero Two`.
+- `NINE_ROUTER_CHATBOT_MODEL`: Provider model ID used only by the Discord chatbot.
 - `SHEETS_ID`, `SHEETS_GID`: Price-list source.
 - `NINE_ROUTER_URL`, `NINE_ROUTER_API_KEY`: Shared OpenAI-compatible provider URL and API key.
 - `NINE_ROUTER_MODEL`: Model used for receipt analysis.
@@ -98,7 +98,7 @@ Some commands are restricted by topic and administrator permissions. Validation 
 
 ## Discord Chatbot
 
-Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to every non-bot message in that channel. Assistant name: `Zero Two`. It uses the shared `NINE_ROUTER_URL` and `NINE_ROUTER_API_KEY`, with the separate `NINE_ROUTER_CHATBOT_MODEL`, and does not keep conversation history. The bot replies only to messages in the configured channel and ignores other channels.
+Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to every non-bot message in that channel. It uses the shared `NINE_ROUTER_URL` and `NINE_ROUTER_API_KEY`, with the separate `NINE_ROUTER_CHATBOT_MODEL`, and does not keep conversation history. The bot replies only to messages in the configured channel and ignores other channels.
 
 ## Service Schedule
 
