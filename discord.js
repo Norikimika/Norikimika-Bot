@@ -1118,6 +1118,41 @@ const GOODBYE_CHANNEL_ID = process.env.DISCORD_GOODBYE_CHANNEL_ID;
 const GOODBYE_TEXT = process.env.DISCORD_GOODBYE_TEXT;
 const GOODBYE_BG_FILE = process.env.DISCORD_GOODBYE_BG_FILE;
 const GOODBYE_TITLE = process.env.DISCORD_GOODBYE_TITLE;
+const DISCORD_CHATBOT_CHANNEL_ID = process.env.DISCORD_CHATBOT_CHANNEL_ID;
+const DISCORD_CHATBOT_URL = process.env.NINE_ROUTER_URL;
+const DISCORD_CHATBOT_API_KEY = process.env.NINE_ROUTER_API_KEY;
+const DISCORD_CHATBOT_MODEL = process.env.NINE_ROUTER_CHATBOT_MODEL;
+const DISCORD_CHATBOT_NAME = "Zero Two";
+const DISCORD_CHATBOT_MAX_LENGTH = 2000;
+
+function buildChatbotEndpoint(rawUrl) {
+  const baseUrl = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!baseUrl) return "";
+  return baseUrl.endsWith("/chat/completions")
+    ? baseUrl
+    : baseUrl.endsWith("/v1")
+    ? `${baseUrl}/chat/completions`
+    : `${baseUrl}/v1/chat/completions`;
+}
+
+function extractChatbotText(data) {
+  const content = data?.choices?.[0]?.message?.content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part?.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("")
+      .trim();
+  }
+  return typeof content === "string" ? content.trim() : "";
+}
+
+function shouldReplyToDiscordMessage(message, channelId) {
+  if (!channelId || !message || message.author?.bot || !message.guild) return false;
+  if (message.channel?.id !== String(channelId)) return false;
+  if (typeof message.channel.isTextBased === "function" && !message.channel.isTextBased()) return false;
+  return typeof message.content === "string" && message.content.trim().length > 0;
+}
 
 let canvasLib = null;
 function getCanvasLib() {
@@ -1579,6 +1614,44 @@ function runDiscord() {
 
   discordClient.on("messageCreate", async (message) => {
     if (message.author.bot || !message.guild) return;
+
+    if (shouldReplyToDiscordMessage(message, DISCORD_CHATBOT_CHANNEL_ID)) {
+      message.channel.sendTyping().catch(() => {});
+      const prompt = message.content.trim().slice(0, DISCORD_CHATBOT_MAX_LENGTH);
+      try {
+        if (!DISCORD_CHATBOT_URL || !DISCORD_CHATBOT_API_KEY || !DISCORD_CHATBOT_MODEL) {
+          log("[Chatbot] Missing NINE_ROUTER_URL, NINE_ROUTER_API_KEY, or NINE_ROUTER_CHATBOT_MODEL");
+          return;
+        }
+        const endpoint = buildChatbotEndpoint(DISCORD_CHATBOT_URL);
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${DISCORD_CHATBOT_API_KEY}`,
+          },
+          signal: AbortSignal.timeout(60000),
+          body: JSON.stringify({
+            model: DISCORD_CHATBOT_MODEL,
+            messages: [
+              { role: "system", content: `Your name is ${DISCORD_CHATBOT_NAME}.` },
+              { role: "user", content: prompt },
+            ],
+            stream: false,
+          }),
+        });
+        if (!response.ok) {
+          log(`[Chatbot] Provider HTTP ${response.status}`);
+          return;
+        }
+        const text = extractChatbotText(await response.json());
+        if (text) await message.reply(text.slice(0, DISCORD_CHATBOT_MAX_LENGTH));
+        else log("[Chatbot] Provider returned an empty response");
+      } catch (err) {
+        log(`[Chatbot] ${err.message}`);
+      }
+      return;
+    }
 
     const content = message.content.trim();
     if (!content.startsWith("!")) return;

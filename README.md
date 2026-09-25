@@ -8,7 +8,7 @@ Telegram bot for Termux with device monitoring, Android notification monitoring,
 - Battery monitoring, data usage reports, scheduled speed tests, new OpenRouter model alerts, and weekly OpenRouter rankings.
 - GitHub and GitLab repository update checks.
 - Android notification monitoring.
-- Discord voice playback, server statistics, and welcome or goodbye messages.
+- Discord voice playback, server statistics, welcome or goodbye messages, and a channel-specific chatbot.
 - Bing Rewards automation through Android UI automation.
 
 ## Requirements
@@ -50,8 +50,11 @@ Main variables:
 - `BOT_TOKEN`, `CHAT_ID`, `TOPIC_ID`: Telegram authentication and topic routing.
 - `TOPIC_ID_*`: Topics for usage, status, speed tests, music, TikTok, receipts, and updates.
 - `DISCORD_BOT_TOKEN`, channel IDs, titles, text, and background files: Discord configuration.
+- `DISCORD_CHATBOT_CHANNEL_ID`: Discord channel that receives automatic chatbot replies.
+- `NINE_ROUTER_CHATBOT_MODEL`: Provider model ID used only by the Discord chatbot. The assistant name is always `Zero Two`.
 - `SHEETS_ID`, `SHEETS_GID`: Price-list source.
-- `NINE_ROUTER_URL`, `NINE_ROUTER_API_KEY`, `NINE_ROUTER_MODEL`: Receipt analysis.
+- `NINE_ROUTER_URL`, `NINE_ROUTER_API_KEY`: Shared OpenAI-compatible provider URL and API key.
+- `NINE_ROUTER_MODEL`: Model used for receipt analysis.
 - `PRINT_CMD`: Receipt printing command.
 - `GITHUB_TOKEN`, `GITLAB_TOKEN`: Repository monitor access tokens, when required.
 - `STORE_NAME`, `STORE_ADDRESS`, `STRUK_FONT`, `STRUK_FONTSIZE`: Receipt configuration.
@@ -92,6 +95,10 @@ node index.js
 | `/reboot` | Reboot the device. |
 
 Some commands are restricted by topic and administrator permissions. Validation and allowed topics come from the configuration.
+
+## Discord Chatbot
+
+Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to every non-bot message in that channel. Assistant name: `Zero Two`. It uses the shared `NINE_ROUTER_URL` and `NINE_ROUTER_API_KEY`, with the separate `NINE_ROUTER_CHATBOT_MODEL`, and does not keep conversation history. The bot replies only to messages in the configured channel and ignores other channels.
 
 ## Service Schedule
 
