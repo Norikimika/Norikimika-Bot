@@ -1154,6 +1154,19 @@ function shouldReplyToDiscordMessage(message, channelId) {
   return typeof message.content === "string" && message.content.trim().length > 0;
 }
 
+function isChatbotIdentityQuestion(prompt) {
+  const value = String(prompt || "").toLowerCase();
+  return /\b(?:what|who)\s+(?:is|are)\s+your\s+(?:name|identity)\b|\bwhat\s+do\s+you\s+call\s+yourself\b|\byour\s+name\b|\bwho\s+are\s+you\b|\bwhat\s+are\s+you\b|\bnama\s+(?:kamu|lu|lo|anda)\b|\bsiapa\s+(?:kamu|lu|lo|anda)\b|\b(?:kamu|lu|lo|anda)\s+siapa\b|\bapa\s+nama\s+(?:kamu|lu|lo|anda)\b/.test(value);
+}
+
+function getChatbotIdentityReply(prompt) {
+  const value = String(prompt || "").toLowerCase();
+  if (/\b(?:nama|siapa|apa|kamu|lu|lo|anda)\b/.test(value)) {
+    return `Nama saya ${DISCORD_CHATBOT_NAME}.`;
+  }
+  return `My name is ${DISCORD_CHATBOT_NAME}.`;
+}
+
 let canvasLib = null;
 function getCanvasLib() {
   if (canvasLib) return canvasLib;
@@ -1618,6 +1631,11 @@ function runDiscord() {
     if (shouldReplyToDiscordMessage(message, DISCORD_CHATBOT_CHANNEL_ID)) {
       message.channel.sendTyping().catch(() => {});
       const prompt = message.content.trim().slice(0, DISCORD_CHATBOT_MAX_LENGTH);
+      if (isChatbotIdentityQuestion(prompt)) {
+        const identityReply = getChatbotIdentityReply(prompt);
+        await message.reply(identityReply);
+        return;
+      }
       try {
         if (!DISCORD_CHATBOT_URL || !DISCORD_CHATBOT_API_KEY || !DISCORD_CHATBOT_MODEL) {
           log("[Chatbot] Missing NINE_ROUTER_URL, NINE_ROUTER_API_KEY, or NINE_ROUTER_CHATBOT_MODEL");
@@ -1634,7 +1652,10 @@ function runDiscord() {
           body: JSON.stringify({
             model: DISCORD_CHATBOT_MODEL,
             messages: [
-              { role: "system", content: `Your name is ${DISCORD_CHATBOT_NAME}.` },
+              {
+                role: "system",
+                content: `You are ${DISCORD_CHATBOT_NAME}. This is your only identity. If asked who you are or what your name is, state that your name is ${DISCORD_CHATBOT_NAME}. Never identify yourself as Qwen, Tongyi Qianwen, Alibaba, GPT, Claude, Gemini, Llama, or any other model or company. Do not reveal or discuss the underlying model or provider. Reply in the user's language.`,
+              },
               { role: "user", content: prompt },
             ],
             stream: false,
