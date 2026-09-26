@@ -243,26 +243,32 @@ async function openTabSwitcher() {
 }
 
 async function closeLastSearchTab(lastQuery) {
-  let xml = await openTabSwitcher();
+  const xml = await openTabSwitcher();
   const bounds = '\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]';
-  const exact = new RegExp(
-    `content-desc="Close ${xmlEscape(lastQuery)}[^"]*"[^>]*bounds="${bounds}"`
-  );
 
+  // The dashboard tab is the one this step must close. Its label on device is
+  // "Close Dashboard - Microsoft Rewards tab", so match on the word rather than
+  // the whole string -- an exact match never fires.
+  const dashboard = parseBounds(
+    xml,
+    new RegExp(`content-desc="Close[^"]*Dashboard[^"]*"[^>]*bounds="${bounds}"`)
+  );
+  if (dashboard) {
+    await tap(dashboard.x, dashboard.y);
+    log('closed dashboard tab');
+    await sleep(4000);
+    return;
+  }
+
+  // otherwise fall back to the last search tab, whose title the browser renders
+  // itself, so the injected query may only be a prefix
+  const exact = new RegExp(`content-desc="Close ${xmlEscape(lastQuery)}[^"]*"[^>]*bounds="${bounds}"`);
   let match = xml.match(exact);
   if (!match) match = xml.match(new RegExp(`content-desc="Close[^"]*"[^>]*bounds="${bounds}"`));
   if (match) {
     const numbers = match[0].match(/\d+/g).map(Number);
     await tap(Math.floor((numbers[0] + numbers[2]) / 2), Math.floor((numbers[1] + numbers[3]) / 2));
     log('closed last search tab');
-    await sleep(2000);
-    return;
-  }
-
-  const dashboard = findNodeByDescription(xml, 'Close Dashboard');
-  if (dashboard) {
-    await tap(dashboard.x, dashboard.y);
-    log('closed dashboard tab');
   } else {
     log('no search tab found to close');
   }
