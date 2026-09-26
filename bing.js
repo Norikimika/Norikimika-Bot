@@ -88,7 +88,11 @@ function parseBounds(xml, expression) {
 
 function findNodeByDescription(xml, description) {
   const escaped = description.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return parseBounds(xml, new RegExp(`content-desc="${escaped}"[^>]*bounds="\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]"`));
+  const bounds = '\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]';
+  // list rows and launcher icons carry their label in text=, not content-desc=
+  const byDesc = parseBounds(xml, new RegExp(`content-desc="${escaped}"[^>]*bounds="${bounds}"`));
+  if (byDesc) return byDesc;
+  return parseBounds(xml, new RegExp(`text="${escaped}"[^>]*bounds="${bounds}"`));
 }
 
 function findUrlBar(xml) {
