@@ -8,14 +8,22 @@ const SCHEDULE = '0 1 * * *';
 const MODE = 'all';
 const WORK_DIR = path.join(os.homedir(), 'SERVER', 'Backup');
 const LOG_PATH = path.join(WORK_DIR, 'bing.log');
-fs.mkdirSync(WORK_DIR, { recursive: true });
 const PRIMARY_PACKAGE = 'com.brave.browser';
 const CLONE_PACKAGE = 'com.multibox.clone.hub';
 const SEARCH_COUNT = 25;
+const URL_BAR_ATTEMPTS = 6;
+let workDirReady = false;
 let running = false;
+
+function ensureWorkDir() {
+  if (workDirReady) return;
+  fs.mkdirSync(WORK_DIR, { recursive: true });
+  workDirReady = true;
+}
 
 function log(message) {
   try {
+    ensureWorkDir();
     fs.appendFileSync(LOG_PATH, `[${new Date().toLocaleString()}] ${message}\n`);
   } catch (error) {
     console.error(`Bing rewards log failed: ${error.message}`);
@@ -84,7 +92,16 @@ function findNodeByDescription(xml, description) {
 }
 
 function findUrlBar(xml) {
-  return parseBounds(xml, /resource-id="com\.brave\.browser:id\/url_bar"[^>]*bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"/);
+  const bounds = '\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]';
+  const byId = parseBounds(
+    xml,
+    new RegExp(`resource-id="[a-zA-Z0-9_.]*:id/(url_bar|urlbar|omnibox|url_bar_container|search_bar|toolbar_url_box)"[^>]*bounds="${bounds}"`)
+  );
+  if (byId) return byId;
+  return parseBounds(
+    xml,
+    new RegExp(`content-desc="[^"]*(?:Search or enter|Enter a URL|Enter a web address|Search or type URL|Search Bing|Microsoft Edge)[^"]*"[^>]*bounds="${bounds}"`)
+  );
 }
 
 async function dumpUi(filename) {
@@ -100,10 +117,17 @@ async function tap(x, y) {
 
 async function tapUrlBar(mode) {
   const filename = mode === 'clone' ? 'clone-current.xml' : 'brave-current.xml';
-  const xml = await dumpUi(filename);
-  const bounds = findUrlBar(xml);
-  if (!bounds) throw new Error('Brave URL bar not found');
-  await tap(bounds.x, bounds.y);
+  for (let attempt = 1; attempt <= URL_BAR_ATTEMPTS; attempt++) {
+    const xml = await dumpUi(filename);
+    const bounds = findUrlBar(xml);
+    if (bounds) {
+      await tap(bounds.x, bounds.y);
+      return;
+    }
+    log(`url bar not found (${mode}), retry ${attempt}/${URL_BAR_ATTEMPTS}`);
+    await sleep(2000);
+  }
+  throw new Error(`URL bar not found in ${mode} after ${URL_BAR_ATTEMPTS} attempts`);
 }
 
 async function typeUrl(url) {
@@ -114,10 +138,8 @@ async function typeUrl(url) {
 }
 
 async function clearUrlBar() {
-  await shell('input keyevent KEYCODE_MOVE_END');
-  for (let index = 0; index < 20; index++) {
-    await shell('input keyevent KEYCODE_DEL');
-  }
+  await shell('input keycombination 113 29');
+  await shell('input keyevent KEYCODE_DEL');
 }
 
 async function searchAgain(url) {
@@ -134,9 +156,8 @@ async function openFirstSearch(url, mode) {
     const brave = findNodeByDescription(homeXml, 'Brave');
     if (brave) await tap(brave.x, brave.y);
     await sleep(7000);
-    await tap(766, 2268);
-    await sleep(3000);
-    const tabsXml = await dumpUi('clone-tabs.xml');
+    await openTabSwitcher();
+    const tabsXml = await dumpUi('tabs.xml');
     const newTab = findNodeByDescription(tabsXml, 'New tab');
     if (newTab) await tap(newTab.x, newTab.y);
     await sleep(4000);
@@ -205,24 +226,41 @@ async function claimIfReady() {
   await sleep(4000);
 }
 
-async function closeLastSearchTab(lastQuery) {
-  await tap(766, 2268);
-  await sleep(3000);
+async function openTabSwitcher() {
   const xml = await dumpUi('tabs.xml');
-  const label = `Close ${lastQuery} - Search tab`;
-  const match = xml.match(new RegExp(`content-desc="${xmlEscape(label)}"[^>]*bounds="\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]"`));
+  const switcher = findNodeByDescription(xml, 'Show tabs') || findNodeByDescription(xml, 'Tabs');
+  if (switcher) {
+    await tap(switcher.x, switcher.y);
+  } else {
+    await tap(766, 2268);
+  }
+  await sleep(3000);
+  return dumpUi('tabs.xml');
+}
+
+async function closeLastSearchTab(lastQuery) {
+  let xml = await openTabSwitcher();
+  const bounds = '\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]';
+  const exact = new RegExp(
+    `content-desc="Close ${xmlEscape(lastQuery)}[^"]*"[^>]*bounds="${bounds}"`
+  );
+
+  let match = xml.match(exact);
+  if (!match) match = xml.match(new RegExp(`content-desc="Close[^"]*"[^>]*bounds="${bounds}"`));
   if (match) {
     const numbers = match[0].match(/\d+/g).map(Number);
     await tap(Math.floor((numbers[0] + numbers[2]) / 2), Math.floor((numbers[1] + numbers[3]) / 2));
     log('closed last search tab');
+    await sleep(2000);
+    return;
+  }
+
+  const dashboard = findNodeByDescription(xml, 'Close Dashboard');
+  if (dashboard) {
+    await tap(dashboard.x, dashboard.y);
+    log('closed dashboard tab');
   } else {
-    const dashboard = findNodeByDescription(xml, 'Close Dashboard');
-    if (dashboard) {
-      await tap(dashboard.x, dashboard.y);
-      log('closed dashboard tab');
-    } else {
-      log('no search tab found to close');
-    }
+    log('no search tab found to close');
   }
   await sleep(2000);
 }
@@ -258,16 +296,18 @@ async function runRewards() {
   running = true;
   log('Bing Rewards started');
   try {
-    await runAccount('brave');
-    await sleep(3000);
-    await runAccount('clone');
+    for (const mode of ['brave', 'clone']) {
+      try {
+        if (mode === 'clone') await sleep(3000);
+        await runAccount(mode);
+      } catch (error) {
+        log(`Bing Rewards failed (${mode}): ${error.message}`);
+        try {
+          await shell(`am force-stop ${mode === 'clone' ? CLONE_PACKAGE : PRIMARY_PACKAGE}`);
+        } catch {}
+      }
+    }
     log('DONE all rewards');
-  } catch (error) {
-    log(`Bing Rewards failed: ${error.message}`);
-    try {
-      await shell(`am force-stop ${PRIMARY_PACKAGE}`);
-      await shell(`am force-stop ${CLONE_PACKAGE}`);
-    } catch {}
   } finally {
     cleanupArtifacts();
     running = false;
