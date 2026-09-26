@@ -334,8 +334,10 @@ function renderNewModelsImage(list, totalCount = list.length, extra = '') {
     return String(Math.round(n));
   };
   const formatPrice = (value) => {
+    if (value === null || value === undefined) return 'N/A';
+    if (typeof value === 'string' && value.trim() === '') return 'N/A';
     const n = Number(value);
-    if (!Number.isFinite(n)) return 'N/A';
+    if (!Number.isFinite(n) || n < 0) return 'N/A';
     if (n === 0) return 'Free';
     const perMillion = n * 1e6;
     return perMillion < 0.01 ? `$${perMillion.toFixed(4)}` : `$${perMillion.toFixed(2)}`;
