@@ -525,7 +525,7 @@ async function checkOpenRouterModels() {
   }
 }
 
-function renderRankingsImage(rows) {
+function renderLeaderboardImage(cfg) {
   const { createCanvas, GlobalFonts } = require('@napi-rs/canvas');
   const F = '/data/data/com.termux/files/usr/share/fonts/TTF/';
   GlobalFonts.registerFromPath(F + 'DejaVuSans.ttf', 'Body');
@@ -534,7 +534,7 @@ function renderRankingsImage(rows) {
   GlobalFonts.registerFromPath(F + 'DejaVuSansMono-Bold.ttf', 'MonoBold');
 
   const W = 1200, pad = 48, headerH = 190, rowH = 90, gap = 8;
-  const H = headerH + rows.length * (rowH + gap) - gap + 48;
+  const H = headerH + cfg.rows.length * (rowH + gap) - gap + 48;
   const c = createCanvas(W, H), ctx = c.getContext('2d');
   const colors = {
     bg: '#050706', panel: '#0B0E0C', line: '#202621', white: '#F7F9F7',
@@ -546,26 +546,18 @@ function renderRankingsImage(rows) {
   ctx.fillStyle = colors.green;
   ctx.fillRect(0, 0, W, 8);
 
-  const now = new Date();
-  const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Makassar', day: '2-digit', month: 'long', year: 'numeric'
-  }).formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
-  const start = new Date(Date.UTC(Number(dateParts.year), 0, 1));
-  const current = new Date(Date.UTC(Number(dateParts.year), new Date(`${dateParts.month} 1, ${dateParts.year}`).getUTCMonth(), Number(dateParts.day)));
-  const week = Math.ceil((((current - start) / 86400000) + start.getUTCDay() + 1) / 7);
-
   ctx.fillStyle = colors.white;
   ctx.font = '600 48px Body';
-  ctx.fillText('OpenRouter weekly', pad, 73);
+  ctx.fillText(cfg.title, pad, 73);
   ctx.font = '22px Mono';
   ctx.fillStyle = colors.greenBright;
-  ctx.fillText('TOP 10 BY TOTAL TOKENS', pad, 111);
+  ctx.fillText(cfg.subtitle, pad, 111);
   ctx.textAlign = 'right';
   ctx.fillStyle = colors.muted;
   ctx.font = '18px Mono';
-  ctx.fillText(`WEEK ${String(week).padStart(2, '0')} / ${dateParts.year}`, W - pad, 72);
+  ctx.fillText(cfg.headerRight[0], W - pad, 72);
   ctx.font = '16px Body';
-  ctx.fillText(`${dateParts.day} ${dateParts.month.toUpperCase()}`, W - pad, 104);
+  ctx.fillText(cfg.headerRight[1], W - pad, 104);
   ctx.textAlign = 'left';
 
   ctx.fillStyle = colors.panel;
@@ -573,32 +565,22 @@ function renderRankingsImage(rows) {
   ctx.fillStyle = colors.muted;
   ctx.font = '600 14px Mono';
   ctx.fillText('RANK', pad + 18, 154);
-  ctx.fillText('MODEL / PROVIDER', 146, 154);
+  ctx.fillText(cfg.modelColumn, 146, 154);
   ctx.textAlign = 'right';
-  ctx.fillText('TOKENS PROCESSED', W - pad - 18, 154);
+  ctx.fillText(cfg.metricColumn, W - pad - 18, 154);
   ctx.textAlign = 'left';
 
   const fitText = (text, font, maxW) => {
     ctx.font = font;
     let value = String(text ?? '');
     if (ctx.measureText(value).width <= maxW) return value;
-    while (value.length && ctx.measureText(`${value}…`).width > maxW) value = value.slice(0, -1);
-    return `${value}…`;
+    while (value.length && ctx.measureText(`${value}\u2026`).width > maxW) value = value.slice(0, -1);
+    return `${value}\u2026`;
   };
-  const formatTokens = (value) => {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n < 0) return 'N/A';
-    if (n >= 1e12) return `${(n / 1e12).toFixed(n % 1e12 ? 1 : 0)}T`;
-    if (n >= 1e9) return `${(n / 1e9).toFixed(n % 1e9 ? 1 : 0)}B`;
-    if (n >= 1e6) return `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
-    if (n >= 1e3) return `${(n / 1e3).toFixed(n % 1e3 ? 1 : 0)}K`;
-    return String(Math.round(n));
-  };
-
-  const maxTokens = Math.max(...rows.map(r => Number(r.tokens) || 0), 1);
+  const maxValue = Math.max(...cfg.rows.map(r => Number(r.value) || 0), 1);
   const modelX = 146, modelMaxW = 590, barX = 780, barW = 190, numberX = W - pad - 18;
   let y = headerH;
-  rows.forEach((r, i) => {
+  cfg.rows.forEach((r, i) => {
     ctx.fillStyle = i === 0 ? '#10180C' : i % 2 ? '#090C0A' : colors.bg;
     ctx.fillRect(pad, y, W - pad * 2, rowH);
     if (i === 0) {
@@ -613,8 +595,8 @@ function renderRankingsImage(rows) {
     ctx.fillText(fitText(r.name, '600 27px Body', modelMaxW), modelX, y + 39);
     ctx.fillStyle = colors.muted;
     ctx.font = '17px Body';
-    ctx.fillText(fitText(r.author, '17px Body', modelMaxW), modelX, y + 66);
-    const barWidth = Math.max(2, barW * (Number(r.tokens) || 0) / maxTokens);
+    ctx.fillText(fitText(r.sub, '17px Body', modelMaxW), modelX, y + 66);
+    const barWidth = Math.max(2, barW * (Number(r.value) || 0) / maxValue);
     ctx.fillStyle = colors.line;
     ctx.fillRect(barX, y + 52, barW, 5);
     ctx.fillStyle = i === 0 ? colors.greenBright : colors.green;
@@ -622,10 +604,10 @@ function renderRankingsImage(rows) {
     ctx.textAlign = 'right';
     ctx.fillStyle = colors.white;
     ctx.font = '700 28px MonoBold';
-    ctx.fillText(formatTokens(r.tokens), numberX, y + 51);
+    ctx.fillText(r.text, numberX, y + 51);
     ctx.fillStyle = colors.muted;
     ctx.font = '13px Mono';
-    ctx.fillText('TOKENS', numberX, y + 73);
+    ctx.fillText(cfg.valueLabel, numberX, y + 73);
     ctx.textAlign = 'left';
     ctx.strokeStyle = colors.line;
     ctx.lineWidth = 1;
@@ -635,11 +617,153 @@ function renderRankingsImage(rows) {
 
   ctx.fillStyle = colors.muted;
   ctx.font = '15px Body';
-  ctx.fillText('Prompt + completion tokens · Source: OpenRouter', pad, H - 24);
+  ctx.fillText(cfg.footer, pad, H - 24);
   ctx.textAlign = 'right';
   ctx.font = '600 15px Mono';
-  ctx.fillText('WEEKLY RANKING', W - pad, H - 24);
+  ctx.fillText(cfg.footerRight, W - pad, H - 24);
   return c.toBuffer('image/png');
+}
+
+function formatTokens(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 'N/A';
+  if (n >= 1e12) return `${(n / 1e12).toFixed(n % 1e12 ? 1 : 0)}T`;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(n % 1e9 ? 1 : 0)}B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(n % 1e3 ? 1 : 0)}K`;
+  return String(Math.round(n));
+}
+
+// One renderer for both digests. Two near-identical renderers drift apart on the
+// first tweak -- that is what made the Artificial Analysis card stop matching
+// OpenRouter, so the layout lives here exactly once and each digest only supplies
+// its own titles, column labels and row data.
+function renderRankingsImage(rows) {
+  const now = new Date();
+  const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Makassar', day: '2-digit', month: 'long', year: 'numeric'
+  }).formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  const start = new Date(Date.UTC(Number(dateParts.year), 0, 1));
+  const current = new Date(Date.UTC(Number(dateParts.year), new Date(`${dateParts.month} 1, ${dateParts.year}`).getUTCMonth(), Number(dateParts.day)));
+  const week = Math.ceil((((current - start) / 86400000) + start.getUTCDay() + 1) / 7);
+
+  return renderLeaderboardImage({
+    title: 'OpenRouter weekly',
+    subtitle: 'TOP 10 BY TOTAL TOKENS',
+    headerRight: [`WEEK ${String(week).padStart(2, '0')} / ${dateParts.year}`, `${dateParts.day} ${dateParts.month.toUpperCase()}`],
+    modelColumn: 'MODEL / PROVIDER',
+    metricColumn: 'TOKENS PROCESSED',
+    valueLabel: 'TOKENS',
+    footer: 'Prompt + completion tokens \u00b7 Source: OpenRouter',
+    footerRight: 'WEEKLY RANKING',
+    rows: rows.map(r => ({ name: r.name, sub: r.author, value: r.tokens, text: formatTokens(r.tokens) })),
+  });
+}
+
+// Artificial Analysis serves the LLM leaderboard as HTML, and the v2 JSON API
+// behind it needs a key we do not have. Parse the table rows directly. The header
+// is a two-row group -- a features ribbon above the real column names -- and both
+// would otherwise parse as a model, so they are dropped by name. Data columns are
+// then read at fixed positions, since every row keeps all nine cells and marks an
+// unmeasured one with "--". Scores carry footnote asterisks ("33 *").
+function parseAaTable(html) {
+  const rows = [];
+  const trs = String(html || '').match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  const clean = (c) => c
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+    .replace(/\s+/g, ' ').trim();
+
+  const num = (v) => {
+    const t = String(v).replace(/[$,*]/g, '').trim();
+    if (!t || t === '--' || !/^-?\d+(\.\d+)?$/.test(t)) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  for (const tr of trs) {
+    const cells = (tr.match(/<t[hd][^>]*>[\s\S]*?<\/t[hd]>/gi) || []).map(clean);
+    if (cells.length < 3) continue;
+    const name = cells[0];
+    // the features ribbon and the real header row both land here
+    if (!name || /^(features|intelligence|price|speed|latency|model|end-to-end response time)$/i.test(name)) continue;
+
+    // fixed column order: name, context, creator, index, cost, tokens/s, latency, total, link
+    const context = /^\d+(\.\d+)?\s?[KMB]$/i.test(cells[1] || '') ? cells[1] : '';
+    const creator = context ? (cells[2] || '') : (cells[1] || '');
+    const offset = context ? 3 : 2;
+    const index = num(cells[offset]);
+    if (index === null) continue; // not a model row
+
+    rows.push({
+      name,
+      creator,
+      context,
+      intelligence: index,
+      costPerTask: num(cells[offset + 1]),
+      tokensPerSec: num(cells[offset + 2]),
+      latency: num(cells[offset + 3]),
+      totalResponse: num(cells[offset + 4]),
+    });
+  }
+  return rows.filter((r) => r.intelligence !== null);
+}
+
+function renderAaImage(rows) {
+  const now = new Date();
+  const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Makassar', day: '2-digit', month: 'long', year: 'numeric'
+  }).formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+
+  return renderLeaderboardImage({
+    title: 'Artificial Analysis',
+    subtitle: 'TOP 10 BY INTELLIGENCE INDEX',
+    headerRight: [`${dateParts.year}`, `${dateParts.day} ${dateParts.month.toUpperCase()}`],
+    modelColumn: 'MODEL / CREATOR',
+    metricColumn: 'INTELLIGENCE INDEX',
+    valueLabel: 'INDEX',
+    footer: 'Artificial Analysis Intelligence Index \u00b7 Source: artificialanalysis.ai',
+    footerRight: 'LEADERBOARD',
+    rows: rows.map(r => ({
+      name: r.name,
+      sub: [r.creator, r.context ? `${r.context} ctx` : '', r.costPerTask !== null ? `$${r.costPerTask}/task` : ''].filter(Boolean).join(' \u00b7 '),
+      value: r.intelligence,
+      text: String(r.intelligence),
+    })),
+  });
+}
+
+async function checkArtificialAnalysis() {
+  log("Checking Artificial Analysis leaderboard...");
+  try {
+    const res = await nativeFetch('https://artificialanalysis.ai/leaderboards/models', {
+      headers: { Accept: 'text/html' },
+    });
+    if (!res.ok) { log(`AA fetch failed: ${res.status}`); return; }
+    const html = await res.text();
+
+    const table = (html.match(/<table[\s\S]*?<\/table>/i) || [])[0];
+    if (!table) { log('AA: no table in page'); return; }
+
+    const rows = parseAaTable(table);
+    if (!rows.length) { log('AA: no rows parsed'); return; }
+    rows.sort((a, b) => b.intelligence - a.intelligence);
+
+    log(`AA: ${rows.length} models, #1 ${rows[0].name} (${rows[0].intelligence})`);
+    const png = renderAaImage(rows.slice(0, 10));
+    const form = new globalThis.FormData();
+    form.append('chat_id', TELEGRAM_CHAT_ID);
+    form.append('message_thread_id', TOPIC_ID_STATUS);
+    form.append('caption', `<b>Artificial Analysis Top Models</b>\nBy Artificial Analysis Intelligence Index`);
+    form.append('parse_mode', 'HTML');
+    form.append('photo', new Blob([png], { type: 'image/png' }), 'aa_top.png');
+    const send = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
+    if (!send.ok) log(`AA photo send failed: ${send.status}`);
+    else log('AA: leaderboard image sent');
+  } catch (err) {
+    log(`AA check failed: ${err.message}`);
+  }
 }
 
 async function checkTopWeekly() {
@@ -705,6 +829,7 @@ function startMonitor() {
   cron.schedule("* * * * *", checkBatteryLevel, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("*/15 * * * *", checkOpenRouterModels, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("0 1 * * *", checkTopWeekly, { scheduled: true, recoverMissedExecutions: false });
+  cron.schedule("30 1 * * *", checkArtificialAnalysis, { scheduled: true, recoverMissedExecutions: false });
 }
 
 module.exports = startMonitor;
