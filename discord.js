@@ -1123,6 +1123,147 @@ const DISCORD_CHATBOT_URL = process.env.NINE_ROUTER_URL;
 const DISCORD_CHATBOT_API_KEY = process.env.NINE_ROUTER_API_KEY;
 const DISCORD_CHATBOT_MODEL = process.env.NINE_ROUTER_CHATBOT_MODEL;
 const DISCORD_CHATBOT_MAX_LENGTH = 2000;
+const DISCORD_CHATBOT_CONTEXT_TOKENS = Math.max(
+  1024,
+  Number(process.env.NINE_ROUTER_CHATBOT_CONTEXT) || 4096
+);
+const DISCORD_CHATBOT_MAX_STORED_TURNS = 200;
+const DISCORD_CHATBOT_RECENT_TURNS = 6;
+const DISCORD_CHATBOT_SUMMARY_TURNS = 40;
+const discordChatHistory = new Map();
+const CHAT_MEMORY_FILE = path.join(os.homedir(), "SERVER/Backup/memory.json");
+
+function estimateTokens(text) {
+  const s = String(text ?? "");
+  if (!s) return 0;
+  const wide = (s.match(/[\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFF60\uFFE0-\uFFE6]/g) || []).length;
+  const rest = s.length - wide;
+  return wide + Math.ceil(rest / 4);
+}
+
+function trimToTokenBudget(messages, budget) {
+  const list = Array.isArray(messages) ? messages : [];
+  if (!list.length) return [];
+  const limit = Math.max(0, Number(budget) || 0);
+  let total = 0;
+  let start = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    total += estimateTokens(list[i]?.content);
+    if (total > limit && i < list.length - 1) {
+      start = i + 1;
+      break;
+    }
+  }
+  if (list[start]?.role === "assistant") start++;
+  return list.slice(start);
+}
+
+function getChatHistory(userId) {
+  return (discordChatHistory.get(String(userId)) || []).map((m) => ({ ...m }));
+}
+
+function saveChatHistory() {
+  try {
+    const dirName = path.dirname(CHAT_MEMORY_FILE);
+    fs.mkdirSync(dirName, { recursive: true });
+    const data = Object.fromEntries(discordChatHistory);
+    const tmpPath = path.join(dirName, `chat_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.tmp`);
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tmpPath, CHAT_MEMORY_FILE);
+  } catch (err) {
+    log(`[Chatbot] Could not save chat history: ${err.message}`);
+  }
+}
+
+function loadChatHistory() {
+  try {
+    if (!fs.existsSync(CHAT_MEMORY_FILE)) return;
+    const parsed = JSON.parse(fs.readFileSync(CHAT_MEMORY_FILE, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    for (const [userId, turns] of Object.entries(parsed)) {
+      if (!Array.isArray(turns)) continue;
+      discordChatHistory.set(
+        userId,
+        turns
+          .filter((m) => m && (m.role === "user" || m.role === "assistant"))
+          .map((m) => ({ role: m.role, content: String(m.content ?? "") }))
+          .slice(-DISCORD_CHATBOT_MAX_STORED_TURNS)
+      );
+    }
+    log(`[Chatbot] Restored chat history for ${discordChatHistory.size} user(s)`);
+  } catch (err) {
+    log(`[Chatbot] Could not load chat history: ${err.message}`);
+  }
+}
+
+function recordChatTurn(userId, role, content) {
+  const key = String(userId);
+  const list = discordChatHistory.get(key) || [];
+  list.push({ role, content: String(content ?? "") });
+  while (list.length > DISCORD_CHATBOT_MAX_STORED_TURNS) list.shift();
+  discordChatHistory.set(key, list);
+  saveChatHistory();
+}
+
+function clearChatHistory(userId) {
+  discordChatHistory.delete(String(userId));
+  saveChatHistory();
+}
+
+const CHAT_SUMMARY_PREFIX = "Earlier in this conversation (summarised):\n";
+
+function buildCompressionPrompt(previousSummary, messages) {
+  const transcript = messages
+    .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
+    .join("\n");
+  return [
+    previousSummary
+      ? `Existing summary of earlier turns:\n${previousSummary.replace(CHAT_SUMMARY_PREFIX, "")}`
+      : "No earlier summary yet.",
+    "",
+    "New turns to fold in:",
+    transcript,
+    "",
+    "Write one short summary of everything above that would let you answer a",
+    "follow-up question without seeing the raw turns. Keep names, numbers,",
+    "decisions and any task the user asked for. Drop pleasantries. No preamble,",
+    "just the summary.",
+  ].join("\n");
+}
+
+async function compressToTokenBudget(messages, budget, summarize) {
+  const list = Array.isArray(messages) ? messages : [];
+  if (!list.length) return [];
+  const limit = Math.max(0, Number(budget) || 0);
+  const fits = trimToTokenBudget(list, limit);
+  if (fits.length === list.length) return list;
+
+  let recent = list.slice(-DISCORD_CHATBOT_RECENT_TURNS);
+  if (recent[0]?.role === "assistant") recent = recent.slice(1);
+  const older = list.slice(0, list.length - recent.length);
+  if (!older.length) return trimToTokenBudget(recent, limit);
+
+  const head = older.find((m) => String(m.content || "").startsWith(CHAT_SUMMARY_PREFIX));
+  const previousSummary = head ? String(head.content) : "";
+  const toFold = head ? older.filter((m) => m !== head) : older;
+
+  try {
+    const raw = await summarize(buildCompressionPrompt(previousSummary, toFold));
+    const summaryText = String(raw || "").trim();
+    if (!summaryText) return trimToTokenBudget(recent, limit);
+
+    const merged = [{ role: "system", content: CHAT_SUMMARY_PREFIX + summaryText }, ...recent];
+    const roomForSummary = limit - trimToTokenBudget(recent, limit).reduce(
+      (s, m) => s + estimateTokens(m.content), 0
+    );
+    if (roomForSummary < estimateTokens(merged[0].content)) {
+      return trimToTokenBudget(recent, limit);
+    }
+    return merged;
+  } catch {
+    return trimToTokenBudget(recent, limit);
+  }
+}
 
 function buildChatbotEndpoint(rawUrl) {
   const baseUrl = String(rawUrl || "").trim().replace(/\/+$/, "");
@@ -1144,6 +1285,32 @@ function extractChatbotText(data) {
       .trim();
   }
   return typeof content === "string" ? content.trim() : "";
+}
+
+async function requestChatCompletion(endpoint, content) {
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DISCORD_CHATBOT_API_KEY}`,
+      },
+      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify({
+        model: DISCORD_CHATBOT_MODEL,
+        messages: [{ role: "user", content }],
+        stream: false,
+      }),
+    });
+    if (!res.ok) {
+      log(`[Chatbot] Compression request failed: ${res.status}`);
+      return "";
+    }
+    return extractChatbotText(await res.json());
+  } catch (err) {
+    log(`[Chatbot] Compression request error: ${err.message}`);
+    return "";
+  }
 }
 
 function shouldReplyToDiscordMessage(message, channelId) {
@@ -1617,12 +1784,19 @@ function runDiscord() {
     if (shouldReplyToDiscordMessage(message, DISCORD_CHATBOT_CHANNEL_ID)) {
       message.channel.sendTyping().catch(() => {});
       const prompt = message.content.trim().slice(0, DISCORD_CHATBOT_MAX_LENGTH);
+      const userId = message.author?.id;
       try {
         if (!DISCORD_CHATBOT_URL || !DISCORD_CHATBOT_API_KEY || !DISCORD_CHATBOT_MODEL) {
           log("[Chatbot] Missing NINE_ROUTER_URL, NINE_ROUTER_API_KEY, or NINE_ROUTER_CHATBOT_MODEL");
           return;
         }
         const endpoint = buildChatbotEndpoint(DISCORD_CHATBOT_URL);
+        recordChatTurn(userId, "user", prompt);
+        const history = await compressToTokenBudget(
+          getChatHistory(userId),
+          DISCORD_CHATBOT_CONTEXT_TOKENS,
+          (compressionPrompt) => requestChatCompletion(endpoint, compressionPrompt)
+        );
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
@@ -1632,17 +1806,20 @@ function runDiscord() {
           signal: AbortSignal.timeout(60000),
           body: JSON.stringify({
             model: DISCORD_CHATBOT_MODEL,
-            messages: [{ role: "user", content: prompt }],
+            messages: history,
             stream: false,
           }),
         });
         if (!response.ok) {
+          if (response.status === 400) clearChatHistory(userId);
           log(`[Chatbot] Provider HTTP ${response.status}`);
           return;
         }
         const text = extractChatbotText(await response.json());
-        if (text) await message.reply(text.slice(0, DISCORD_CHATBOT_MAX_LENGTH));
-        else log("[Chatbot] Provider returned an empty response");
+        if (text) {
+          recordChatTurn(userId, "assistant", text);
+          await message.reply(text.slice(0, DISCORD_CHATBOT_MAX_LENGTH));
+        } else log("[Chatbot] Provider returned an empty response");
       } catch (err) {
         log(`[Chatbot] ${err.message}`);
       }
@@ -2081,6 +2258,7 @@ function runDiscord() {
   });
 
   // ================== LOGIN ==================
+  loadChatHistory();
   if (process.env.DISCORD_BOT_TOKEN) {
     discordClient.login(process.env.DISCORD_BOT_TOKEN).catch((err) => {
       log(`Discord Login Error: ${err.message}`);
