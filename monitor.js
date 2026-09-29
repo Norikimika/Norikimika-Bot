@@ -634,10 +634,6 @@ function formatTokens(value) {
   return String(Math.round(n));
 }
 
-// One renderer for both digests. Two near-identical renderers drift apart on the
-// first tweak -- that is what made the Artificial Analysis card stop matching
-// OpenRouter, so the layout lives here exactly once and each digest only supplies
-// its own titles, column labels and row data.
 function renderRankingsImage(rows) {
   const now = new Date();
   const dateParts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
@@ -660,12 +656,6 @@ function renderRankingsImage(rows) {
   });
 }
 
-// Artificial Analysis serves the LLM leaderboard as HTML, and the v2 JSON API
-// behind it needs a key we do not have. Parse the table rows directly. The header
-// is a two-row group -- a features ribbon above the real column names -- and both
-// would otherwise parse as a model, so they are dropped by name. Data columns are
-// then read at fixed positions, since every row keeps all nine cells and marks an
-// unmeasured one with "--". Scores carry footnote asterisks ("33 *").
 function parseAaTable(html) {
   const rows = [];
   const trs = String(html || '').match(/<tr[\s\S]*?<\/tr>/gi) || [];
@@ -686,15 +676,13 @@ function parseAaTable(html) {
     const cells = (tr.match(/<t[hd][^>]*>[\s\S]*?<\/t[hd]>/gi) || []).map(clean);
     if (cells.length < 3) continue;
     const name = cells[0];
-    // the features ribbon and the real header row both land here
     if (!name || /^(features|intelligence|price|speed|latency|model|end-to-end response time)$/i.test(name)) continue;
 
-    // fixed column order: name, context, creator, index, cost, tokens/s, latency, total, link
     const context = /^\d+(\.\d+)?\s?[KMB]$/i.test(cells[1] || '') ? cells[1] : '';
     const creator = context ? (cells[2] || '') : (cells[1] || '');
     const offset = context ? 3 : 2;
     const index = num(cells[offset]);
-    if (index === null) continue; // not a model row
+    if (index === null) continue;
 
     rows.push({
       name,
@@ -755,7 +743,7 @@ async function checkArtificialAnalysis() {
     const form = new globalThis.FormData();
     form.append('chat_id', TELEGRAM_CHAT_ID);
     form.append('message_thread_id', TOPIC_ID_STATUS);
-    form.append('caption', `<b>Artificial Analysis Top Models</b>\nBy Artificial Analysis Intelligence Index`);
+    form.append('caption', `<b>Artificial Analysis Top Models</b>`);
     form.append('parse_mode', 'HTML');
     form.append('photo', new Blob([png], { type: 'image/png' }), 'aa_top.png');
     const send = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });

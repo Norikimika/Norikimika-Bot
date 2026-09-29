@@ -89,7 +89,6 @@ function parseBounds(xml, expression) {
 function findNodeByDescription(xml, description) {
   const escaped = description.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const bounds = '\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]';
-  // list rows and launcher icons carry their label in text=, not content-desc=
   const byDesc = parseBounds(xml, new RegExp(`content-desc="${escaped}"[^>]*bounds="${bounds}"`));
   if (byDesc) return byDesc;
   return parseBounds(xml, new RegExp(`text="${escaped}"[^>]*bounds="${bounds}"`));
@@ -246,9 +245,6 @@ async function closeLastSearchTab(lastQuery) {
   const xml = await openTabSwitcher();
   const bounds = '\\[[0-9]+,[0-9]+\\]\\[[0-9]+,[0-9]+\\]';
 
-  // The dashboard tab is the one this step must close. Its label on device is
-  // "Close Dashboard - Microsoft Rewards tab", so match on the word rather than
-  // the whole string -- an exact match never fires.
   const dashboard = parseBounds(
     xml,
     new RegExp(`content-desc="Close[^"]*Dashboard[^"]*"[^>]*bounds="${bounds}"`)
@@ -260,8 +256,6 @@ async function closeLastSearchTab(lastQuery) {
     return;
   }
 
-  // otherwise fall back to the last search tab, whose title the browser renders
-  // itself, so the injected query may only be a prefix
   const exact = new RegExp(`content-desc="Close ${xmlEscape(lastQuery)}[^"]*"[^>]*bounds="${bounds}"`);
   let match = xml.match(exact);
   if (!match) match = xml.match(new RegExp(`content-desc="Close[^"]*"[^>]*bounds="${bounds}"`));
