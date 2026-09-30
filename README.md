@@ -5,10 +5,10 @@ Telegram bot for Termux with device monitoring, Android notification monitoring,
 ## Features
 
 - Telegram commands for prices, device status, data usage, speed tests, playback, media downloads, approvals, and reboots.
-- Battery monitoring, data usage reports, scheduled speed tests, new OpenRouter model alerts, and weekly OpenRouter rankings.
+- Battery monitoring, data usage reports, scheduled speed tests, new OpenRouter model alerts, weekly OpenRouter rankings, and an Artificial Analysis leaderboard digest.
 - GitHub and GitLab repository update checks.
 - Android notification monitoring.
-- Discord voice playback, server statistics, welcome or goodbye messages, and a channel-specific chatbot.
+- Discord voice playback, server statistics, welcome or goodbye messages, and a channel-specific chatbot with per-user compressed conversation history.
 - Bing Rewards automation through Android UI automation.
 
 ## Requirements
@@ -25,24 +25,26 @@ Telegram bot for Termux with device monitoring, Android notification monitoring,
   - `su`
   - Android `uiautomator` and the `input` command
 
-This repository does not include a `package.json` file. Install the following runtime dependencies in your deployment environment:
+Install the runtime dependencies with:
 
-```text
-dotenv
-node-fetch
-telegraf
-node-cron
-escape-html
-@napi-rs/canvas
-discord.js
-@discordjs/voice
+```bash
+npm install
 ```
+
+This repository ships a `package.json` and `package-lock.json`; `node-fetch` is no longer listed because the modules use Node's native `fetch`.
 
 ## Configuration
 
 1. Copy `.env.example` to a local `.env` file.
 2. Fill in the required values. Never use example tokens, API keys, or credentials as production values.
-3. Do not commit `.env`, log files, or state files.
+3. Do not commit `.env`, log files, or state files. The repository has no active `.gitignore`, so add these patterns locally if you keep `.env` inside the checkout:
+
+```text
+.env
+*.log
+node_modules/
+```
+
 4. Make sure the storage locations used by the services are writable. Some modules write logs and state to runtime paths configured in the code.
 
 Main variables:
@@ -59,7 +61,7 @@ Main variables:
 - `GITHUB_TOKEN`, `GITLAB_TOKEN`: Repository monitor access tokens, when required.
 - `STORE_NAME`, `STORE_ADDRESS`, `STRUK_FONT`, `STRUK_FONTSIZE`: Receipt configuration.
 
-`notification.js` has deployment-specific environment and storage configuration. Review it before running the notification service.
+`notification.js` has deployment-specific environment and storage configuration. Review it before running the notification service: it hardcodes a `~/SERVER/` path for its `.env`, state, and log files, so it expects a specific directory layout.
 
 > **Warning:** The full process starts the bot, schedules tasks, writes logs or state, calls native commands, and can manage Android notifications. `bing.js` uses `su` and UI automation. Run it only on devices and accounts you control.
 
@@ -96,9 +98,28 @@ node index.js
 
 Some commands are restricted by topic and administrator permissions. Validation and allowed topics come from the configuration.
 
+## Media Download (`yt-dlp`)
+
+`/music`, `/music2`, and `/tt` shell out to `yt-dlp`. From many hosts and residential IPs YouTube answers with `HTTP 429` or `Sign in to confirm you're not a bot`, because the default player client is blocked.
+
+`index.js` pins the working client and format order:
+
+```text
+--extractor-args youtube:player_client=web_embedded
+-f 140/bestaudio[ext=m4a]/bestaudio
+```
+
+- `web_embedded` is the client that survives the bot check from this host; `tv_simply`, `android_vr`, `web_safari`, `mweb`, and `ios` all fail here.
+- Format `140` (m4a) is preferred because in SABR-only sessions `web_embedded` drops the webm `251` URL while `140` keeps one.
+- Downloads are only reliable about two times in three; the remaining failures are session rate limits (`429`), not bad arguments.
+
+If you need higher reliability, export cookies from a signed-in browser and pass them through `--cookies`. Keep the cookie file outside the repository and outside any shared storage.
+
 ## Discord Chatbot
 
-Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to every non-bot message in that channel. It uses the shared `NINE_ROUTER_URL` and `NINE_ROUTER_API_KEY`, with the separate `NINE_ROUTER_CHATBOT_MODEL`, and does not keep conversation history. The bot replies only to messages in the configured channel and ignores other channels.
+Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to every non-bot message in that channel. It uses the shared `NINE_ROUTER_URL` and `NINE_ROUTER_API_KEY`, with the separate `NINE_ROUTER_CHATBOT_MODEL`.
+
+`discord.js` keeps a per-user conversation history, persists it between restarts, and compresses it to the context budget before every request, so a long conversation does not overflow the model window. The bot replies only to messages in the configured channel and ignores other channels.
 
 ## Service Schedule
 
@@ -107,8 +128,9 @@ Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to e
 - Every minute: Battery check.
 - Every 15 minutes: New OpenRouter model check.
 - `01:00`: Weekly OpenRouter ranking.
+- `01:30`: Artificial Analysis leaderboard digest.
 - `01:00`: Bing Rewards automation.
-- Every 5 minutes: Repository update check.
+- Every 5 minutes: Repository update check (`setTimeout` loop in `index.js`, not a cron job).
 
 Times use the device or host scheduler timezone.
 
@@ -124,6 +146,8 @@ https://openrouter.ai/api/frontend/v1/rankings/discovery?view=week&metric=tokens
 The models endpoint is the source of both the row order and the row names, so the chart keeps the same order as the site page. The discovery endpoint supplies the weekly token total for each model, and its `:free` and `:batch` entries are merged into their parent model so a model is not undercounted when most of its traffic runs on a free variant.
 
 The OpenRouter frontend rankings endpoint is not documented as a stable public API. Its schema, filters, and availability may change. The image caption states the source and formula used.
+
+The Artificial Analysis digest scrapes `https://artificialanalysis.ai/leaderboards/models` and depends on that page's markup, so it breaks silently if the site changes its HTML.
 
 ## Verification
 
