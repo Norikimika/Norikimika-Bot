@@ -540,6 +540,9 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
   }
 }
 
+// player_client web_embedded: only client that survives YouTube's bot check here.
+const YT_PRIMARY_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=web_embedded"];
+
 async function handleMusicCommand(ctx, targetTopicId) {
   const threadId = ctx.message?.message_thread_id;
   const text = ctx.message.text?.trim() || "";
@@ -567,7 +570,14 @@ async function handleMusicCommand(ctx, targetTopicId) {
       }
     }
 
-    const ytArgs = ["-f", "bestaudio/ba", "--no-playlist", "-j", searchArg];
+    // player_client web_embedded: only client that survives YouTube's bot check here.
+    // SABR-only sessions can still omit URLs, so accept m4a 140 before generic bestaudio.
+    const ytArgs = [
+      "-f", "140/bestaudio[ext=m4a]/bestaudio",
+      "--no-playlist",
+      "--extractor-args", YT_PRIMARY_CLIENT_ARGS,
+      "-j", searchArg,
+    ];
     const { stdout } = await execFilePromise("yt-dlp", ytArgs);
 
     const info = JSON.parse(stdout);
@@ -595,8 +605,9 @@ async function handleMusicCommand(ctx, targetTopicId) {
 
     try {
       await execFilePromise("yt-dlp", [
-        "-f", "bestaudio/ba",
+        "-f", "140/bestaudio[ext=m4a]/bestaudio",
         "--no-playlist",
+        "--extractor-args", YT_PRIMARY_CLIENT_ARGS,
         "-o", tempFile,
         "--write-thumbnail",
         "--convert-thumbnails", "jpg",
