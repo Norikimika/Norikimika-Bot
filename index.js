@@ -547,6 +547,21 @@ const YT_AUDIO_FORMAT = "251/140/bestaudio";
 // Value only: call sites pass the "--extractor-args" flag themselves.
 const YT_PRIMARY_CLIENT_ARG = "youtube:player_client=web_embedded";
 
+// Containers yt-dlp may write for the audio track; the thumbnail shares the id.
+const AUDIO_EXTS = ["webm", "m4a", "mp3", "opus", "ogg", "aac", "flac", "wav"];
+
+// Resolve which container yt-dlp actually wrote for this id (webm, m4a, ...).
+function findDownloadedAudio(fileId) {
+  try {
+    const hit = fs.readdirSync(__dirname).find(
+      (f) => f.startsWith(fileId) && AUDIO_EXTS.includes(path.extname(f).slice(1))
+    );
+    return hit ? path.join(__dirname, hit) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleMusicCommand(ctx, targetTopicId) {
   const threadId = ctx.message?.message_thread_id;
   const text = ctx.message.text?.trim() || "";
@@ -590,9 +605,12 @@ async function handleMusicCommand(ctx, targetTopicId) {
     const mediaUrl = info.webpage_url || (query.startsWith("http") ? query : info.url);
 
     const fileId = `${Date.now()}_${info.id}`;
-    const tempFile = path.join(__dirname, `${fileId}.webm`);
+    // yt-dlp chooses the container from whichever format it resolves (251 webm,
+    // 140 m4a), so the extension is not known up front.
+    const audioOut = path.join(__dirname, `${fileId}.%(ext)s`);
     const thumbBase = path.join(__dirname, fileId);
     const thumbFile = `${thumbBase}.jpg`;
+    let tempFile = null;
 
     let infoMessage;
     try {
@@ -610,27 +628,29 @@ async function handleMusicCommand(ctx, targetTopicId) {
         "-f", YT_AUDIO_FORMAT,
         "--no-playlist",
         "--extractor-args", YT_PRIMARY_CLIENT_ARG,
-        "-o", tempFile,
+        "-o", audioOut,
         "--write-thumbnail",
         "--convert-thumbnails", "jpg",
         "-o", `thumbnail:${thumbBase}`,
         mediaUrl
       ]);
 
-      if (fs.existsSync(tempFile)) {
-        const stats = fs.statSync(tempFile);
-        const maxSizeBytes = 49 * 1024 * 1024;
-        if (stats.size > maxSizeBytes) {
-          await updateMusicStatus(ctx, infoMessage.message_id, { 
-            title, 
-            performer, 
-            duration, 
-            status: "Too Large" 
-          });
-          return;
-        }
-      } else {
+      tempFile = findDownloadedAudio(fileId);
+
+      if (!tempFile) {
         throw new Error("Downloaded audio file not found.");
+      }
+
+      const stats = fs.statSync(tempFile);
+      const maxSizeBytes = 49 * 1024 * 1024;
+      if (stats.size > maxSizeBytes) {
+        await updateMusicStatus(ctx, infoMessage.message_id, {
+          title,
+          performer,
+          duration,
+          status: "Too Large"
+        });
+        return;
       }
 
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Sending" });
@@ -663,7 +683,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
       appendLogLine(`[SEND AUDIO ERROR] ${e.stack || e.message}`);
       await updateMusicStatus(ctx, infoMessage.message_id, { title, performer, duration, status: "Failed" });
     } finally {
-      try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch {}
+      try { if (tempFile && fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch {}
       try { if (fs.existsSync(thumbFile)) fs.unlinkSync(thumbFile); } catch {}
       try { if (fs.existsSync(thumbBase + ".webp")) fs.unlinkSync(thumbBase + ".webp"); } catch {}
       try { if (fs.existsSync(thumbBase + ".png")) fs.unlinkSync(thumbBase + ".png"); } catch {}
