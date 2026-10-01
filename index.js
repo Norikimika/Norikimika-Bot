@@ -540,6 +540,9 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
   }
 }
 
+// 251 = Opus 143k/48kHz, 140 = AAC 129k/44.1kHz. Prefer the Opus; the m4a
+// is the fallback for sessions where web_embedded exposes no webm URL.
+const YT_AUDIO_FORMAT = "251/140/bestaudio";
 // player_client web_embedded: only client that survives YouTube's bot check here.
 // Value only: call sites pass the "--extractor-args" flag themselves.
 const YT_PRIMARY_CLIENT_ARG = "youtube:player_client=web_embedded";
@@ -571,10 +574,8 @@ async function handleMusicCommand(ctx, targetTopicId) {
       }
     }
 
-    // player_client web_embedded: only client that survives YouTube's bot check here.
-    // SABR-only sessions can still omit URLs, so accept m4a 140 before generic bestaudio.
     const ytArgs = [
-      "-f", "140/bestaudio[ext=m4a]/bestaudio",
+      "-f", YT_AUDIO_FORMAT,
       "--no-playlist",
       "--extractor-args", YT_PRIMARY_CLIENT_ARG,
       "-j", searchArg,
@@ -606,7 +607,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
 
     try {
       await execFilePromise("yt-dlp", [
-        "-f", "140/bestaudio[ext=m4a]/bestaudio",
+        "-f", YT_AUDIO_FORMAT,
         "--no-playlist",
         "--extractor-args", YT_PRIMARY_CLIENT_ARG,
         "-o", tempFile,
