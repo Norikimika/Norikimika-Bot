@@ -541,7 +541,8 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
 }
 
 // player_client web_embedded: only client that survives YouTube's bot check here.
-const YT_PRIMARY_CLIENT_ARGS = ["--extractor-args", "youtube:player_client=web_embedded"];
+// Value only: call sites pass the "--extractor-args" flag themselves.
+const YT_PRIMARY_CLIENT_ARG = "youtube:player_client=web_embedded";
 
 async function handleMusicCommand(ctx, targetTopicId) {
   const threadId = ctx.message?.message_thread_id;
@@ -575,7 +576,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
     const ytArgs = [
       "-f", "140/bestaudio[ext=m4a]/bestaudio",
       "--no-playlist",
-      "--extractor-args", YT_PRIMARY_CLIENT_ARGS,
+      "--extractor-args", YT_PRIMARY_CLIENT_ARG,
       "-j", searchArg,
     ];
     const { stdout } = await execFilePromise("yt-dlp", ytArgs);
@@ -607,7 +608,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
       await execFilePromise("yt-dlp", [
         "-f", "140/bestaudio[ext=m4a]/bestaudio",
         "--no-playlist",
-        "--extractor-args", YT_PRIMARY_CLIENT_ARGS,
+        "--extractor-args", YT_PRIMARY_CLIENT_ARG,
         "-o", tempFile,
         "--write-thumbnail",
         "--convert-thumbnails", "jpg",
