@@ -106,11 +106,12 @@ Some commands are restricted by topic and administrator permissions. Validation 
 
 ```text
 --extractor-args youtube:player_client=web_embedded
--f 140/bestaudio[ext=m4a]/bestaudio
+-f 251/140/bestaudio
 ```
 
 - `web_embedded` is the client that survives the bot check from this host; `tv_simply`, `android_vr`, `web_safari`, `mweb`, and `ios` all fail here.
-- Format `140` (m4a) is preferred because in SABR-only sessions `web_embedded` drops the webm `251` URL while `140` keeps one.
+- Format `251` (Opus, 143 kbps, 48 kHz) is preferred. `140` (AAC, 129 kbps, 44.1 kHz) is the fallback for sessions where `web_embedded` exposes no webm URL, and `bestaudio` is the last resort. Those four audio formats are the whole selection YouTube offers for a lossy track, so this is already the ceiling.
+- The output path uses `%(ext)s`, and the downloaded file is located by extension afterwards, so the `.webm` and `.m4a` fallback paths both work.
 - Downloads are only reliable about two times in three; the remaining failures are session rate limits (`429`), not bad arguments.
 
 If you need higher reliability, export cookies from a signed-in browser and pass them through `--cookies`. Keep the cookie file outside the repository and outside any shared storage.
