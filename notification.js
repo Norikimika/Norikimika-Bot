@@ -96,6 +96,14 @@ const logger = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// termux-tts-speak defaults to the NOTIFICATION stream. Raising the
+// music volume therefore never touched the announcement, so a phone with
+// notification volume low left the bot silent with no error anywhere:
+// Android TTS reports success whether or not anything was audible. Pin both
+// sides to NOTIFICATION so the volume bump and the utterance hit the same
+// stream.
+const TTS_STREAM = "notification";
+
 // ====================== MONITOR CLASS ======================
 class NotificationMonitor {
     constructor(config, jsonPath) {
@@ -447,7 +455,7 @@ class NotificationMonitor {
         const run = (attempt = 1) => new Promise((resolve) => {
             execFile(
                 "termux-tts-speak",
-                ["-l", "id", speech],
+                ["-l", "id", "-s", TTS_STREAM, speech],
                 { timeout: 20000 },
                 (error) => {
                     if (error) logger.warning(`TTS attempt ${attempt} failed: ${error.message}`);
@@ -456,15 +464,18 @@ class NotificationMonitor {
             );
         });
 
+        // Pause competing audio once, before the utterance, and set the stream
+        // volume before TTS starts rather than after: raising music volume
+        // mid-utterance can land on the TTS session itself and swallow it.
+        // Repeating the pause per retry made it worse, because attempt 2 and 3
+        // fired over an utterance that was still playing.
         const task = async () => {
+            try { await this.stop_media_playback(); } catch {}
+            await sleep(700);
+
             for (let i = 1; i <= 3; i++) {
-                if (i === 1) {
-                    try { await this.stop_media_playback(); } catch {}
-                    await sleep(500);
-                } else {
-                    await sleep(1500);
-                }
                 if (await run(i)) break;
+                await sleep(1500);
             }
             await sleep(Math.min(30000, speech.length * 90 + 1500));
         };
@@ -475,21 +486,29 @@ class NotificationMonitor {
 
     stop_media_playback() {
         try {
-            execSync("cmd media_session dispatch pause", { stdio: 'ignore' });
+            // Target the utterance's own stream: dispatching on the default
+            // session only touches whatever registered a media session, which
+            // is music, not the TTS announcement.
+            execSync(`cmd media_session dispatch pause --stream ${TTS_STREAM}`, { stdio: 'ignore' });
             logger.info("Media playback paused");
-
-            try {
-                const volumes = JSON.parse(execSync("termux-volume", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 }));
-                const music = volumes.find((v) => String(v.stream).toLowerCase() === "music");
-                if (music && music.max_volume > 0) {
-                    execFileSync("termux-volume", ["music", String(music.max_volume)], { stdio: 'ignore', timeout: 5000 });
-                    logger.info(`Music volume set to max (${music.max_volume})`);
-                }
-            } catch (e) {
-                logger.error(`Failed to set music volume: ${e.message}`);
-            }
         } catch (e) {
             logger.error(`Failed to stop media playback: ${e.message}`);
+        }
+
+        // Volume is a separate concern from pausing: a failing `dispatch pause`
+        // used to skip it entirely, and a failing volume query must not stop
+        // playback control from being reported.
+        try {
+            const volumes = JSON.parse(execSync("termux-volume", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 }));
+            const target = volumes.find((v) => String(v.stream).toLowerCase() === TTS_STREAM);
+            if (target && target.max_volume > 0) {
+                execFileSync("termux-volume", [TTS_STREAM, String(target.max_volume)], { stdio: 'ignore', timeout: 5000 });
+                logger.info(`${TTS_STREAM} volume set to max (${target.max_volume})`);
+            } else {
+                logger.warning(`No ${TTS_STREAM} stream available; TTS may be inaudible`);
+            }
+        } catch (e) {
+            logger.error(`Failed to set ${TTS_STREAM} volume: ${e.message}`);
         }
     }
 
