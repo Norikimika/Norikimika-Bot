@@ -182,6 +182,32 @@ async function sendUsageReport() {
 }
 
 // ================== BATTERY LEVEL ==================
+const INPUT_SUSPEND = "/sys/class/power_supply/battery/input_suspend";
+
+// Writes are level-driven every tick rather than gated on the notification
+// flags: those flags latch to true on first fire, so a write that lost a race
+// with a `su` prompt would otherwise stay broken until the next threshold
+// crossing. The read-before-write makes the repeated calls free.
+function setInputSuspend(value) {
+  return new Promise((resolve) => {
+    const cmd = `v=$(cat ${INPUT_SUSPEND} 2>/dev/null); [ "$v" = "${value}" ] || { echo ${value} > ${INPUT_SUSPEND} && echo CHANGED; }`;
+    exec(`su -c '${cmd}'`, (error, stdout) => {
+      if (error) {
+        log(`input_suspend=${value} failed: ${error.message.trim()}`);
+      } else if (stdout.includes("CHANGED")) {
+        log(`input_suspend set to ${value}`);
+      }
+      resolve(!error);
+    });
+  });
+}
+
+function applyInputSuspend(level) {
+  if (level >= 100) return setInputSuspend(1);
+  if (level <= 20) return setInputSuspend(0);
+  return Promise.resolve();
+}
+
 async function checkBatteryLevel() {
   exec("termux-battery-status", async (error, stdout) => {
     if (error) {
@@ -221,6 +247,8 @@ async function checkBatteryLevel() {
         monitorState.battery20Sent = false;
         saveMonitorState();
       }
+
+      applyInputSuspend(level);
 
       if (level >= 100 && !monitorState.battery80Sent) {
         monitorState.battery80Sent = true;
