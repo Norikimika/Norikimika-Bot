@@ -96,13 +96,12 @@ const logger = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// termux-tts-speak defaults to the NOTIFICATION stream. Raising the
-// music volume therefore never touched the announcement, so a phone with
-// notification volume low left the bot silent with no error anywhere:
-// Android TTS reports success whether or not anything was audible. Pin both
-// sides to NOTIFICATION so the volume bump and the utterance hit the same
-// stream.
-const TTS_STREAM = "notification";
+// termux-tts-speak plays on NOTIFICATION by default, but on this device the
+// announcement is only audible through the music stream: the notification
+// stream is routed to the ringer path and comes out too quiet to hear. Both
+// sides therefore pin to MUSIC so the volume bump and the utterance hit the
+// same stream. Verified by ear; there is no API that reports audibility.
+const TTS_STREAM = "music";
 
 // ====================== MONITOR CLASS ======================
 class NotificationMonitor {
