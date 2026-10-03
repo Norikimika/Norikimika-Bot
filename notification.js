@@ -445,9 +445,14 @@ class NotificationMonitor {
         logger.info(`TTS: ${speech}`);
 
         const run = (attempt = 1) => new Promise((resolve) => {
+            // -s music is not a guess: dumpsys audio shows this device's TTS
+            // opening an AudioTrack with usage=USAGE_MEDIA, which is
+            // STREAM_MUSIC(3). The default and -s notification route it through
+            // USAGE_ASSISTANCE_SONIFICATION instead, a different path that does
+            // not carry the announcement.
             execFile(
                 "termux-tts-speak",
-                ["-l", "id", speech],
+                ["-l", "id", "-s", "music", speech],
                 { timeout: 20000 },
                 (error) => {
                     if (error) logger.warning(`TTS attempt ${attempt} failed: ${error.message}`);
@@ -457,14 +462,27 @@ class NotificationMonitor {
         });
 
         const task = async () => {
-            for (let i = 1; i <= 3; i++) {
-                if (i === 1) {
-                    try { await this.stop_media_playback(); } catch {}
-                    await sleep(500);
-                } else {
-                    await sleep(1500);
-                }
-                if (await run(i)) break;
+            const report = this.stop_media_playback();
+            // Wait for the music player to actually go idle. The pause command
+            // returns immediately but the player stays started for about a
+            // second, and the announcement competes with it for the same stream
+            // when it does not.
+            const silence = await this.wait_for_silence();
+            if (!silence.checked) {
+                logger.warning("Audio state unavailable; speaking without silence check");
+            } else if (silence.players.length > 0) {
+                logger.warning(`Music still playing after pause (${silence.players.length}); announcement may be masked`);
+                silence.players.forEach((p) => logger.info(`  still playing: ${p}`));
+            } else {
+                logger.info("Music stream idle before speaking");
+            }
+
+            const t0 = Date.now();
+            let spoke = false;
+            for (let i = 1; i <= 3 && !spoke; i++) {
+                if (i > 1) await sleep(1500);
+                spoke = await run(i);
+                logger.info(`TTS attempt ${i}: ${spoke ? "ok" : "failed"} after ${Date.now() - t0}ms (volume ${report.volume ?? "unset"})`);
             }
             await sleep(Math.min(30000, speech.length * 90 + 1500));
         };
@@ -473,24 +491,61 @@ class NotificationMonitor {
         return this._tts_queue;
     }
 
+    // Returns a report of what was actually still playing, so the caller can log
+    // evidence instead of assuming the pause took effect. `media_session
+    // dispatch pause` only sends a command: the player stays active for
+    // roughly a second afterwards, and the announcement starts immediately,
+    // so the two overlap on the same stream.
     stop_media_playback() {
-        try {
-            execSync("cmd media_session dispatch pause", { stdio: 'ignore' });
-            logger.info("Media playback paused");
+        const report = { paused: false, volume: null, error: null, stillPlaying: [] };
 
-            try {
-                const volumes = JSON.parse(execSync("termux-volume", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 }));
-                const music = volumes.find((v) => String(v.stream).toLowerCase() === "music");
-                if (music && music.max_volume > 0) {
-                    execFileSync("termux-volume", ["music", String(music.max_volume)], { stdio: 'ignore', timeout: 5000 });
-                    logger.info(`Music volume set to max (${music.max_volume})`);
-                }
-            } catch (e) {
-                logger.error(`Failed to set music volume: ${e.message}`);
+        // Volume first. Setting it after the pause left the announcement playing
+        // for a second at whatever level the stream was already at, which is one
+        // way this ends up silent while the log says the volume was raised.
+        try {
+            const volumes = JSON.parse(execSync("termux-volume", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 }));
+            const music = volumes.find((v) => String(v.stream).toLowerCase() === "music");
+            if (music && music.max_volume > 0) {
+                execFileSync("termux-volume", ["music", String(music.max_volume)], { stdio: 'ignore', timeout: 5000 });
+                report.volume = music.max_volume;
+                logger.info(`Music volume set to max (${music.max_volume})`);
             }
         } catch (e) {
+            report.error = `volume: ${e.message}`;
+            logger.error(`Failed to set music volume: ${e.message}`);
+        }
+
+        try {
+            execSync("cmd media_session dispatch pause", { stdio: 'ignore' });
+            report.paused = true;
+            logger.info("Media playback paused");
+        } catch (e) {
+            report.error = report.error || `pause: ${e.message}`;
             logger.error(`Failed to stop media playback: ${e.message}`);
         }
+
+        return report;
+    }
+
+    // Polls dumpsys audio until the music stream has no started player, or the
+    // deadline passes. Returns the players that were still active at the end so
+    // the log records the overlap rather than hiding it.
+    async wait_for_silence(timeout_ms = 4000) {
+        const deadline = Date.now() + timeout_ms;
+        let last = [];
+        while (Date.now() < deadline) {
+            let out = "";
+            try {
+                out = execSync("su -c 'dumpsys audio'", { stdio: ['ignore','pipe','ignore'], encoding: 'utf8', timeout: 5000 });
+            } catch (e) {
+                logger.warning(`Audio state unavailable: ${e.message}`);
+                return { checked: false, players: [] };
+            }
+            last = out.split("\n").filter((l) => /state:started/.test(l) && /STREAM_MUSIC/.test(l));
+            if (last.length === 0) return { checked: true, players: [] };
+            await sleep(400);
+        }
+        return { checked: true, players: last.map((l) => l.trim().slice(0, 120)) };
     }
 
     async monitor() {
