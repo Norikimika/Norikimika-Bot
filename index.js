@@ -1313,6 +1313,7 @@ async function processReceipt(ctx, targetThreadId) {
       parsed.penerima = parsed.penerima
         .replace(/\bDana\b/g, '')
         .replace(/\bDnid\b/g, '')
+        .replace(/\bDnidl\b/g, '')
         .replace(/\s+/g, ' ')
         .trim();
     }
