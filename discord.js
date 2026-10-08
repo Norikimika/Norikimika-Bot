@@ -1300,6 +1300,7 @@ async function requestChatCompletion(endpoint, content) {
         model: DISCORD_CHATBOT_MODEL,
         messages: [{ role: "user", content }],
         stream: false,
+        reasoning_effort: "high",
       }),
     });
     if (!res.ok) {
@@ -1808,6 +1809,7 @@ function runDiscord() {
             model: DISCORD_CHATBOT_MODEL,
             messages: history,
             stream: false,
+            reasoning_effort: "high",
           }),
         });
         if (!response.ok) {
