@@ -1142,7 +1142,8 @@ async function buildStrukImage(struk) {
   return files.outPng;
 }
 
-const RECEIPT_PROMPT = `Identify the type of this receipt and extract its data. Return ONLY JSON (no markdown, no explanations).
+const RECEIPT_PROMPT = `Identify the type of this receipt and extract its data.
+Respond with a single JSON object and nothing else — no preamble, no safety note, no markdown, no explanation. Your entire response must start with { and end with }.
 
 If it's a Money TRANSFER receipt (DANA, OVO, GoPay, BCA, BRI, etc):
 {
@@ -1269,34 +1270,44 @@ async function analyzeReceipt(base64Image) {
 
     const cleanedJson = rawContent.replace(/```(?:json)?\n?|```/g, "").trim();
 
-    // Model kadang nambah suffix (<|im_end|> dsb) setelah objek valid.
-    // Potong dari kurung buka pertama sampai tutup yang seimbang.
-    function extractFirstJson(text) {
-      const start = text.indexOf("{");
-      if (start === -1) return text;
-      let depth = 0;
-      let inStr = false;
-      let esc = false;
-      for (let i = start; i < text.length; i++) {
-        const c = text[i];
-        if (inStr) {
-          if (esc) esc = false;
-          else if (c === "\\") esc = true;
-          else if (c === '"') inStr = false;
-          continue;
-        }
-        if (c === '"') inStr = true;
-        else if (c === "{") depth++;
-        else if (c === "}") {
-          depth--;
-          if (depth === 0) return text.slice(start, i + 1);
+    // Model kadang nambah preamble ("User Safety: safe") atau suffix
+    // (<|im_end|> dsb) di sekitar objek valid. Scan semua kandidat objek
+    // seimbang, pakai yang pertama yang punya field "type".
+    function extractReceiptJson(text) {
+      for (let s = 0; s < text.length; s++) {
+        if (text[s] !== "{") continue;
+        let depth = 0;
+        let inStr = false;
+        let esc = false;
+        for (let i = s; i < text.length; i++) {
+          const c = text[i];
+          if (inStr) {
+            if (esc) esc = false;
+            else if (c === "\\") esc = true;
+            else if (c === '"') inStr = false;
+            continue;
+          }
+          if (c === '"') inStr = true;
+          else if (c === "{") depth++;
+          else if (c === "}") {
+            depth--;
+            if (depth === 0) {
+              try {
+                const obj = JSON.parse(text.slice(s, i + 1));
+                if (obj && typeof obj.type === "string") return obj;
+              } catch {}
+              break; // kandidat ini bukan JSON valid, lanjut scan
+            }
+          }
         }
       }
-      return text;
+      return null;
     }
 
     try {
-      return JSON.parse(extractFirstJson(cleanedJson));
+      const receipt = extractReceiptJson(cleanedJson);
+      if (!receipt) throw new Error(`no JSON object with "type" field in: ${cleanedJson.slice(0, 200)}`);
+      return receipt;
     } catch (parseErr) {
       appendLogLine(`[JSON Parse Failed] Content received:\n${cleanedJson}`);
       throw new Error(`Invalid JSON format from model: ${parseErr.message}`);
