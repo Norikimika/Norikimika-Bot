@@ -1342,6 +1342,7 @@ async function processReceipt(ctx, targetThreadId) {
         .replace(/\bDnidl\b/g, '')
         .replace(/\bDnidd\b/g, '')
         .replace(/\bDnidx\b/g, '')
+        .replace(/\bDnvid\b/g, '')
         .replace(/\s+/g, ' ')
         .trim();
     }
