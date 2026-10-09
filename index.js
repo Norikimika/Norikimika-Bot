@@ -1269,8 +1269,34 @@ async function analyzeReceipt(base64Image) {
 
     const cleanedJson = rawContent.replace(/```(?:json)?\n?|```/g, "").trim();
 
+    // Model kadang nambah suffix (<|im_end|> dsb) setelah objek valid.
+    // Potong dari kurung buka pertama sampai tutup yang seimbang.
+    function extractFirstJson(text) {
+      const start = text.indexOf("{");
+      if (start === -1) return text;
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let i = start; i < text.length; i++) {
+        const c = text[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === "\\") esc = true;
+          else if (c === '"') inStr = false;
+          continue;
+        }
+        if (c === '"') inStr = true;
+        else if (c === "{") depth++;
+        else if (c === "}") {
+          depth--;
+          if (depth === 0) return text.slice(start, i + 1);
+        }
+      }
+      return text;
+    }
+
     try {
-      return JSON.parse(cleanedJson);
+      return JSON.parse(extractFirstJson(cleanedJson));
     } catch (parseErr) {
       appendLogLine(`[JSON Parse Failed] Content received:\n${cleanedJson}`);
       throw new Error(`Invalid JSON format from model: ${parseErr.message}`);
