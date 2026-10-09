@@ -535,65 +535,60 @@ class NotificationMonitor {
         const speech = `${title}. ${text}`;
         logger.info(`TTS: ${speech}`);
 
-        const run = (attempt = 1) => new Promise((resolve) => {
-            // Edge TTS murni JS dulu (suara natural, id-ID-GadisNeural).
-            // Kalau gagal (offline / API down), fallback ke termux-tts-speak.
-            // -s music bukan tebakan: dumpsys audio menunjukkan TTS device ini
-            // membuka AudioTrack dengan usage=USAGE_MEDIA = STREAM_MUSIC(3).
+        // Gen audio Edge paralel dengan silence check — network jalan saat
+        // player diredam, bukan sesudahnya. Fallback lokal kalau gen gagal.
+        const prefetchAudio = () => {
             const audioFile = path.join(
                 os.tmpdir(),
-                `edge_tts_${Date.now()}_${attempt}.mp3`
+                `edge_tts_${Date.now()}.mp3`
             );
-            edgeTtsToFile(speech, audioFile)
-                .then(() => {
-                    if (!fs.existsSync(audioFile)) {
-                        logger.warning("TTS edge: no audio; fallback termux-tts");
-                        return fallbackTts();
-                    }
-                    execFile(
-                        "termux-media-player",
-                        ["play", audioFile],
-                        { timeout: 20000 },
-                        (playError) => {
-                            try {
-                                fs.unlinkSync(audioFile);
-                            } catch (e) {}
-                            if (!playError) return resolve(true);
-                            logger.warning(
-                                `TTS edge play failed: ${playError.message}`
-                            );
-                            fallbackTts();
-                        }
-                    );
-                })
-                .catch((edgeError) => {
+            return edgeTtsToFile(speech, audioFile)
+                .then(() => (fs.existsSync(audioFile) ? audioFile : null))
+                .catch((e) => {
                     logger.warning(
-                        `TTS edge failed: ${(edgeError && edgeError.message) || "no audio"}; fallback termux-tts`
+                        `TTS edge prefetch failed: ${e.message}; fallback termux-tts`
                     );
                     try {
                         if (fs.existsSync(audioFile)) fs.unlinkSync(audioFile);
-                    } catch (e) {}
-                    fallbackTts();
+                    } catch (x) {}
+                    return null;
                 });
+        };
 
-            function fallbackTts() {
-                execFile(
-                    "termux-tts-speak",
-                    ["-l", "id", "-s", "music", speech],
-                    { timeout: 20000 },
-                    (error) => {
-                        if (error)
-                            logger.warning(
-                                `TTS attempt ${attempt} failed: ${error.message}`
-                            );
-                        resolve(!error);
-                    }
-                );
-            }
+        const playFile = (audioFile) => new Promise((resolve) => {
+            execFile(
+                "termux-media-player",
+                ["play", audioFile],
+                { timeout: 20000 },
+                (playError) => {
+                    try {
+                        fs.unlinkSync(audioFile);
+                    } catch (e) {}
+                    if (!playError) return resolve(true);
+                    logger.warning(`TTS edge play failed: ${playError.message}`);
+                    resolve(false);
+                }
+            );
+        });
+
+        const fallbackTts = () => new Promise((resolve) => {
+            // -s music bukan tebakan: dumpsys audio menunjukkan TTS device ini
+            // membuka AudioTrack dengan usage=USAGE_MEDIA = STREAM_MUSIC(3).
+            execFile(
+                "termux-tts-speak",
+                ["-l", "id", "-s", "music", speech],
+                { timeout: 20000 },
+                (error) => {
+                    if (error)
+                        logger.warning(`TTS fallback failed: ${error.message}`);
+                    resolve(!error);
+                }
+            );
         });
 
         const task = async () => {
             const report = this.stop_media_playback();
+            const gen = prefetchAudio();
             // Wait for the music player to actually go idle. The pause command
             // returns immediately but the player stays started for about a
             // second, and the announcement competes with it for the same stream
@@ -609,13 +604,18 @@ class NotificationMonitor {
             }
 
             const t0 = Date.now();
+            const audioFile = await gen;
             let spoke = false;
-            for (let i = 1; i <= 3 && !spoke; i++) {
-                if (i > 1) await sleep(1500);
-                spoke = await run(i);
-                logger.info(`TTS attempt ${i}: ${spoke ? "ok" : "failed"} after ${Date.now() - t0}ms (volume ${report.volume ?? "unset"})`);
+            if (audioFile) {
+                spoke = await playFile(audioFile);
             }
-            await sleep(Math.min(30000, speech.length * 90 + 1500));
+            if (!spoke) {
+                spoke = await fallbackTts();
+            }
+            logger.info(`TTS: ${spoke ? "ok" : "failed"} after ${Date.now() - t0}ms (volume ${report.volume ?? "unset"})`);
+            // execFile play dan termux-tts-speak sama-sama resolve saat audio
+            // habis, jadi queue sudah serial tanpa sleep ekor tambahan.
+            await sleep(500);
         };
 
         this._tts_queue = this._tts_queue.then(task).catch((e) => logger.error(`TTS error: ${e.message}`));
