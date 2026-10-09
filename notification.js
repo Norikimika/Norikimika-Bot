@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync, execFile, execFileSync } = require('child_process');
+const { edgeTtsToFile } = require('./edge_tts.js');
 
 // ====== Paths ======
 const homeDir = os.homedir();
@@ -445,20 +446,60 @@ class NotificationMonitor {
         logger.info(`TTS: ${speech}`);
 
         const run = (attempt = 1) => new Promise((resolve) => {
-            // -s music is not a guess: dumpsys audio shows this device's TTS
-            // opening an AudioTrack with usage=USAGE_MEDIA, which is
-            // STREAM_MUSIC(3). The default and -s notification route it through
-            // USAGE_ASSISTANCE_SONIFICATION instead, a different path that does
-            // not carry the announcement.
-            execFile(
-                "termux-tts-speak",
-                ["-l", "id", "-s", "music", speech],
-                { timeout: 20000 },
-                (error) => {
-                    if (error) logger.warning(`TTS attempt ${attempt} failed: ${error.message}`);
-                    resolve(!error);
-                }
+            // Edge TTS murni JS dulu (suara natural, id-ID-GadisNeural).
+            // Kalau gagal (offline / API down), fallback ke termux-tts-speak.
+            // -s music bukan tebakan: dumpsys audio menunjukkan TTS device ini
+            // membuka AudioTrack dengan usage=USAGE_MEDIA = STREAM_MUSIC(3).
+            const audioFile = path.join(
+                os.tmpdir(),
+                `edge_tts_${Date.now()}_${attempt}.mp3`
             );
+            edgeTtsToFile(speech, audioFile)
+                .then(() => {
+                    if (!fs.existsSync(audioFile)) {
+                        logger.warning("TTS edge: no audio; fallback termux-tts");
+                        return fallbackTts();
+                    }
+                    execFile(
+                        "termux-media-player",
+                        ["play", audioFile],
+                        { timeout: 20000 },
+                        (playError) => {
+                            try {
+                                fs.unlinkSync(audioFile);
+                            } catch (e) {}
+                            if (!playError) return resolve(true);
+                            logger.warning(
+                                `TTS edge play failed: ${playError.message}`
+                            );
+                            fallbackTts();
+                        }
+                    );
+                })
+                .catch((edgeError) => {
+                    logger.warning(
+                        `TTS edge failed: ${(edgeError && edgeError.message) || "no audio"}; fallback termux-tts`
+                    );
+                    try {
+                        if (fs.existsSync(audioFile)) fs.unlinkSync(audioFile);
+                    } catch (e) {}
+                    fallbackTts();
+                });
+
+            function fallbackTts() {
+                execFile(
+                    "termux-tts-speak",
+                    ["-l", "id", "-s", "music", speech],
+                    { timeout: 20000 },
+                    (error) => {
+                        if (error)
+                            logger.warning(
+                                `TTS attempt ${attempt} failed: ${error.message}`
+                            );
+                        resolve(!error);
+                    }
+                );
+            }
         });
 
         const task = async () => {
