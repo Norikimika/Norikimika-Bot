@@ -1270,9 +1270,9 @@ async function analyzeReceipt(base64Image) {
 
     const cleanedJson = rawContent.replace(/```(?:json)?\n?|```/g, "").trim();
 
-    // Model kadang nambah preamble ("User Safety: safe") atau suffix
-    // (<|im_end|> dsb) di sekitar objek valid. Scan semua kandidat objek
-    // seimbang, pakai yang pertama yang punya field "type".
+    // Model sometimes adds a preamble ("User Safety: safe") or suffix
+    // (<|im_end|> etc) around the valid object. Scan every balanced-object
+    // candidate, use the first one with a "type" field.
     function extractReceiptJson(text) {
       for (let s = 0; s < text.length; s++) {
         if (text[s] !== "{") continue;
@@ -1296,7 +1296,7 @@ async function analyzeReceipt(base64Image) {
                 const obj = JSON.parse(text.slice(s, i + 1));
                 if (obj && typeof obj.type === "string") return obj;
               } catch {}
-              break; // kandidat ini bukan JSON valid, lanjut scan
+              break; // not valid JSON, keep scanning
             }
           }
         }

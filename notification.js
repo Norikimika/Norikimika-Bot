@@ -8,7 +8,7 @@ const { execSync, execFile, execFileSync } = require('child_process');
 const crypto = require('node:crypto');
 const { WebSocket } = require('ws');
 
-// ====== Edge TTS (murni Node, tanpa dep baru selain `ws` bawaan) ======
+// ====== Edge TTS (pure Node, no new deps besides bundled `ws`) ======
 const EDGE_CHROMIUM_VERSION = "143.0.3650.75";
 const EDGE_TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_WINDOWS_EPOCH = 11644473600n;
@@ -36,7 +36,7 @@ function edgeEscapeXml(s) {
     });
 }
 
-// text -> mp3 di audioPath. Resolve saat turn.end, reject saat timeout/error.
+// text -> mp3 at audioPath. Resolves on turn.end, rejects on timeout/error.
 function edgeTtsToFile(
     text,
     audioPath,
@@ -535,8 +535,9 @@ class NotificationMonitor {
         const speech = `${title}. ${text}`;
         logger.info(`TTS: ${speech}`);
 
-        // Gen audio Edge paralel dengan silence check — network jalan saat
-        // player diredam, bukan sesudahnya. Fallback lokal kalau gen gagal.
+        // Generate Edge audio in parallel with the silence check — network
+        // runs while the player is being muted, not after. Local fallback
+        // when generation fails.
         const prefetchAudio = () => {
             const audioFile = path.join(
                 os.tmpdir(),
@@ -572,8 +573,9 @@ class NotificationMonitor {
         });
 
         const fallbackTts = () => new Promise((resolve) => {
-            // -s music bukan tebakan: dumpsys audio menunjukkan TTS device ini
-            // membuka AudioTrack dengan usage=USAGE_MEDIA = STREAM_MUSIC(3).
+            // -s music is not a guess: dumpsys audio shows this device's TTS
+            // opening an AudioTrack with usage=USAGE_MEDIA, which is
+            // STREAM_MUSIC(3).
             execFile(
                 "termux-tts-speak",
                 ["-l", "id", "-s", "music", speech],
@@ -613,8 +615,8 @@ class NotificationMonitor {
                 spoke = await fallbackTts();
             }
             logger.info(`TTS: ${spoke ? "ok" : "failed"} after ${Date.now() - t0}ms (volume ${report.volume ?? "unset"})`);
-            // execFile play dan termux-tts-speak sama-sama resolve saat audio
-            // habis, jadi queue sudah serial tanpa sleep ekor tambahan.
+            // execFile play and termux-tts-speak both resolve when audio ends,
+            // so the queue is already serial with no extra tail sleep.
             await sleep(500);
         };
 
