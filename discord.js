@@ -1783,7 +1783,12 @@ function runDiscord() {
     if (message.author.bot || !message.guild) return;
 
     if (shouldReplyToDiscordMessage(message, DISCORD_CHATBOT_CHANNEL_ID)) {
+      // Typing expires after ~10s server-side; AI reasoning can take 60s+.
+      // Refresh until the reply lands.
       message.channel.sendTyping().catch(() => {});
+      const typingKeepalive = setInterval(() => {
+        message.channel.sendTyping().catch(() => {});
+      }, 5000);
       const prompt = message.content.trim().slice(0, DISCORD_CHATBOT_MAX_LENGTH);
       const userId = message.author?.id;
       try {
@@ -1824,6 +1829,8 @@ function runDiscord() {
         } else log("[Chatbot] Provider returned an empty response");
       } catch (err) {
         log(`[Chatbot] ${err.message}`);
+      } finally {
+        clearInterval(typingKeepalive);
       }
       return;
     }
