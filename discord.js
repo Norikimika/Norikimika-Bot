@@ -1265,6 +1265,47 @@ async function compressToTokenBudget(messages, budget, summarize) {
   }
 }
 
+async function webSearch(endpoint, query, maxResults = 5) {
+  try {
+    const baseUrl = endpoint.replace("/chat/completions", "");
+    const res = await fetch(`${baseUrl}/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DISCORD_CHATBOT_API_KEY}`,
+      },
+      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify({
+        model: process.env.NINE_ROUTER_SEARCH_MODEL,
+        query,
+        search_type: "web",
+        max_results: maxResults,
+      }),
+    });
+    if (!res.ok) {
+      log(`[Chatbot] Web search failed: ${res.status}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    log(`[Chatbot] Web search error: ${err.message}`);
+    return null;
+  }
+}
+
+function formatSearchResults(data) {
+  const results = data?.results;
+  if (!Array.isArray(results) || results.length === 0) return null;
+  return results
+    .map((r, i) => {
+      const title = String(r.title ?? "").trim();
+      const url = String(r.url ?? "").trim();
+      const snippet = String(r.snippet ?? "").trim();
+      return `### ${i + 1}. [${title || "Untitled"}](${url})\n${snippet.slice(0, 400)}`.trim();
+    })
+    .join("\n\n");
+}
+
 function buildChatbotEndpoint(rawUrl) {
   const baseUrl = String(rawUrl || "").trim().replace(/\/+$/, "");
   if (!baseUrl) return "";
@@ -1295,7 +1336,7 @@ async function requestChatCompletion(endpoint, content) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${DISCORD_CHATBOT_API_KEY}`,
       },
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(300000),
       body: JSON.stringify({
         model: DISCORD_CHATBOT_MODEL,
         messages: [{ role: "user", content }],
@@ -1803,29 +1844,85 @@ function runDiscord() {
           DISCORD_CHATBOT_CONTEXT_TOKENS,
           (compressionPrompt) => requestChatCompletion(endpoint, compressionPrompt)
         );
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${DISCORD_CHATBOT_API_KEY}`,
+        // Let the model decide when to search. It calls web_search only for
+        // questions that need fresh data; normal chat skips it entirely.
+        const SEARCH_TOOLS = [
+          {
+            type: "function",
+            function: {
+              name: "web_search",
+              description: "Search the web for current information, news, prices, or recent events. Use when the answer needs up-to-date data you may not have.",
+              parameters: {
+                type: "object",
+                properties: {
+                  query: { type: "string", description: "The search query" },
+                },
+                required: ["query"],
+              },
+            },
           },
-          signal: AbortSignal.timeout(60000),
-          body: JSON.stringify({
-            model: DISCORD_CHATBOT_MODEL,
-            messages: history,
-            stream: false,
-            reasoning_effort: "high",
-          }),
-        });
-        if (!response.ok) {
-          if (response.status === 400) clearChatHistory(userId);
-          log(`[Chatbot] Provider HTTP ${response.status}`);
-          return;
+        ];
+
+        const SEARCH_TOOL_MAX_TURNS = 3;
+        let turns = 0;
+        let lastText = "";
+        let workingMessages = history;
+
+        while (turns <= SEARCH_TOOL_MAX_TURNS) {
+          turns++;
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${DISCORD_CHATBOT_API_KEY}`,
+            },
+            signal: AbortSignal.timeout(300000),
+            body: JSON.stringify({
+              model: DISCORD_CHATBOT_MODEL,
+              messages: workingMessages,
+              stream: false,
+              reasoning_effort: "high",
+              tools: SEARCH_TOOLS,
+            }),
+          });
+
+          if (!response.ok) {
+            if (response.status === 400) clearChatHistory(userId);
+            log(`[Chatbot] Provider HTTP ${response.status}`);
+            return;
+          }
+
+          const data = await response.json();
+          const choice = data?.choices?.[0];
+          const msg = choice?.message;
+          const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
+          const text = extractChatbotText(data);
+          if (text) lastText = text;
+
+          if (toolCalls.length === 0) break;
+
+          // Model asked for search: run them, feed results back, loop again.
+          workingMessages = [...workingMessages, msg];
+
+          for (const call of toolCalls) {
+            if (call.function?.name !== "web_search") continue;
+            let args = {};
+            try { args = JSON.parse(call.function.arguments || "{}"); } catch {}
+            const query = String(args.query || "").slice(0, 500);
+            if (!query) continue;
+            const results = await webSearch(endpoint, query);
+            const formatted = formatSearchResults(results) || "No results found.";
+            workingMessages = [
+              ...workingMessages,
+              { role: "tool", tool_call_id: call.id, content: formatted },
+            ];
+            log(`[Chatbot] web_search: "${query}" -> ${formatted.length} chars`);
+          }
         }
-        const text = extractChatbotText(await response.json());
-        if (text) {
-          recordChatTurn(userId, "assistant", text);
-          await message.reply(text.slice(0, DISCORD_CHATBOT_MAX_LENGTH));
+
+        if (lastText) {
+          recordChatTurn(userId, "assistant", lastText);
+          await message.reply(lastText.slice(0, DISCORD_CHATBOT_MAX_LENGTH));
         } else log("[Chatbot] Provider returned an empty response");
       } catch (err) {
         log(`[Chatbot] ${err.message}`);
