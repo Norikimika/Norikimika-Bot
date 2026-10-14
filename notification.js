@@ -43,12 +43,18 @@ function edgeTtsToFile(
     { voice = "id-ID-GadisNeural", lang = "id-ID", timeoutMs = 25000 } = {}
 ) {
     return new Promise((resolve, reject) => {
+        // Microsoft retired the legacy Read Aloud host: since 2026-10-12 the
+        // WS upgrade to speech.platform.bing.com is rejected with 403 (the
+        // voices/list HTTP endpoint still answers, which is why this looked
+        // like a token problem). Read Aloud now lives on api.msedgeservices.com
+        // and takes the same client token as Ocp-Apim-Subscription-Key. The
+        // legacy Sec-MS-GEC token/version are still accepted there.
         const url =
-            `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1` +
-            `?TrustedClientToken=${EDGE_TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${edgeSecMsGec()}&Sec-MS-GEC-Version=1-${EDGE_CHROMIUM_VERSION}`;
+            `wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1` +
+            `?Ocp-Apim-Subscription-Key=${EDGE_TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${edgeSecMsGec()}&Sec-MS-GEC-Version=1-${EDGE_CHROMIUM_VERSION}`;
         const major = EDGE_CHROMIUM_VERSION.split(".")[0];
         const ws = new WebSocket(url, {
-            host: "speech.platform.bing.com",
+            host: "api.msedgeservices.com",
             origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
             headers: {
                 Pragma: "no-cache",
