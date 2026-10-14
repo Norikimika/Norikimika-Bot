@@ -93,26 +93,9 @@ const GITHUB_REPOS = [
     branch: "master"
   },
   {
-    owner: "anomalyco",
-    repo: "opencode",
-    branch: "dev"
-  },
-  {
     owner: "NousResearch",
     repo: "hermes-agent",
     branch: "main"
-  },
-  {
-    owner: "guillaumemeyer",
-    repo: "watermarks-remover",
-    branch: "main",
-    path: "skills"
-  },
-  {
-    owner: "miqdadbadjuber",
-    repo: "anti-slop",
-    branch: "main",
-    path: "skills"
   }
 ];
 
