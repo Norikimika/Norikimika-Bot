@@ -5,102 +5,108 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync, execFile, execFileSync } = require('child_process');
-const crypto = require('node:crypto');
-const { WebSocket } = require('ws');
+// ====== Speech synthesis via 9router (/v1/audio/speech) ======
+// Announcements are rendered by the same local 9router instance that already
+// serves the chatbot and receipt analysis. The previous implementation opened
+// the Edge Read Aloud WebSocket directly, which Microsoft rate-limits with an
+// HTTP 429 (no Retry-After) as soon as a few notifications land together, and
+// which pins a handshake the vendor keeps moving. Going through 9router is one
+// plain HTTP call, reuses the existing NINE_ROUTER_* credentials, and drops the
+// direct `ws` dependency.
 
-// ====== Edge TTS (pure Node, no new deps besides bundled `ws`) ======
-const EDGE_CHROMIUM_VERSION = "143.0.3650.75";
-const EDGE_TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const EDGE_WINDOWS_EPOCH = 11644473600n;
+const TTS_MAX_ATTEMPTS = 3;
+const TTS_RETRY_BASE_MS = 800;
+const TTS_TIMEOUT_MS = 25000;
+const TTS_DEFAULT_MODEL = "edge-tts/id-ID-GadisNeural";
 
-function edgeSecMsGec() {
-    const ticks =
-        BigInt(Math.floor(Date.now() / 1000 + Number(EDGE_WINDOWS_EPOCH))) * 10000000n;
-    const rounded = ticks - (ticks % 3000000000n);
-    return crypto
-        .createHash("sha256")
-        .update(`${rounded}${EDGE_TRUSTED_CLIENT_TOKEN}`, "ascii")
-        .digest("hex")
-        .toUpperCase();
+// Accepts the base URL in any of the shapes NINE_ROUTER_URL is stored in
+// (`http://host:port`, `.../v1`, or a full endpoint) and returns the speech
+// endpoint. Mirrors the chat/receipt URL handling in index.js and discord.js.
+function buildSpeechEndpoint(rawUrl) {
+    const baseUrl = String(rawUrl || "").trim().replace(/\/+$/, "");
+    if (!baseUrl) return "";
+    if (baseUrl.endsWith("/audio/speech")) return baseUrl;
+    return baseUrl.endsWith("/v1")
+        ? `${baseUrl}/audio/speech`
+        : `${baseUrl}/v1/audio/speech`;
 }
 
-function edgeEscapeXml(s) {
-    return s.replace(/[<>&"']/g, (c) => {
-        switch (c) {
-            case "<": return "&lt;";
-            case ">": return "&gt;";
-            case "&": return "&amp;";
-            case '"': return "&quot;";
-            default: return "&apos;";
+// Carries the HTTP status so the retry layer can tell a transient 429/5xx from
+// a permanent 400/401.
+class TtsHttpError extends Error {
+    constructor(statusCode, detail) {
+        super(`Speech request failed (HTTP ${statusCode})${detail ? `: ${detail}` : ""}`);
+        this.name = "TtsHttpError";
+        this.statusCode = statusCode;
+    }
+}
+
+function isRetryableTtsError(e) {
+    if (e instanceof TtsHttpError) {
+        return e.statusCode === 429 || e.statusCode >= 500;
+    }
+    // A dropped connection or 9router not yet up is worth another try; a
+    // missing credential or a bad model is not.
+    return /ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|EAI_AGAIN|ENETUNREACH|ETIMEDOUT|fetch failed|network/i.test(
+        String((e && e.message) || "")
+    );
+}
+
+// Renders `text` to an mp3 at `audioPath` through the local 9router. Rejects on
+// any HTTP or network failure so the caller can fall back to termux-tts.
+async function ttsToFile(text, audioPath, { timeoutMs = TTS_TIMEOUT_MS } = {}) {
+    const endpoint = buildSpeechEndpoint(process.env.NINE_ROUTER_URL);
+    if (!endpoint) throw new Error("NINE_ROUTER_URL is missing; cannot synthesize speech");
+    const apiKey = process.env.NINE_ROUTER_API_KEY;
+    if (!apiKey) throw new Error("NINE_ROUTER_API_KEY is missing; cannot synthesize speech");
+    const model = process.env.NINE_ROUTER_TTS_MODEL || TTS_DEFAULT_MODEL;
+
+    const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model, input: text }),
+        signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!res.ok) {
+        // Read the error body for the log, but never let a huge error page
+        // flow into the message.
+        const detail = await res.text().catch(() => "");
+        throw new TtsHttpError(res.status, String(detail).slice(0, 200).trim());
+    }
+
+    const audio = Buffer.from(await res.arrayBuffer());
+    if (audio.length === 0) throw new Error("Speech endpoint returned an empty body");
+    fs.writeFileSync(audioPath, audio);
+}
+
+// Bounded retry for transient failures (429 rate limits, 5xx, dropped sockets).
+// 9router fronts the upstream voices, so a burst of GoPay notifications can
+// still hit a throttle; without this one 429 would silently degrade the voice
+// to termux-tts.
+async function ttsToFileWithRetry(text, audioPath, opts = {}) {
+    let lastErr;
+    for (let attempt = 1; attempt <= TTS_MAX_ATTEMPTS; attempt++) {
+        try {
+            await ttsToFile(text, audioPath, opts);
+            return;
+        } catch (e) {
+            lastErr = e;
+            if (attempt >= TTS_MAX_ATTEMPTS || !isRetryableTtsError(e)) break;
+            // Exponential backoff with jitter: throttles arrive in bursts, so a
+            // fixed delay would have every announcement retry in lockstep.
+            const backoff = TTS_RETRY_BASE_MS * 2 ** (attempt - 1);
+            const delay = Math.round(backoff * (0.5 + Math.random()));
+            logger.warning(
+                `TTS attempt ${attempt}/${TTS_MAX_ATTEMPTS} failed (${e.message}); retrying in ${delay}ms`
+            );
+            await sleep(delay);
         }
-    });
-}
-
-// text -> mp3 at audioPath. Resolves on turn.end, rejects on timeout/error.
-function edgeTtsToFile(
-    text,
-    audioPath,
-    { voice = "id-ID-GadisNeural", lang = "id-ID", timeoutMs = 25000 } = {}
-) {
-    return new Promise((resolve, reject) => {
-        // Microsoft retired the legacy Read Aloud host: since 2026-10-12 the
-        // WS upgrade to speech.platform.bing.com is rejected with 403 (the
-        // voices/list HTTP endpoint still answers, which is why this looked
-        // like a token problem). Read Aloud now lives on api.msedgeservices.com
-        // and takes the same client token as Ocp-Apim-Subscription-Key. The
-        // legacy Sec-MS-GEC token/version are still accepted there.
-        const url =
-            `wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1` +
-            `?Ocp-Apim-Subscription-Key=${EDGE_TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${edgeSecMsGec()}&Sec-MS-GEC-Version=1-${EDGE_CHROMIUM_VERSION}`;
-        const major = EDGE_CHROMIUM_VERSION.split(".")[0];
-        const ws = new WebSocket(url, {
-            host: "api.msedgeservices.com",
-            origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
-            headers: {
-                Pragma: "no-cache",
-                "Cache-Control": "no-cache",
-                "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`,
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-        });
-        const timer = setTimeout(() => {
-            try { ws.close(); } catch (e) {}
-            reject(new Error("edge TTS timeout"));
-        }, timeoutMs);
-
-        const stream = fs.createWriteStream(audioPath);
-        ws.on("open", () => {
-            ws.send(
-                `Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n` +
-                `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`
-            );
-            const reqId = crypto.randomBytes(16).toString("hex");
-            ws.send(
-                `X-RequestId:${reqId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n` +
-                `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}">` +
-                `<voice name="${voice}"><prosody rate="default" pitch="default" volume="default">` +
-                `${edgeEscapeXml(text)}</prosody></voice></speak>`
-            );
-        });
-        ws.on("message", (data, isBinary) => {
-            if (isBinary) {
-                const sep = "Path:audio\r\n";
-                const i = data.indexOf(sep) + sep.length;
-                stream.write(data.subarray(i));
-            } else if (String(data).includes("Path:turn.end")) {
-                stream.end();
-                stream.on("finish", () => {
-                    clearTimeout(timer);
-                    try { ws.close(); } catch (e) {}
-                    resolve();
-                });
-            }
-        });
-        ws.on("error", (e) => {
-            clearTimeout(timer);
-            reject(e);
-        });
-    });
+    }
+    throw lastErr;
 }
 
 // ====== Paths ======
@@ -541,19 +547,19 @@ class NotificationMonitor {
         const speech = `${title}. ${text}`;
         logger.info(`TTS: ${speech}`);
 
-        // Generate Edge audio in parallel with the silence check — network
-        // runs while the player is being muted, not after. Local fallback
-        // when generation fails.
+        // Generate the announcement audio in parallel with the silence check —
+        // network runs while the player is being muted, not after. Local
+        // fallback when generation fails.
         const prefetchAudio = () => {
             const audioFile = path.join(
                 os.tmpdir(),
-                `edge_tts_${Date.now()}.mp3`
+                `tts_${Date.now()}.mp3`
             );
-            return edgeTtsToFile(speech, audioFile)
+            return ttsToFileWithRetry(speech, audioFile)
                 .then(() => (fs.existsSync(audioFile) ? audioFile : null))
                 .catch((e) => {
                     logger.warning(
-                        `TTS edge prefetch failed: ${e.message}; fallback termux-tts`
+                        `TTS prefetch failed: ${e.message}; fallback termux-tts`
                     );
                     try {
                         if (fs.existsSync(audioFile)) fs.unlinkSync(audioFile);
@@ -572,7 +578,7 @@ class NotificationMonitor {
                         fs.unlinkSync(audioFile);
                     } catch (e) {}
                     if (!playError) return resolve(true);
-                    logger.warning(`TTS edge play failed: ${playError.message}`);
+                    logger.warning(`TTS play failed: ${playError.message}`);
                     resolve(false);
                 }
             );

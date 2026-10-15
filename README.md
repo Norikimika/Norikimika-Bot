@@ -57,6 +57,7 @@ Main variables:
 - `SHEETS_ID`, `SHEETS_GID`: Price-list source.
 - `NINE_ROUTER_URL`, `NINE_ROUTER_API_KEY`: Shared OpenAI-compatible provider URL and API key.
 - `NINE_ROUTER_MODEL`: Model used for receipt analysis.
+- `NINE_ROUTER_TTS_MODEL`: Voice model for spoken notifications (defaults to `edge-tts/id-ID-GadisNeural`).
 - `PRINT_CMD`: Receipt printing command.
 - `GITHUB_TOKEN`, `GITLAB_TOKEN`: Repository monitor access tokens, when required.
 - `STORE_NAME`, `STORE_ADDRESS`, `STRUK_FONT`, `STRUK_FONTSIZE`: Receipt configuration.
