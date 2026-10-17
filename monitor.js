@@ -527,7 +527,7 @@ async function checkOpenRouterModels() {
       const form = new globalThis.FormData();
       form.append('chat_id', TELEGRAM_CHAT_ID);
       form.append('message_thread_id', TOPIC_ID_STATUS);
-      form.append('caption', `<b>New OpenRouter Models</b> (${newModels.length})`);
+      form.append('caption', `<a href="https://openrouter.ai/models"><b>New OpenRouter Models</b> (${newModels.length})</a>`);
       form.append('parse_mode', 'HTML');
       form.append('photo', new Blob([png], { type: 'image/png' }), 'openrouter_models.png');
       const res = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
@@ -771,7 +771,7 @@ async function checkArtificialAnalysis() {
     const form = new globalThis.FormData();
     form.append('chat_id', TELEGRAM_CHAT_ID);
     form.append('message_thread_id', TOPIC_ID_STATUS);
-    form.append('caption', `<b>Artificial Analysis Top Models</b>`);
+    form.append('caption', `<a href="https://artificialanalysis.ai/leaderboards/models"><b>Artificial Analysis Top Models</b></a>`);
     form.append('parse_mode', 'HTML');
     form.append('photo', new Blob([png], { type: 'image/png' }), 'aa_top.png');
     const send = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
@@ -825,7 +825,7 @@ async function checkTopWeekly() {
     const form = new globalThis.FormData();
     form.append('chat_id', TELEGRAM_CHAT_ID);
     form.append('message_thread_id', TOPIC_ID_STATUS);
-    form.append('caption', `<b>OpenRouter Top Weekly Models</b>`);
+    form.append('caption', `<a href="https://openrouter.ai/models?order=top-weekly"><b>OpenRouter Top Weekly Models</b></a>`);
     form.append('parse_mode', 'HTML');
     form.append('photo', new Blob([png], { type: 'image/png' }), 'top_weekly.png');
     const send = await nativeFetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form });
