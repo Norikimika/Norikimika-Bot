@@ -95,7 +95,8 @@ const GITHUB_REPOS = [
   {
     owner: "NousResearch",
     repo: "hermes-agent",
-    branch: "main"
+    branch: "main",
+    path: "hermes_cli/__init__.py"
   }
 ];
 
