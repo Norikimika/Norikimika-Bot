@@ -179,9 +179,21 @@ for (const r of REQUIRED) {
 // ====== Logger ======
 fs.mkdirSync(logDir, { recursive: true });
 
+// Telegram request URLs carry the bot token; node-fetch echoes them in error
+// messages, which then landed in plaintext log files.
+const redactSecrets = (text) =>
+    String(text).replace(/bot\d+:[A-Za-z0-9_-]{20,}/g, "bot<redacted>");
+
+const escapeHtml = (value) =>
+    String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
 function log(level, message) {
     const ts = new Date().toLocaleString();
-    const formatted = `[${ts}] [${level}] ${message}`;
+    const formatted = `[${ts}] [${level}] ${redactSecrets(message)}`;
     try {
         fs.appendFileSync(logFile, formatted + '\n', 'utf8');
     } catch (err) {
@@ -534,11 +546,13 @@ class NotificationMonitor {
     }
 
     format_message(notif_data, app_name) {
+        // Notification text comes from arbitrary apps; unescaped it breaks the
+        // HTML parse mode or injects markup into the Telegram message.
         return (
-            `<b>🔔 New ${app_name} Notification</b>\n` +
-            `<blockquote>⏰ Time: ${notif_data.time_str}\n` +
-            `📝 Title: ${notif_data.title}\n` +
-            `💬 Text: ${notif_data.text}</blockquote>`
+            `<b>🔔 New ${escapeHtml(app_name)} Notification</b>\n` +
+            `<blockquote>⏰ Time: ${escapeHtml(notif_data.time_str)}\n` +
+            `📝 Title: ${escapeHtml(notif_data.title)}\n` +
+            `💬 Text: ${escapeHtml(notif_data.text)}</blockquote>`
         );
     }
 

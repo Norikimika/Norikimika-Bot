@@ -120,10 +120,15 @@ const ARROW = "<i>-&gt;</i>";
 const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.json');
 const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.log');
 
+// Telegram request URLs embed the bot token and node-fetch repeats them in
+// error messages, so scrub before anything reaches the log file.
+const redactSecrets = (text) =>
+  String(text).replace(/bot\d+:[A-Za-z0-9_-]{20,}/g, "bot<redacted>");
+
 function log(msg) {
   fs.appendFileSync(
     LOG_FILE,
-    `[${new Date().toLocaleString()}] ${msg}\n`
+    `[${new Date().toLocaleString()}] ${redactSecrets(msg)}\n`
   );
 }
 

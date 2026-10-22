@@ -17,13 +17,75 @@ const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fet
 const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'telegram.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
 
+// Upload URLs embed the bot token (`/file/bot<id>:<secret>/...`); node-fetch puts
+// the URL in error messages, so every log line goes through this first.
+const redactSecrets = (text) =>
+  String(text).replace(/bot\d+:[A-Za-z0-9_-]{20,}/g, "bot<redacted>");
+
 function appendLogLine(line) {
   try {
     const ts = new Date().toLocaleString();
-    fs.appendFileSync(LOG_FILE, `[${ts}] ${line}\n`);
+    fs.appendFileSync(LOG_FILE, `[${ts}] ${redactSecrets(line)}\n`);
   } catch (e) {
     console.error("Failed to write to log file:", e.message);
   }
+}
+
+// ---- guarded media fetch (the /tt endpoints hand back third-party URLs) ----
+const MAX_MEDIA_BYTES = 128 * 1024 * 1024;
+
+function isPublicAddress(address, family) {
+  if (family === 6) {
+    const a = address.toLowerCase();
+    return !(a === "::1" || a === "::" || a.startsWith("fe80:") || a.startsWith("fc") || a.startsWith("fd"));
+  }
+  const [a, b] = address.split(".").map(Number);
+  return !(
+    a === 0 || a === 10 || a === 127 || a >= 224 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
+async function assertPublicUrl(rawUrl) {
+  let url;
+  try {
+    url = new URL(String(rawUrl));
+  } catch {
+    throw new Error("Blocked URL: not a valid absolute URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`Blocked URL: scheme ${url.protocol} not allowed`);
+  }
+  const records = await dns.promises.lookup(url.hostname, { all: true });
+  if (!records.length) throw new Error(`Blocked URL: ${url.hostname} did not resolve`);
+  for (const record of records) {
+    if (!isPublicAddress(record.address, record.family)) {
+      throw new Error(`Blocked URL: ${url.hostname} resolves to a private address`);
+    }
+  }
+  return url;
+}
+
+async function fetchMedia(rawUrl, maxBytes = MAX_MEDIA_BYTES) {
+  const url = await assertPublicUrl(rawUrl);
+  const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
+  if (res.url && res.url !== url.toString()) await assertPublicUrl(res.url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url.host}`);
+
+  const declared = Number(res.headers.get("content-length") || 0);
+  if (declared > maxBytes) throw new Error(`Media larger than ${maxBytes} bytes`);
+
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > maxBytes) throw new Error(`Media larger than ${maxBytes} bytes`);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 process.on("uncaughtException", (err) => {
@@ -264,6 +326,17 @@ const adminOnly = async (ctx, next) => {
 
     if (!userId || !chatId) {
       return safeReply(ctx, "❌ Permission error", { reply_to_message_id: replyToMsgId });
+    }
+
+    // Privileged commands are only ever valid inside the configured CHAT_ID.
+    // Checking the inbound chat's admin list alone lets an admin of any other
+    // chat the bot was added to reach root commands (/reboot, /approve, ...).
+    if (!Number.isFinite(CHAT_ID) || chatId !== CHAT_ID) {
+      appendLogLine(`adminOnly: rejected /${ctx.message?.text || ctx.callbackQuery?.data || "?"} from foreign chat ${chatId} by user ${userId}`);
+      if (ctx.callbackQuery) {
+        return safeAnswerCbQuery(ctx, "⛔ Not authorized.", { show_alert: true });
+      }
+      return safeReply(ctx, "⛔ Not authorized.", { reply_to_message_id: replyToMsgId });
     }
 
     const isAdmin = await isUserAdmin(ctx, chatId, userId);
@@ -604,7 +677,9 @@ async function handleMusicCommand(ctx, targetTopicId) {
     const duration = formatDuration(info.duration);
     const mediaUrl = info.webpage_url || (query.startsWith("http") ? query : info.url);
 
-    const fileId = `${Date.now()}_${info.id}`;
+    // Same track requested twice in the same millisecond used to collide on the
+    // download/thumbnail path so the two requests deleted each other's file.
+    const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${info.id}`;
     // yt-dlp chooses the container from whichever format it resolves (251 webm,
     // 140 m4a), so the extension is not known up front.
     const audioOut = path.join(__dirname, `${fileId}.%(ext)s`);
@@ -952,7 +1027,10 @@ function buildStrukPLN(data) {
   const roundedNominal = roundTokenNominal(data.nominal);
   const admin = calcAdmin(roundedNominal);
   const nom = parseInt((roundedNominal || "0").replace(/\./g, ""), 10) || 0;
-  const tot = rupiah(nom + admin.num);
+  // The receipt already shows what the customer paid; adding the admin fee on
+  // top of it printed a TOTAL higher than the actual payment.
+  const paid = parseInt(String(data.totalDibayar || "").replace(/\D/g, ""), 10) || 0;
+  const tot = paid > 0 ? rupiah(paid) : rupiah(nom + admin.num);
 
   const witaTime = adjustToWita(data.waktu);
 
@@ -1072,7 +1150,9 @@ function execPromise(command, timeout = 20000) {
 }
 
 async function buildStrukImage(struk) {
-  const id = Date.now();
+  // Concurrency-safe suffix: two receipts in the same millisecond used to share
+  // every intermediate file name and print each other's numbers.
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const files = {
     nameTxt: `struk_name_${id}.txt`,
     addrTxt: `struk_addr_${id}.txt`,
@@ -1167,7 +1247,8 @@ If it's a PLN ELECTRICITY TOKEN receipt:
   "tarif": "tariff/power e.g. R2/3500VA",
   "jmlKwh": "kWh total amount",
   "token": "20 digits token numbers only without space or hyphen",
-  "nominal": "total payment paid by customer with thousands separator"
+  "nominal": "token purchase amount before the admin fee, thousands separator",
+  "totalDibayar": "total amount paid by the customer including the admin fee, thousands separator"
 }
 
 If it's a Pulsa receipt (Telkomsel, Tri, XL, simPATI, Indosat, etc):
@@ -1678,14 +1759,12 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
       for (let i = 0; i < n; i++) {
         const tag = String(i + 1).padStart(2, "0");
         if (liveRaw[i]) {
-          const vidRes = await fetch(liveRaw[i]);
-          const buffer = Buffer.from(await vidRes.arrayBuffer());
+          const buffer = await fetchMedia(liveRaw[i]);
           const filePath = path.join(tempDir, `slide_${tag}.mp4`);
           fs.writeFileSync(filePath, buffer);
           slides.push({ kind: "video", path: filePath });
         } else if (images[i]) {
-          const imgRes = await fetch(images[i]);
-          const buffer = Buffer.from(await imgRes.arrayBuffer());
+          const buffer = await fetchMedia(images[i]);
           const filePath = path.join(tempDir, `slide_${tag}.jpg`);
           fs.writeFileSync(filePath, buffer);
           slides.push({ kind: "photo", path: filePath });
@@ -1694,8 +1773,7 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
     } else if (isImages) {
       for (let i = 0; i < images.length; i++) {
         const imgUrl = images[i];
-        const imgRes = await fetch(imgUrl);
-        const buffer = Buffer.from(await imgRes.arrayBuffer());
+        const buffer = await fetchMedia(imgUrl);
         const filePath = path.join(tempDir, `photo_${String(i + 1).padStart(2, "0")}.jpg`);
         fs.writeFileSync(filePath, buffer);
         downloadedFiles.push(filePath);
@@ -1703,8 +1781,7 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
     } else if (!isLive) {
       if (!videoUrl) throw new Error("No video URL found in API response");
 
-      const videoRes = await fetch(videoUrl);
-      const videoBuffer = Buffer.from(await videoRes.arrayBuffer());
+      const videoBuffer = await fetchMedia(videoUrl, MAX_MEDIA_BYTES);
       const filePath = path.join(tempDir, "video.mp4");
       fs.writeFileSync(filePath, videoBuffer);
       downloadedFiles.push(filePath);
@@ -1712,8 +1789,7 @@ bot.command("tt", topicOnly, adminOnly, async (ctx) => {
 
     if (musicUrl) {
       try {
-        const audioRes = await fetch(musicUrl);
-        const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+        const audioBuffer = await fetchMedia(musicUrl, 32 * 1024 * 1024);
         audioPath = path.join(tempDir, "audio.mp3");
         fs.writeFileSync(audioPath, audioBuffer);
       } catch {}

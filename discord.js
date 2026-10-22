@@ -72,6 +72,41 @@ const AUDIO_CONFIG = {
 
 const queues = new Map();
 const tempVoiceChannels = new Set();
+
+// ---- untrusted text / URL helpers ----
+// Track titles and artists come from YouTube metadata. Unescaped they break out
+// of an embed's markdown link (or inject mentions), so every interpolated field
+// goes through mdSafe() and every link through safeMediaUrl().
+function mdSafe(value, max = 200) {
+  return String(value ?? "")
+    .replace(/[\\`*_~|<>\[\]()]/g, "\\$&")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+const MEDIA_HOSTS = [
+  "youtube.com",
+  "youtu.be",
+  "soundcloud.com",
+  "spotify.com",
+  "music.apple.com",
+];
+
+// yt-dlp happily fetches file://, http://169.254.169.254/... and anything else
+// it is handed, so playlist URLs are restricted to known media hosts before the
+// extractor is spawned.
+function safeMediaUrl(raw) {
+  const url = new URL(String(raw));
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`Unsupported URL scheme: ${url.protocol}`);
+  }
+  const host = url.hostname.toLowerCase();
+  if (!MEDIA_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) {
+    throw new Error(`Host not allowed: ${host}`);
+  }
+  return url.toString();
+}
 const aloneTimers = new Map();
 const ALONE_TIMEOUT = 5 * 60 * 1000;
 
@@ -526,6 +561,13 @@ async function searchYtMusic(query, limit = 10) {
 async function getPlaylistTracks(playlistUrl) {
   if (!playlistUrl) return [];
 
+  try {
+    playlistUrl = safeMediaUrl(playlistUrl);
+  } catch (err) {
+    log(`[yt-dlp Playlist Blocked] ${err.message}`);
+    return [];
+  }
+
   const args = [
     "--flat-playlist", "--no-warnings", "--no-cache-dir", "--skip-download",
     "-J", playlistUrl,
@@ -868,6 +910,7 @@ function destroyServerQueue(guildId, deleteQueue = false) {
   clearAloneTimer(guildId);
 
   serverQueue.transitioning = true;
+  serverQueue.epoch = (serverQueue.epoch || 0) + 1;
   serverQueue.playing = false;
   serverQueue.autoplayPrefetch = null;
   serverQueue.songs = [];
@@ -922,7 +965,27 @@ async function advanceQueue(guildId, reason = "idle") {
 
 async function playNextSong(guildId) {
   const serverQueue = queues.get(guildId);
+  if (!serverQueue) return;
+
+  // One transition per guild at a time. Without this, a stop/destroy that lands
+  // while the next track is being resolved was silently overridden by the
+  // in-flight play, which then started the autoplay track anyway.
+  if (serverQueue.nextInFlight) return serverQueue.nextInFlight;
+
+  const epoch = serverQueue.epoch || 0;
+  const promise = playNextSongLocked(guildId, epoch).finally(() => {
+    const current = queues.get(guildId);
+    if (current && current.nextInFlight === promise) current.nextInFlight = null;
+  });
+  serverQueue.nextInFlight = promise;
+  return promise;
+}
+
+async function playNextSongLocked(guildId, epoch) {
+  const serverQueue = queues.get(guildId);
   if (!serverQueue || serverQueue.playing) return;
+
+  if ((serverQueue.epoch || 0) !== epoch) return;
 
   if (serverQueue.failCount >= AUDIO_CONFIG.maxConsecutiveFailures) {
     const embed = new EmbedBuilder()
@@ -984,7 +1047,7 @@ async function playNextSong(guildId) {
 
   if (!isValidSong(song)) {
     serverQueue.songs.shift();
-    return playNextSong(guildId);
+    return playNextSongLocked(guildId, epoch);
   }
 
   serverQueue.lastSong = song;
@@ -1006,7 +1069,7 @@ async function playNextSong(guildId) {
     const resource = await createAudioResourceFromSong(song);
     const currentQueue = queues.get(guildId);
 
-    if (!currentQueue || currentQueue !== serverQueue) {
+    if (!currentQueue || currentQueue !== serverQueue || (currentQueue.epoch || 0) !== epoch) {
       destroyAudioResource(resource);
       return;
     }
@@ -1016,12 +1079,12 @@ async function playNextSong(guildId) {
     currentQueue.player.play(resource);
     currentQueue.failCount = 0;
 
-    const artistText = song.artist && song.artist !== "Unknown Artist" ? ` by ${song.artist}` : "";
+    const artistText = song.artist && song.artist !== "Unknown Artist" ? ` by ${mdSafe(song.artist)}` : "";
     const reqText = song.isManual && song.requestedBy ? `\nRequested by: <@${song.requestedBy.id}>` : "\n*(Autoplay)*";
 
     const embed = new EmbedBuilder()
       .setColor("#00FF00")
-      .setDescription(`Started playing [${song.title}](${song.url})${artistText}${reqText}`);
+      .setDescription(`Started playing [${mdSafe(song.title)}](${mdSafe(song.url, 500)})${artistText}${reqText}`);
 
     if (songId) {
       embed.setThumbnail(`https://img.youtube.com/vi/${songId}/mqdefault.jpg`);
@@ -1042,7 +1105,7 @@ async function playNextSong(guildId) {
 
     const errEmbed = new EmbedBuilder()
       .setColor("#FF0000")
-      .setDescription(`Failed to play: **${song.title}**. Skipping...`);
+      .setDescription(`Failed to play: **${mdSafe(song.title)}**. Skipping...`);
 
     await currentQueue.textChannel?.send({ embeds: [errEmbed] }).catch(() => {});
 
@@ -1769,19 +1832,21 @@ function runDiscord() {
         const member = newState.member;
 
         const createdChannel = await guild.channels.create({
-          name: `🦕┃${member.displayName}`,
+          // Member-controlled display names get stripped of control/mention
+          // characters before they become a channel name.
+          name: `🦕┃${String(member.displayName).replace(/[^\p{L}\p{N} _.|\-]/gu, "").slice(0, 80) || "room"}`,
           type: ChannelType.GuildVoice,
           parent: joinedChannel.parentId || null,
+          // Owning your own temp channel does not need ManageChannels, nor the
+          // ability to mute/deafen/move other members; granting those let any
+          // non-admin member moderate the whole voice channel.
           permissionOverwrites: [
             {
               id: member.id,
               allow: [
-                PermissionFlagsBits.ManageChannels,
+                PermissionFlagsBits.ViewChannel,
                 PermissionFlagsBits.Connect,
                 PermissionFlagsBits.Speak,
-                PermissionFlagsBits.MuteMembers,
-                PermissionFlagsBits.DeafenMembers,
-                PermissionFlagsBits.MoveMembers,
               ],
             },
           ],
@@ -1922,7 +1987,12 @@ function runDiscord() {
 
         if (lastText) {
           recordChatTurn(userId, "assistant", lastText);
-          await message.reply(lastText.slice(0, DISCORD_CHATBOT_MAX_LENGTH));
+          // Model output can echo user text that contains "@everyone"; never let
+          // a reply parse mentions.
+          await message.reply({
+            content: lastText.slice(0, DISCORD_CHATBOT_MAX_LENGTH),
+            allowedMentions: { parse: [], repliedUser: false },
+          });
         } else log("[Chatbot] Provider returned an empty response");
       } catch (err) {
         log(`[Chatbot] ${err.message}`);
@@ -1981,7 +2051,7 @@ function runDiscord() {
       } else {
         const displayList = queuedSongs.slice(0, 10);
         description += displayList
-          .map((song, index) => `${index + 1}. [${song.title}](${song.url}) - ${song.requestedBy?.id ? `<@${song.requestedBy.id}>` : "Autoplay"}`)
+          .map((song, index) => `${index + 1}. [${mdSafe(song.title)}](${mdSafe(song.url, 500)}) - ${song.requestedBy?.id ? `<@${song.requestedBy.id}>` : "Autoplay"}`)
           .join("\n");
 
         if (queuedSongs.length > 10) {
@@ -2168,10 +2238,10 @@ function runDiscord() {
             await message.channel.send({ embeds: [embed] });
           } else {
             const firstSong = newSongs[0] || songsToAdd[0];
-            const artistText = firstSong.artist && firstSong.artist !== "Unknown Artist" ? ` by ${firstSong.artist}` : "";
+            const artistText = firstSong.artist && firstSong.artist !== "Unknown Artist" ? ` by ${mdSafe(firstSong.artist)}` : "";
             const embed = new EmbedBuilder()
               .setColor("#00FF00")
-              .setDescription(`Added to queue: [${firstSong.title}](${firstSong.url})${artistText}`);
+              .setDescription(`Added to queue: [${mdSafe(firstSong.title)}](${mdSafe(firstSong.url, 500)})${artistText}`);
 
             const videoId = getSongId(firstSong);
             if (videoId) {
@@ -2279,10 +2349,10 @@ function runDiscord() {
       }
 
       const currentSong = serverQueue.songs[0];
-      const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${currentSong.artist}` : "";
+      const artistText = currentSong.artist && currentSong.artist !== "Unknown Artist" ? ` by ${mdSafe(currentSong.artist)}` : "";
       const embed = new EmbedBuilder()
         .setColor("#FFFF00")
-        .setDescription(`**${currentSong.title}**${artistText} was skipped by ${message.author}`);
+        .setDescription(`**${mdSafe(currentSong.title)}**${artistText} was skipped by ${message.author}`);
 
       try { serverQueue.player.stop(); } catch {}
       return message.channel.send({ embeds: [embed] });

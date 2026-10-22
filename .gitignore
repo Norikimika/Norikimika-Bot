@@ -1,0 +1,15 @@
+# Secrets — never commit (BOT_TOKEN, GEMINI/NINE_ROUTER keys)
+.env
+.env.*
+!.env.example
+
+# Strix scan output embeds credential values verbatim
+strix_runs/
+
+# Runtime artifacts
+node_modules/
+*.log
+struk_*
+tt_*
+*.mp3
+*.mp4
