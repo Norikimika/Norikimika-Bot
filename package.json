@@ -1,0 +1,25 @@
+{
+  "name": "LogError404Bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram/Discord operator bot for a personal Android host.",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check discord.js && node --check notification.js && node --check monitor.js && node --check repo.js && node --check bing.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "@napi-rs/canvas": "^0.1.80",
+    "discord.js": "^14.24.0",
+    "dotenv": "^17.2.3",
+    "escape-html": "^1.0.3",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^3.3.2",
+    "telegraf": "^4.16.3"
+  }
+}

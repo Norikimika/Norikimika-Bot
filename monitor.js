@@ -1,5 +1,7 @@
 // ====================== CONFIG ======================
 require('dotenv').config();
+// Monitor state and log carry tokens and chat ids; keep them owner-only.
+process.umask(0o077);
 const nativeFetch = globalThis.fetch;
 if (typeof nativeFetch !== 'function' || typeof globalThis.FormData !== 'function' || typeof globalThis.Blob !== 'function') {
   throw new Error('Node 24+ with native fetch, FormData, and Blob required');
@@ -61,6 +63,9 @@ async function sendToTelegram(message, topicId) {
 
 // ================== STATE VARIABLES ==================
 const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'monitor.json');
+// Existing files were created 0644 before the umask change.
+for (const f of [LOG_FILE, STATE_FILE]) { try { fs.chmodSync(f, 0o600); } catch {} }
+
 
 let monitorState = {
   battery80Sent: false,

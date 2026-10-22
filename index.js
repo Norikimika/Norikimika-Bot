@@ -14,13 +14,32 @@ const execFilePromise = util.promisify(execFile);
 
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
+// Everything this process writes (logs, state, downloaded media) holds user
+// data or credentials; 0700/0600 beats the default umask 0022 -> 0644.
+process.umask(0o077);
+
 const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'telegram.log');
-const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
+try { fs.chmodSync(LOG_FILE, 0o600); } catch {}
+const logStream = fs.createWriteStream(LOG_FILE, { flags: "a", mode: 0o600 });
 
 // Upload URLs embed the bot token (`/file/bot<id>:<secret>/...`); node-fetch puts
-// the URL in error messages, so every log line goes through this first.
+// the URL in error messages, so every log line goes through this first. The
+// provider-key shapes are here because users paste keys into the chat.
+const SECRET_PATTERNS = [
+  /bot\d+:[A-Za-z0-9_-]{20,}/g,
+  /\b\d{8,10}:[A-Za-z0-9_-]{30,}/g,
+  /AIza[0-9A-Za-z_-]{30,}/g,
+  /sk-[A-Za-z0-9_-]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /gsk_[A-Za-z0-9]{20,}/g,
+  /nvapi-[A-Za-z0-9_-]{20,}/g,
+  /tvly-[A-Za-z0-9_-]{20,}/g,
+  /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+];
+
 const redactSecrets = (text) =>
-  String(text).replace(/bot\d+:[A-Za-z0-9_-]{20,}/g, "bot<redacted>");
+  SECRET_PATTERNS.reduce((acc, re) => acc.replace(re, "<redacted>"), String(text));
 
 function appendLogLine(line) {
   try {
@@ -33,11 +52,22 @@ function appendLogLine(line) {
 
 // ---- guarded media fetch (the /tt endpoints hand back third-party URLs) ----
 const MAX_MEDIA_BYTES = 128 * 1024 * 1024;
+const http = require("http");
 
 function isPublicAddress(address, family) {
   if (family === 6) {
     const a = address.toLowerCase();
-    return !(a === "::1" || a === "::" || a.startsWith("fe80:") || a.startsWith("fc") || a.startsWith("fd"));
+    // IPv4-mapped/compatible forms (::ffff:127.0.0.1, ::ffff:7f00:1) must be
+    // judged by the v4 address they carry, or loopback passes as "public v6".
+    const dotted = a.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
+    if (dotted) return isPublicAddress(dotted[1], 4);
+    const hex = a.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex) {
+      const hi = parseInt(hex[1], 16);
+      const lo = parseInt(hex[2], 16);
+      return isPublicAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`, 4);
+    }
+    return !(a === "::1" || a === "::" || a.startsWith("fe80:") || /^f[cd]/.test(a));
   }
   const [a, b] = address.split(".").map(Number);
   return !(
@@ -66,14 +96,35 @@ async function assertPublicUrl(rawUrl) {
       throw new Error(`Blocked URL: ${url.hostname} resolves to a private address`);
     }
   }
-  return url;
+  return { url, address: records[0].address, family: records[0].family };
+}
+
+// The socket is tied to the address that was classified a moment ago, so a
+// second DNS answer cannot relocate the connection to a private host.
+function pinnedAgent(protocol, address, family) {
+  const Agent = protocol === "https:" ? https.Agent : http.Agent;
+  return new Agent({
+    lookup: (hostname, options, callback) => callback(null, address, family),
+  });
 }
 
 async function fetchMedia(rawUrl, maxBytes = MAX_MEDIA_BYTES) {
-  const url = await assertPublicUrl(rawUrl);
-  const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
-  if (res.url && res.url !== url.toString()) await assertPublicUrl(res.url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url.host}`);
+  let target = await assertPublicUrl(rawUrl);
+  let res;
+
+  for (let hop = 0; ; hop++) {
+    if (hop > 5) throw new Error("Blocked URL: too many redirects");
+    res = await fetch(target.url, {
+      redirect: "manual",
+      agent: pinnedAgent(target.url.protocol, target.address, target.family),
+      signal: AbortSignal.timeout(60000),
+    });
+    const location = res.headers.get("location");
+    if (!location || ![301, 302, 303, 307, 308].includes(res.status)) break;
+    target = await assertPublicUrl(new URL(location, target.url).toString());
+  }
+
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${target.url.host}`);
 
   const declared = Number(res.headers.get("content-length") || 0);
   if (declared > maxBytes) throw new Error(`Media larger than ${maxBytes} bytes`);
@@ -286,7 +337,7 @@ bot.use(async (ctx, next) => {
     msg = `[${types.find((t) => ctx.message?.[t]) || "non-text"}]`;
   }
   const line = `From ${user}: ${msg}`;
-  logStream.write(`[${new Date().toLocaleString('id-ID')}] ${line}\n`);
+  logStream.write(`[${new Date().toLocaleString('id-ID')}] ${redactSecrets(line)}\n`);
   await next();
 });
 
@@ -677,9 +728,10 @@ async function handleMusicCommand(ctx, targetTopicId) {
     const duration = formatDuration(info.duration);
     const mediaUrl = info.webpage_url || (query.startsWith("http") ? query : info.url);
 
-    // Same track requested twice in the same millisecond used to collide on the
-    // download/thumbnail path so the two requests deleted each other's file.
-    const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${info.id}`;
+    // yt-dlp derives `id` from the remote URL and it can carry "/" or "..";
+    // a sanitised id keeps the absolute path inside __dirname.
+    const safeId = String(info.id || "track").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+    const fileId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeId}`;
     // yt-dlp chooses the container from whichever format it resolves (251 webm,
     // 140 m4a), so the extension is not known up front.
     const audioOut = path.join(__dirname, `${fileId}.%(ext)s`);
@@ -1064,9 +1116,10 @@ function buildStrukPLN(data) {
     padR("TOTAL", `Rp ${tot}`, W),
     EQ,
     "",
-    padC("** TRANSAKSI BERHASIL **", W),
+    padC("** STRUK HASIL EKSTRAKSI **", W),
     "",
     padC("TERIMA KASIH", W),
+    padC("VERIFIKASI MANUAL", W),
   ].filter((r) => r !== null).join("\n");
 }
 
@@ -1096,9 +1149,10 @@ function buildStrukTransfer(data) {
     padR("TOTAL", `Rp ${tot}`, W),
     EQ,
     "",
-    padC("** TRANSAKSI BERHASIL **", W),
+    padC("** STRUK HASIL EKSTRAKSI **", W),
     "",
     padC("TERIMA KASIH", W),
+    padC("VERIFIKASI MANUAL", W),
   ].filter((r) => r !== null).join("\n");
 }
 
@@ -1128,9 +1182,10 @@ function buildStrukPulsa(data) {
     padR("TOTAL", `Rp ${tot}`, W),
     EQ,
     "",
-    padC("** TRANSAKSI BERHASIL **", W),
+    padC("** STRUK HASIL EKSTRAKSI **", W),
     "",
     padC("TERIMA KASIH", W),
+    padC("VERIFIKASI MANUAL", W),
   ].filter((r) => r !== null).join("\n");
 }
 
@@ -1417,13 +1472,22 @@ async function processReceipt(ctx, targetThreadId) {
       return;
     }
 
+    const digits = (value) => String(value ?? "").replace(/\D/g, "");
+    const nominalNum = parseInt(digits(parsed.nominal), 10) || 0;
+
+    // A struk is printed as proof-of-payment, so refuse anything that does not
+    // carry the fields the artifact claims: real money, and a full token.
     const isValid =
-      (parsed.type === "pln" && parsed.token && parsed.token.replace(/\D/g, "").length >= 10) ||
-      (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan)) ||
-      (parsed.type === "pulsa" && (parsed.providerTujuan || parsed.noProvider));
+      nominalNum > 0 &&
+      ((parsed.type === "pln" && digits(parsed.token).length === 20) ||
+        (parsed.type === "transfer" && (parsed.noRekening || parsed.bankTujuan)) ||
+        (parsed.type === "pulsa" && (parsed.providerTujuan || parsed.noProvider)));
 
     if (!isValid) {
-      appendLogLine("Struk validation failed: Image is not recognized as a valid receipt.");
+      appendLogLine(`Struk validation failed: rejected type=${parsed.type} nominal=${nominalNum} tokenLen=${digits(parsed.token).length}`);
+      await safeReply(ctx, "❌ Struk tidak lolos verifikasi (nominal/token tidak terbaca penuh). Kirim ulang foto yang lebih jelas.", {
+        message_thread_id: targetThreadId,
+      }).catch(() => {});
       return;
     }
 
@@ -1504,9 +1568,23 @@ bot.on("photo", adminOnly, async (ctx) => {
 // ================== PRICE ==================
 async function fetchPriceList() {
   const url = `https://docs.google.com/spreadsheets/d/${process.env.SHEETS_ID}/export?format=csv&gid=${process.env.SHEETS_GID || "0"}`;
-  const res = await fetch(url);
+  // The sheet is collaborator-editable: without a timeout and a size cap a slow
+  // or oversized export hangs the bot or OOM-kills it on the next /p.
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`Sheets HTTP ${res.status}`);
-  const csv = await res.text();
+
+  const MAX_SHEET_BYTES = 2 * 1024 * 1024;
+  const declared = Number(res.headers.get("content-length") || 0);
+  if (declared > MAX_SHEET_BYTES) throw new Error("Sheets export too large");
+
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > MAX_SHEET_BYTES) throw new Error("Sheets export too large");
+    chunks.push(chunk);
+  }
+  const csv = Buffer.concat(chunks).toString("utf8");
 
   return csv
     .split("\n")
@@ -1543,6 +1621,9 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
   }
 
   const typing = startTyping(ctx, threadId);
+  // Cost price and margin are operator data: <tg-spoiler> only hides them in the
+  // client, the payload still carries the numbers. Gate on real admin status.
+  const showMargin = await isUserAdmin(ctx, ctx.chat?.id, ctx.from?.id).catch(() => false);
 
   try {
     const rows = await fetchPriceList();
@@ -1582,7 +1663,10 @@ bot.hears(/^\/p(?:@\w+)?(?:\s+(.+))?$/i, topicOnly, async (ctx) => {
       const rawProfit = (row[6] || "-").replace(/\r/g, "").trim();
       const profit = escapeHTML(rawProfit.toUpperCase() === "#VALUE!" ? "-" : rawProfit);
 
-      const item = `<blockquote>Name : ${name}\nContents : ${contents}\nPrice : ${price}\nCapital : <tg-spoiler>${capital}</tg-spoiler>\nProfit : <tg-spoiler>${profit}</tg-spoiler></blockquote>\n`;
+      const margin = showMargin
+        ? `Capital : ${capital}\nProfit : ${profit}\n`
+        : "";
+      const item = `<blockquote>Name : ${name}\nContents : ${contents}\nPrice : ${price}\n${margin}</blockquote>\n`;
 
       if (current.length + item.length > 3800) {
         chunks.push(current.trim());
@@ -1973,10 +2057,15 @@ const runDiscord = require('./discord.js');
 const { startBingRewards } = require('./bing.js');
 
 async function loop() {
-  runRepo().catch((err) => {
+  // Await the pass: a hung GitHub call used to leave the previous pass running
+  // while the next one started every five minutes, leaking a socket per tick.
+  try {
+    await runRepo();
+  } catch (err) {
     appendLogLine(`Repo Error: ${err.message}`);
-  });
-  setTimeout(loop, 300000);
+  } finally {
+    setTimeout(loop, 300000);
+  }
 }
 
 loop();

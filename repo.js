@@ -1,6 +1,12 @@
 // ====================== CONFIG ======================
 require('dotenv').config();
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+// Logs and state carry tokens and chat data; default umask 0022 leaves them 0644.
+process.umask(0o077);
+const rawFetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+// A request that is accepted but never answered used to hang the watcher pass
+// forever, and every tick started another one. Every call gets a deadline.
+const fetch = (url, options = {}) =>
+  rawFetch(url, { signal: AbortSignal.timeout(20000), ...options });
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -119,6 +125,9 @@ const ARROW = "<i>-&gt;</i>";
 // ====== State File ======
 const STATE_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.json');
 const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'repo.log');
+// Existing files were created 0644 before the umask change.
+for (const f of [STATE_FILE, LOG_FILE]) { try { fs.chmodSync(f, 0o600); } catch {} }
+
 
 // Telegram request URLs embed the bot token and node-fetch repeats them in
 // error messages, so scrub before anything reaches the log file.

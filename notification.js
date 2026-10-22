@@ -1,6 +1,8 @@
 // ====================== CONFIG ======================
 require('dotenv').config();
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+// Logs, state and TTS files carry user data; keep them owner-only.
+process.umask(0o077);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -115,6 +117,8 @@ const envPath = path.join(homeDir, "SERVER/LogError404Bot/.env");
 const jsonPath = path.join(homeDir, "SERVER/Backup/notification.json");
 const logDir = path.join(homeDir, "SERVER/Backup");
 const logFile = path.join(logDir, "notification.log");
+try { fs.chmodSync(logFile, 0o600); } catch {}
+
 
 // ====== Env Setup ======
 if (!fs.existsSync(envPath)) {

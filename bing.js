@@ -1,3 +1,4 @@
+process.umask(0o077);
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -8,6 +9,8 @@ const SCHEDULE = '0 1 * * *';
 const MODE = 'all';
 const WORK_DIR = path.join(os.homedir(), 'SERVER', 'Backup');
 const LOG_PATH = path.join(WORK_DIR, 'bing.log');
+try { fs.chmodSync(LOG_PATH, 0o600); } catch {}
+
 const PRIMARY_PACKAGE = 'com.brave.browser';
 const CLONE_PACKAGE = 'com.multibox.clone.hub';
 const SEARCH_COUNT = 25;
