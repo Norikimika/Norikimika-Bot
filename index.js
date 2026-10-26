@@ -412,6 +412,17 @@ bot.hears(/^\/battery/i, topicOnly, adminOnly, async (ctx) => {
 });
 
 // ================== USAGE ==================
+// Same rule as monitor.js: report the interface the default route currently uses,
+// not a hardcoded wlan0 (the phone moves between Wi-Fi and mobile data).
+function getActiveIface() {
+  return new Promise((resolve) => {
+    exec("ip route show default 2>/dev/null", (err, stdout) => {
+      const m = /dev\s+(\S+)/.exec(stdout || "");
+      resolve(m ? m[1] : null);
+    });
+  });
+}
+
 bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   const threadId = ctx.message?.message_thread_id;
   const typing = startTyping(ctx, threadId);
@@ -423,7 +434,7 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
   vnstat.stdout.on("data", (data) => (output += data.toString()));
   vnstat.stderr.on("data", (data) => (errOutput += data.toString()));
 
-  vnstat.on("close", (code) => {
+  vnstat.on("close", async (code) => {
     stopTyping(typing);
     if (code !== 0 || errOutput) {
       appendLogLine(`vnstat failed: ${errOutput || `code ${code}`}`);
@@ -435,15 +446,17 @@ bot.hears(/^\/usage/i, topicOnly, adminOnly, async (ctx) => {
 
     try {
       const data = JSON.parse(output);
-      // const ifaceData = data.interfaces
-        // .map((i) => ({ name: i.name, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
-        // .sort((a, b) => b.total - a.total)[0];
-
-      // const iface = ifaceData?.name || "unknown";
-      // const traffic = data.interfaces.find((i) => i.name === iface)?.traffic;
-
-      const iface = "wlan0";
-      const ifaceData = data.interfaces.find((i) => i.name === iface) || data.interfaces[0];
+      const ifaces = data.interfaces || [];
+      const activeIface = await getActiveIface();
+      const ifaceData =
+        ifaces.find((i) => i.name === activeIface) ||
+        ifaces
+          .filter((i) => i.name !== "lo")
+          .map((i) => ({ i, total: (i.traffic?.total?.rx || 0) + (i.traffic?.total?.tx || 0) }))
+          .sort((a, b) => b.total - a.total)
+          .map((x) => x.i)[0] ||
+        ifaces[0];
+      const iface = ifaceData?.name || "unknown";
       const traffic = ifaceData?.traffic;
 
       function formatBytes(kB) {
@@ -543,6 +556,11 @@ async function updateMusicStatus(ctx, messageId, { title, performer, duration, s
 // 251 = Opus 143k/48kHz, 140 = AAC 129k/44.1kHz. Prefer the Opus; the m4a
 // is the fallback for sessions where web_embedded exposes no webm URL.
 const YT_AUDIO_FORMAT = "251/140/bestaudio";
+// Optional egress proxy for yt-dlp — YTDLP_PROXY=http://user:pass@host:port or socks5://host:port.
+const YTDLP_PROXY = process.env.YTDLP_PROXY || "";
+function ytDlpArgs(args) {
+  return YTDLP_PROXY ? ["--proxy", YTDLP_PROXY, ...args] : args;
+}
 // player_client web_embedded: only client that survives YouTube's bot check here.
 // Value only: call sites pass the "--extractor-args" flag themselves.
 const YT_PRIMARY_CLIENT_ARG = "youtube:player_client=web_embedded";
@@ -595,7 +613,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
       "--extractor-args", YT_PRIMARY_CLIENT_ARG,
       "-j", searchArg,
     ];
-    const { stdout } = await execFilePromise("yt-dlp", ytArgs);
+    const { stdout } = await execFilePromise("yt-dlp", ytDlpArgs(ytArgs));
 
     const info = JSON.parse(stdout);
 
@@ -624,7 +642,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
     }
 
     try {
-      await execFilePromise("yt-dlp", [
+      await execFilePromise("yt-dlp", ytDlpArgs([
         "-f", YT_AUDIO_FORMAT,
         "--no-playlist",
         "--extractor-args", YT_PRIMARY_CLIENT_ARG,
@@ -633,7 +651,7 @@ async function handleMusicCommand(ctx, targetTopicId) {
         "--convert-thumbnails", "jpg",
         "-o", `thumbnail:${thumbBase}`,
         mediaUrl
-      ]);
+      ]));
 
       tempFile = findDownloadedAudio(fileId);
 

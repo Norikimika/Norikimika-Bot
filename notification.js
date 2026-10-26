@@ -163,6 +163,7 @@ const CONFIG = {
     auto_clear_enabled: ['1', 'true', 'yes'].includes(String(process.env.AUTO_CLEAR_ENABLED || 'true').toLowerCase()),
     db_cleanup_cycles: parseInt(process.env.DB_CLEANUP_CYCLES || "180", 10),
     db_retention_seconds: parseInt(process.env.DB_RETENTION_SECONDS || String(24 * 3600), 10),
+    dedupe_window_seconds: parseInt(process.env.DEDUPE_WINDOW_SECONDS || "300", 10),
     pkill_throttle_seconds: parseInt(process.env.PKILL_THROTTLE_SECONDS || "300", 10),
     telegram_retry: 3,
     telegram_retry_backoff: 2
@@ -253,15 +254,22 @@ class NotificationMonitor {
         fs.renameSync(tmpPath, this.json_path);
     }
 
+    // Apps repost the same notification with a fresh `when` (GoPay refreshes the
+    // QRIS one), so an exact-timestamp match misses and the text goes out twice.
+    // Same app + title + text inside the window is the same notification.
+    _same_notification(n, package_name, title, text, notif_time) {
+        if (n.package_name !== package_name || n.title !== title || n.message_text !== text) {
+            return false;
+        }
+        if (n.notification_time === notif_time) return true;
+        const window_ms = this.config.dedupe_window_seconds * 1000;
+        return Math.abs((n.notification_time || 0) - (notif_time || 0)) <= window_ms;
+    }
+
     is_notification_sent(package_name, title, text, notif_time) {
         try {
             const data = this._read_json();
-            return data.some(n =>
-                n.package_name === package_name &&
-                n.title === title &&
-                n.message_text === text &&
-                n.notification_time === notif_time
-            );
+            return data.some(n => this._same_notification(n, package_name, title, text, notif_time));
         } catch (e) {
             logger.exception("is_notification_sent error", e);
             return false;
@@ -272,10 +280,7 @@ class NotificationMonitor {
         try {
             const data = this._read_json();
             const already_exists = data.some(n =>
-                n.package_name === package_name &&
-                n.title === title &&
-                n.message_text === text &&
-                n.notification_time === notif_time
+                this._same_notification(n, package_name, title, text, notif_time)
             );
             if (!already_exists) {
                 data.push({
@@ -440,7 +445,7 @@ class NotificationMonitor {
         }
 
         const results = [];
-        const now_ms = Date.now();
+        const seen_in_batch = new Set();
 
         for (const blk of blocks) {
             const pkg_m = blk.match(/pkg=([^\s\]]+)/);
@@ -465,11 +470,16 @@ class NotificationMonitor {
             }
 
             const when_m = blk.match(/when=(\d+)/);
-            const timestamp = when_m ? parseInt(when_m[1], 10) : now_ms;
+            // A per-scan fallback timestamp made every scan look new; 0 is stable.
+            const timestamp = when_m ? parseInt(when_m[1], 10) : 0;
 
-            if (this.is_notification_sent(pkg, title, text, timestamp)) {
-                continue;
-            }
+            // One dumpsys scan can list the same notification twice (group +
+            // child, or a reposted record), and both were sent as separate
+            // messages because nothing is marked until after the awaits.
+            const batch_key = `${pkg}\u0000${title}\u0000${text}`;
+            if (seen_in_batch.has(batch_key)) continue;
+            if (this.is_notification_sent(pkg, title, text, timestamp)) continue;
+            seen_in_batch.add(batch_key);
 
             const d = new Date(timestamp);
             const pad = (n) => String(n).padStart(2, '0');

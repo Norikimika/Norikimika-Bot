@@ -17,6 +17,7 @@ const TELEGRAM_CHAT_ID = process.env.CHAT_ID;
 const TOPIC_ID_USAGE = process.env.TOPIC_ID_USAGE;
 const TOPIC_ID_STATUS = process.env.TOPIC_ID_STATUS;
 const TOPIC_ID_SPEED = process.env.TOPIC_ID_SPEED;
+const TOPIC_ID_CONNECTION = process.env.TOPIC_ID_CONNECTION;
 
 // ====== Logger ======
 const LOG_FILE = path.join(os.homedir(), 'SERVER', 'Backup', 'monitor.log');
@@ -68,6 +69,8 @@ let monitorState = {
   lastStatus: "UNKNOWN",
   chargeStartTime: Date.now(),
   useStartTime: Date.now(),
+  connUpEpoch: Date.now(),
+  connDownEpoch: null,
 };
 
 try {
@@ -103,8 +106,25 @@ function formatDuration(startTime) {
 }
 
 // ================== USAGE REPORT ==================
+// The phone switches between Wi-Fi and mobile data, so the interface to report is
+// whatever the default route currently uses — never a hardcoded wlan0.
+function getActiveIface() {
+  return new Promise((resolve) => {
+    exec("ip route show default 2>/dev/null", (err, stdout) => {
+      const m = /dev\s+(\S+)/.exec(stdout || "");
+      resolve(m ? m[1] : null);
+    });
+  });
+}
+
+function interfaceTotal(iface) {
+  const total = iface?.traffic?.total || {};
+  return (total.rx || 0) + (total.tx || 0);
+}
+
 async function sendUsageReport() {
   log("Running scheduled daily usage...");
+  const activeIface = await getActiveIface();
 
   return new Promise((resolve) => {
     const vnstat = spawn("vnstat", ["--json"]);
@@ -130,10 +150,15 @@ async function sendUsageReport() {
       try {
         const data = JSON.parse(output);
 
-        const iface = "wlan0";
+        const ifaces = data.interfaces || [];
         const ifaceData =
-          data.interfaces.find((i) => i.name === iface) ||
-          data.interfaces[0];
+          ifaces.find((i) => i.name === activeIface) ||
+          ifaces
+            .filter((i) => i.name !== "lo")
+            .sort((a, b) => interfaceTotal(b) - interfaceTotal(a))[0] ||
+          ifaces[0];
+        if (!ifaceData) throw new Error("vnstat reported no interfaces");
+        const iface = ifaceData.name;
 
         const traffic = ifaceData?.traffic;
 
@@ -837,8 +862,140 @@ async function checkTopWeekly() {
 }
 
 
+// ================== CONNECTION WATCHDOG ==================
+const CONN_URL = "https://www.gstatic.com/generate_204";
+const CONN_HOST = new URL(CONN_URL).hostname;
+const CONN_FAIL_LIMIT = 7;
+const CONN_INTERVAL_MS = 10_000;
+
+let connUp = true;
+let connFailCount = 0;
+let connChecking = false;
+
+function pingHost(host) {
+  return new Promise((resolve) => {
+    exec(`ping -c 1 -W 3 ${host}`, (error, stdout) => {
+      if (error) {
+        const lines = String(stdout || "").split("\n").map((s) => s.trim()).filter(Boolean);
+        const reason =
+          lines.find((l) => /unreachable|100% packet loss|unknown host|not known/i.test(l)) ||
+          "no reply";
+        return resolve({ ok: false, reason });
+      }
+      const match = /time=([\d.]+)/.exec(stdout);
+      resolve({ ok: true, ms: match ? Number(match[1]) : 0 });
+    });
+  });
+}
+
+async function getHttpCode(url) {
+  try {
+    const res = await nativeFetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.status;
+  } catch {
+    return 0;
+  }
+}
+
+function getprop(prop) {
+  return new Promise((resolve) => {
+    exec(`getprop ${prop}`, (error, stdout) =>
+      resolve(error ? "N/A" : stdout.trim() || "N/A")
+    );
+  });
+}
+
+async function connectionInfo() {
+  try {
+    const [ip, org] = await Promise.all([
+      nativeFetch("https://ipinfo.io/ip").then((r) => r.text()),
+      nativeFetch("https://ipinfo.io/org").then((r) => r.text()),
+    ]);
+    return {
+      ip: ip.trim() || "N/A",
+      isp: org.trim().replace(/^AS\d+\s+/, "") || "N/A",
+    };
+  } catch {
+    return { ip: "N/A", isp: "N/A" };
+  }
+}
+
+async function sendConnectionRestored(latency, downMs) {
+  const [model, codename, net] = await Promise.all([
+    getprop("ro.product.model"),
+    getprop("ro.product.device"),
+    connectionInfo(),
+  ]);
+  const timestamp = new Date().toLocaleString("en-GB");
+  const message =
+    `<b>✅ Connection Restored</b>\n<blockquote>` +
+    `📱 Device: ${escapeHTML(model)}\n` +
+    `📟 Codename: ${escapeHTML(codename)}\n` +
+    `⏰ Time: ${timestamp}\n` +
+    `🌐 IP: ${escapeHTML(net.ip)}\n` +
+    `🚀 ISP: ${escapeHTML(net.isp)}\n` +
+    `🐢 Latency: ${latency}ms\n` +
+    `⏱️ Downtime: ${formatDuration(Date.now() - downMs)}\n` +
+    `⚡ Uptime: ${formatDuration(monitorState.connUpEpoch)}` +
+    `</blockquote>`;
+
+  await sendToTelegram(message, TOPIC_ID_CONNECTION);
+}
+
+async function checkConnection() {
+  if (connChecking) return;
+  connChecking = true;
+  try {
+    const ping = await pingHost(CONN_HOST);
+    const code = ping.ok ? await getHttpCode(CONN_URL) : 0;
+
+    if (ping.ok && (code === 200 || code === 204)) {
+      connFailCount = 0;
+      if (monitorState.connDownEpoch) {
+        const downMs = Date.now() - monitorState.connDownEpoch;
+        const alerted = !connUp;
+        monitorState.connDownEpoch = null;
+        monitorState.connUpEpoch = Date.now();
+        connUp = true;
+        saveMonitorState();
+        log(`Connection restored, downtime ${formatDuration(Date.now() - downMs)}`);
+        if (alerted) await sendConnectionRestored(ping.ms, downMs);
+      }
+      return;
+    }
+
+    connFailCount++;
+    const reason = ping.ok ? `HTTP=${code}` : ping.reason;
+    log(`Connection lost ${connFailCount}/${CONN_FAIL_LIMIT} (${reason})`);
+
+    if (!monitorState.connDownEpoch) {
+      monitorState.connDownEpoch = Date.now();
+      saveMonitorState();
+    }
+
+    if (connFailCount >= CONN_FAIL_LIMIT) {
+      connFailCount = 0;
+      if (connUp) {
+        connUp = false;
+        log("Connection down, will notify on restore");
+      }
+    }
+  } catch (err) {
+    log(`Connection check failed: ${err.message}`);
+  } finally {
+    connChecking = false;
+  }
+}
+
 function startMonitor() {
   log("Starting monitor service...");
+  log(`Connection watchdog: ${CONN_HOST} every ${CONN_INTERVAL_MS / 1000}s`);
+
+  checkConnection();
+  setInterval(checkConnection, CONN_INTERVAL_MS);
   
   cron.schedule("0 0 * * *", sendUsageReport, { scheduled: true, recoverMissedExecutions: false });
   cron.schedule("0 0,12 * * *", runAutoSpeedtest, { scheduled: true, recoverMissedExecutions: false });

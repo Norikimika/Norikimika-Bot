@@ -305,9 +305,15 @@ function nextBotCheckArgs(extraArgs = []) {
   return next ? ["--extractor-args", `youtube:player_client=${next}`] : null;
 }
 
+// Optional egress proxy for yt-dlp — YTDLP_PROXY=http://user:pass@host:port or socks5://host:port.
+const YTDLP_PROXY = process.env.YTDLP_PROXY || "";
+function ytDlpArgs(args) {
+  return YTDLP_PROXY ? ["--proxy", YTDLP_PROXY, ...args] : args;
+}
+
 function spawnYtDlp(args, timeoutMs = AUDIO_CONFIG.ytDlpTimeout) {
   return new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn("yt-dlp", ytDlpArgs(args), { stdio: ["ignore", "pipe", "pipe"] });
 
     let stdout = "";
     let stderr = "";
@@ -608,13 +614,13 @@ async function fetchVideoInfo(videoId) {
 function streamWithYtdlp(targetUrl, extraArgs = [], song = null) {
   return new Promise((resolve, reject) => {
     const out = getAudioOutArgs();
-    const ytdlpProcess = spawn("yt-dlp", [
+    const ytdlpProcess = spawn("yt-dlp", ytDlpArgs([
       "-o", "-", "-f", "ba/bestaudio/b/best",
       "--no-playlist", "--no-warnings",
       "--no-check-certificates", "--no-cache-dir",
       ...(hasClientArg(extraArgs) ? [] : YT_PRIMARY_CLIENT_ARGS),
       ...extraArgs, targetUrl
-    ], { stdio: ["ignore", "pipe", "pipe"] });
+    ]), { stdio: ["ignore", "pipe", "pipe"] });
 
     const ffmpegProcess = spawn("ffmpeg", [
       "-hide_banner", "-loglevel", "warning",
