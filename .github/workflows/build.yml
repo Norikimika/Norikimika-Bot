@@ -13,11 +13,6 @@ on:
 permissions:
   contents: write
 
-# both matrix jobs push to the same `build` branch — serialise them so pushes don't race
-concurrency:
-  group: publish-build
-  cancel-in-progress: false
-
 jobs:
   build:
     name: build (${{ matrix.arch }})
@@ -30,6 +25,11 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.os }}
+    # both matrix jobs push to the same `build` branch: same group at job level makes them
+    # queue instead of racing (workflow-level concurrency would not serialise jobs of one run)
+    concurrency:
+      group: publish-build
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
 
@@ -56,29 +56,30 @@ jobs:
           set -euo pipefail
           cp target/release/Norikimika-Bot "/tmp/$NAME"
           AUTH="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          rm -rf /tmp/pub
-          if git clone --depth 1 --branch build "$AUTH" /tmp/pub 2>/dev/null; then
+          PUB="$(mktemp -d)"
+          if git clone --depth 1 --branch build "$AUTH" "$PUB" 2>/dev/null; then
             echo "build branch exists, updating"
           else
-            mkdir -p /tmp/pub
-            git -C /tmp/pub init -q -b build
-            git -C /tmp/pub remote add origin "$AUTH"
+            git -C "$PUB" init -q -b build
+            git -C "$PUB" remote add origin "$AUTH"
           fi
-          cp "/tmp/$NAME" /tmp/pub/
-          git -C /tmp/pub add -A
-          if git -C /tmp/pub diff --cached --quiet; then
+          cp "/tmp/$NAME" "$PUB/"
+          git -C "$PUB" add -A
+          if git -C "$PUB" diff --cached --quiet; then
             echo "binary unchanged, nothing to publish"
             exit 0
           fi
-          git -C /tmp/pub -c user.name='github-actions[bot]' \
+          git -C "$PUB" -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -qm "build: $NAME @ $SHA"
-          for attempt in 1 2 3; do
-            if git -C /tmp/pub push -q origin HEAD:build; then
+          for attempt in 1 2 3 4 5; do
+            if git -C "$PUB" push -q origin HEAD:build; then
               echo "published $NAME to build branch"
               exit 0
             fi
-            echo "push attempt $attempt failed, retrying"
+            echo "push attempt $attempt rejected, rebasing on remote"
+            git -C "$PUB" fetch -q origin build
+            git -C "$PUB" rebase -q FETCH_HEAD || { git -C "$PUB" rebase --abort; exit 1; }
             sleep 3
           done
           echo "could not publish $NAME" >&2
