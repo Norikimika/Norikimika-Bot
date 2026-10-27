@@ -1,0 +1,29 @@
+[package]
+name = "Norikimika-Bot"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+
+[[bin]]
+name = "Norikimika-Bot"
+path = "src/main.rs"
+
+[dependencies]
+ab_glyph = "0.2"
+anyhow = "1"
+chrono = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# app HTTP on latest reqwest; songbird's YoutubeDl still links 0.12, so keep a 0.12 client aliased for it
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "multipart", "rustls", "gzip"] }
+reqwest12 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend", "voice"] }
+songbird = { version = "0.6", features = ["builtin-queue"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "fs", "sync", "io-util"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

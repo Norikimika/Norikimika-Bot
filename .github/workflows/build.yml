@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# both matrix jobs push to the same `build` branch — serialise them so pushes don't race
+concurrency:
+  group: publish-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.3
+
+      # songbird links libopus at build time; fonts/banners are compiled in from assets/
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Publish binary to build branch
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: Norikimika-Bot-linux-${{ matrix.arch }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cp target/release/Norikimika-Bot "/tmp/$NAME"
+          AUTH="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf /tmp/pub
+          if git clone --depth 1 --branch build "$AUTH" /tmp/pub 2>/dev/null; then
+            echo "build branch exists, updating"
+          else
+            mkdir -p /tmp/pub
+            git -C /tmp/pub init -q -b build
+            git -C /tmp/pub remote add origin "$AUTH"
+          fi
+          cp "/tmp/$NAME" /tmp/pub/
+          git -C /tmp/pub add -A
+          if git -C /tmp/pub diff --cached --quiet; then
+            echo "binary unchanged, nothing to publish"
+            exit 0
+          fi
+          git -C /tmp/pub -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -qm "build: $NAME @ $SHA"
+          for attempt in 1 2 3; do
+            if git -C /tmp/pub push -q origin HEAD:build; then
+              echo "published $NAME to build branch"
+              exit 0
+            fi
+            echo "push attempt $attempt failed, retrying"
+            sleep 3
+          done
+          echo "could not publish $NAME" >&2
+          exit 1
