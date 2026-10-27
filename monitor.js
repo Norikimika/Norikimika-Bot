@@ -96,13 +96,17 @@ function saveMonitorState() {
 
 // ================== UTILITIES ==================
 function formatDuration(startTime) {
-  if (!startTime) return "0h 0m 0s";
-  const diffMs = Date.now() - startTime;
-  const totalSeconds = Math.floor(diffMs / 1000);
+  if (!startTime) return "0s";
+  const totalSeconds = Math.floor((Date.now() - startTime) / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${hours}h ${minutes}m ${seconds}s`;
+  // ponytail: zero units dropped, smallest unit kept so "0h 0m 12s" reads "12s"
+  return (
+    [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", seconds || (!hours && !minutes) ? `${seconds}s` : ""]
+      .filter(Boolean)
+      .join(" ") || "0s"
+  );
 }
 
 // ================== USAGE REPORT ==================
@@ -929,7 +933,10 @@ async function sendConnectionRestored(latency, downMs) {
     getprop("ro.product.device"),
     connectionInfo(),
   ]);
-  const timestamp = new Date().toLocaleString("en-GB");
+  // ponytail: DD-MM-YYYY, HH:mm:ss — en-GB toLocaleString gives slashes
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const timestamp = `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   const message =
     `<b>✅ Connection Restored</b>\n<blockquote>` +
     `📱 Device: ${escapeHTML(model)}\n` +
