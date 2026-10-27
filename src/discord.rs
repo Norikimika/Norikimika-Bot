@@ -1201,12 +1201,12 @@ fn stats_overwrites(guild_id: GuildId, bot_id: UserId) -> Vec<PermissionOverwrit
 }
 
 async fn update_guild_stats(ctx: &Context, guild_id: GuildId) -> anyhow::Result<()> {
-    let (guild_name, member_count) = {
-        let guild = ctx
-            .cache
-            .guild(guild_id)
-            .ok_or_else(|| anyhow::anyhow!("guild not cached"))?;
-        (guild.name.clone(), guild.member_count)
+    // The cache can be cold or mid-update right after a restart: skip this pass
+    // quietly instead of logging an error, the next tick picks the guild up.
+    let cached = ctx.cache.guild(guild_id).map(|g| (g.name.clone(), g.member_count));
+    let Some((guild_name, member_count)) = cached else {
+        log(&format!("[Stats] {guild_id} not cached yet; skipping this pass"));
+        return Ok(());
     };
 
     let all_count: Option<u64>;

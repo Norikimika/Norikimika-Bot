@@ -10,13 +10,12 @@ use serde_json::Value;
 
 use crate::app::App;
 use crate::util::{
-    active_iface, data_dir, escape_html, format_duration_ms, format_kb, log_to, now_ms, run,
-    run_timeout,
+    active_iface, data_dir, escape_html, font_dirs, format_duration_ms, format_kb, log_to, now_ms,
+    run, run_timeout,
 };
 
 const LOG: &str = "monitor.log";
 const INPUT_SUSPEND: &str = "/sys/class/power_supply/battery/input_suspend";
-const FONT_DIR: &str = "/data/data/com.termux/files/usr/share/fonts/TTF/";
 const CONN_URL: &str = "https://www.gstatic.com/generate_204";
 const CONN_HOST: &str = "www.gstatic.com";
 const CONN_FAIL_LIMIT: i64 = 7;
@@ -490,10 +489,10 @@ fn render_png(svg: &str, w: f64, h: f64) -> Option<Vec<u8>> {
 
     let mut opt = usvg::Options::default();
     let db = opt.fontdb_mut();
-    for face in ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"] {
-        let _ = db.load_font_file(format!("{FONT_DIR}{face}"));
-    }
     db.load_system_fonts();
+    for dir in font_dirs() {
+        db.load_fonts_dir(dir);
+    }
 
     let tree = usvg::Tree::from_str(svg, &opt).ok()?;
     let mut pix = tiny_skia::Pixmap::new(w as u32, h as u32)?;

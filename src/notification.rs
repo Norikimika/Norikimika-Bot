@@ -829,12 +829,38 @@ impl Monitor {
     }
 }
 
+/// `termux-media-player play` returns as soon as playback starts, so wait for
+/// the player to leave the playing state — otherwise the next announcement
+/// starts on top of the previous one and cuts its tail off.
+async fn wait_playback_end(max_ms: u64) {
+    let deadline = now_ms() + max_ms as i64;
+    // Let playback actually start before `info` is meaningful.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    while now_ms() < deadline {
+        match run_timeout("termux-media-player", &["info"], 5).await {
+            Ok(o) if o.ok() => {
+                let state = o.stdout.to_ascii_lowercase();
+                if !state.contains("playing") {
+                    return;
+                }
+            }
+            // No player / command unsupported: stop waiting instead of blocking.
+            _ => return,
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    logl("WARNING", format!("TTS playback still running after {max_ms}ms; moving on"));
+}
+
 async fn play_file(audio_file: &Path) -> bool {
     let path = audio_file.to_string_lossy().to_string();
     let out = run_timeout("termux-media-player", &["play", &path], 20).await;
     let _ = std::fs::remove_file(audio_file);
     match out {
-        Ok(o) if o.ok() => true,
+        Ok(o) if o.ok() => {
+            wait_playback_end(60_000).await;
+            true
+        }
         Ok(o) => {
             logl("WARNING", format!("TTS play failed: code {}", o.code));
             false

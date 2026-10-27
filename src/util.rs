@@ -15,6 +15,18 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// Font directories that exist on this platform (Termux, GNU/Linux, Android).
+pub fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(prefix) = std::env::var("PREFIX") {
+        dirs.push(PathBuf::from(format!("{prefix}/share/fonts")));
+    }
+    dirs.push(PathBuf::from("/usr/share/fonts"));
+    dirs.push(PathBuf::from("/system/fonts"));
+    dirs.retain(|d| d.is_dir());
+    dirs
+}
+
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }

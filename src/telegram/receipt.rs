@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use crate::app::App;
 use crate::config::Config;
 use crate::tg::Msg;
-use crate::util::{log_to, now_ms, run};
+use crate::util::{font_dirs, log_to, now_ms, run};
 
 const W: usize = 32;
 const RECEIPT_PROMPT: &str = "Identify the type of this receipt and extract its data.
@@ -393,26 +393,54 @@ fn font_size(cfg: &Config) -> f32 {
 
 /// Rasterise the receipt to PNG bytes. Custom STRUK_FONT is embedded when readable,
 /// otherwise the system monospace face is used.
+/// Match a family name the way CSS does: case-insensitive, `-` and ` ` equal.
+fn resolve_family(db: &resvg::usvg::fontdb::Database, want: &str) -> Option<String> {
+    let norm = |s: &str| s.replace('-', " ").to_ascii_lowercase();
+    let target = norm(want);
+    db.faces().find_map(|f| {
+        f.families
+            .iter()
+            .map(|(n, _)| n)
+            .find(|n| norm(n) == target)
+            .map(|n| n.to_string())
+    })
+}
+
 fn render_receipt(cfg: &Config, text: &str) -> anyhow::Result<Vec<u8>> {
     use resvg::usvg::fontdb;
 
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
+    for dir in font_dirs() {
+        db.load_fonts_dir(dir);
+    }
 
     let mut family = "monospace".to_string();
-    if !cfg.receipt_font.trim().is_empty() {
-        match db.load_font_file(&cfg.receipt_font) {
-            Ok(()) => {
-                if let Some(face) = db.faces().last() {
-                    if let Some((name, _)) = face.families.first() {
-                        family = name.clone();
+    let want = cfg.receipt_font.trim();
+    if !want.is_empty() {
+        // STRUK_FONT may be a file path or a family name (`DejaVu-Sans-Mono`).
+        if std::path::Path::new(want).is_file() {
+            match db.load_font_file(want) {
+                Ok(()) => {
+                    if let Some(face) = db.faces().last() {
+                        if let Some((name, _)) = face.families.first() {
+                            family = name.clone();
+                        }
                     }
                 }
+                Err(e) => log_to(
+                    "telegram.log",
+                    &format!("STRUK_FONT {want} not loaded ({e}); falling back to monospace"),
+                ),
             }
-            Err(e) => log_to(
-                "telegram.log",
-                &format!("STRUK_FONT {} not loaded ({e}); falling back to monospace", cfg.receipt_font),
-            ),
+        } else {
+            match resolve_family(&db, want) {
+                Some(name) => family = name,
+                None => log_to(
+                    "telegram.log",
+                    &format!("STRUK_FONT {want} matches no font file or family; falling back to monospace"),
+                ),
+            }
         }
     }
 
