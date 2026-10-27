@@ -1,168 +1,130 @@
 # LogError404Bot
 
-Telegram bot for Termux with device monitoring, Android notification monitoring, repository update checks, Discord voice features, and OpenRouter reports.
+Telegram + Discord bot for an Android phone running Termux: device monitoring, data
+usage, speed tests, receipts, media downloads, Android notification relay, repository
+update checks, Discord chatbot and queue commands.
+
+Single static-ish Rust binary — no runtime scripts to babysit.
 
 ## Features
 
-- Telegram commands for prices, device status, data usage, speed tests, playback, media downloads, approvals, and reboots.
-- Battery monitoring, data usage reports, scheduled speed tests, new OpenRouter model alerts, weekly OpenRouter rankings, and an Artificial Analysis leaderboard digest.
-- GitHub and GitLab repository update checks.
-- Android notification monitoring.
-- Discord voice playback, server statistics, welcome or goodbye messages, and a channel-specific chatbot with per-user compressed conversation history.
-- Bing Rewards automation through Android UI automation.
+**Telegram**
+- `/p <name>` — price list from Google Sheets
+- `/speed`, `/battery`, `/usage`, `/reboot`, `/approve` — device control (admin only)
+- `/music`, `/music2` — yt-dlp audio download + upload
+- `/playback` — volume stream picker, playback/media-session buttons
+- `/tt <url>` — TikTok/Douyin downloader (video, photo slides, audio)
+- Receipt photos — vision-model extraction → printed struk PNG + printer command
+
+**Background services**
+- Battery monitoring, 80 %/20 % reports, charge/use timers, input-suspend control
+- Daily usage report, twice-daily speed tests with PNG chart
+- Connection watchdog (10 s ping, downtime/uptime report)
+- OpenRouter new-model alerts, weekly rankings, Artificial Analysis leaderboard
+- GitHub/GitLab update polling
+- Android notification relay (v380, Tuya, Al-Quran, GoPay) with TTS
+- Bing Rewards automation via `uiautomator`
+- Discord: chatbot with per-user history, welcome/goodbye cards, stats, music queue
 
 ## Requirements
 
-- Android with Termux.
-- Node.js 24 or newer. `monitor.js` requires native `fetch`, `FormData`, and `Blob`.
-- Native tools required by the relevant services:
-  - `termux-battery-status`
-  - `vnstat`
-  - `speedtest-go`
-  - `termux-tts-speak`
-  - `ffmpeg`
-  - `yt-dlp`
-  - `su`
-  - Android `uiautomator` and the `input` command
+Android + [Termux](https://termux.dev), with:
 
-Install the runtime dependencies with:
-
-```bash
-npm install
+```
+termux-battery-status  termux-volume  termux-media-player  termux-tts-speak
+vnstat  speedtest-go  yt-dlp  ffmpeg  su  uiautomator  input  tesseract
 ```
 
-This repository ships a `package.json` and `package-lock.json`; `node-fetch` is no longer listed because the modules use Node's native `fetch`.
+`su` is used for reboot, GMS cleanup, approve taps and Bing automation.
 
 ## Configuration
 
-1. Copy `.env.example` to a local `.env` file.
-2. Fill in the required values. Never use example tokens, API keys, or credentials as production values.
-3. Do not commit `.env`, log files, or state files. The repository has no active `.gitignore`, so add these patterns locally if you keep `.env` inside the checkout:
-
-```text
-.env
-*.log
-node_modules/
+```bash
+cp .env.example .env
 ```
 
-4. Make sure the storage locations used by the services are writable. Some modules write logs and state to runtime paths configured in the code.
+Fill in `BOT_TOKEN`, `CHAT_ID`, the `TOPIC_ID_*` values, Nine Router
+(`NINE_ROUTER_URL`, `NINE_ROUTER_API_KEY`, models), Sheets (`SHEETS_ID`,
+`SHEETS_GID`), receipt (`STORE_NAME`, `STORE_ADDRESS`, `STRUK_FONT`,
+`STRUK_FONTSIZE`, `PRINT_CMD`) and Discord (`DISCORD_*`) keys.
 
-Main variables:
+Logs and state live in `~/SERVER/Backup/` (`telegram.log`, `monitor.json`,
+`repo.json`, `notification.json`, `memory.json`).
 
-- `BOT_TOKEN`, `CHAT_ID`, `TOPIC_ID`: Telegram authentication and topic routing.
-- `TOPIC_ID_*`: Topics for usage, status, speed tests, music, TikTok, receipts, and updates.
-- `DISCORD_BOT_TOKEN`, channel IDs, titles, text, and background files: Discord configuration.
-- `DISCORD_CHATBOT_CHANNEL_ID`: Discord channel that receives automatic chatbot replies.
-- `NINE_ROUTER_CHATBOT_MODEL`: Provider model ID used only by the Discord chatbot.
-- `SHEETS_ID`, `SHEETS_GID`: Price-list source.
-- `NINE_ROUTER_URL`, `NINE_ROUTER_API_KEY`: Shared OpenAI-compatible provider URL and API key.
-- `NINE_ROUTER_MODEL`: Model used for receipt analysis.
-- `NINE_ROUTER_TTS_MODEL`: Voice model for spoken notifications (defaults to `edge-tts/id-ID-GadisNeural`).
-- `PRINT_CMD`: Receipt printing command.
-- `GITHUB_TOKEN`, `GITLAB_TOKEN`: Repository monitor access tokens, when required.
-- `STORE_NAME`, `STORE_ADDRESS`, `STRUK_FONT`, `STRUK_FONTSIZE`: Receipt configuration.
+## Build
 
-`notification.js` has deployment-specific environment and storage configuration. Review it before running the notification service: it hardcodes a `~/SERVER/` path for its `.env`, state, and log files, so it expects a specific directory layout.
-
-> **Warning:** The full process starts the bot, schedules tasks, writes logs or state, calls native commands, and can manage Android notifications. `bing.js` uses `su` and UI automation. Run it only on devices and accounts you control.
-
-## Running
+On device:
 
 ```bash
-node index.js
+pkg install rust
+cargo build --release
 ```
 
-`index.js` is the entry point and loads the following services:
-
-- `index.js`: Telegram bot and main commands.
-- `monitor.js`: Usage, battery, speed tests, OpenRouter models, and weekly rankings.
-- `repo.js`: GitHub and GitLab update checks.
-- `notification.js`: Android notification monitoring.
-- `discord.js`: Discord voice, statistics, and welcome or goodbye messages.
-- `bing.js`: Bing Rewards automation.
-
-## Telegram Commands
-
-| Command | Description |
-| --- | --- |
-| `/p [name]` | Search the configured price list. |
-| `/help` | Show the command list. |
-| `/speed` | Run a speed test. |
-| `/battery` | Show battery status. |
-| `/usage` | Show the data usage report. |
-| `/playback` | Control voice playback. |
-| `/approve` | Approve a request. |
-| `/tt <link>` | Download a TikTok or Douyin video. |
-| `/music [title]` | Search or play music from server 1. |
-| `/music2 [title]` | Search or play music from server 2. |
-| `/reboot` | Reboot the device. |
-
-Some commands are restricted by topic and administrator permissions. Validation and allowed topics come from the configuration.
-
-## Media Download (`yt-dlp`)
-
-`/music`, `/music2`, and `/tt` shell out to `yt-dlp`. From many hosts and residential IPs YouTube answers with `HTTP 429` or `Sign in to confirm you're not a bot`, because the default player client is blocked.
-
-`index.js` pins the working client and format order:
-
-```text
---extractor-args youtube:player_client=web_embedded
--f 251/140/bestaudio
-```
-
-- `web_embedded` is the client that survives the bot check from this host; `tv_simply`, `android_vr`, `web_safari`, `mweb`, and `ios` all fail here.
-- Format `251` (Opus, 143 kbps, 48 kHz) is preferred. `140` (AAC, 129 kbps, 44.1 kHz) is the fallback for sessions where `web_embedded` exposes no webm URL, and `bestaudio` is the last resort. Those four audio formats are the whole selection YouTube offers for a lossy track, so this is already the ceiling.
-- The output path uses `%(ext)s`, and the downloaded file is located by extension afterwards, so the `.webm` and `.m4a` fallback paths both work.
-- Downloads are only reliable about two times in three; the remaining failures are session rate limits (`429`), not bad arguments.
-
-If you need higher reliability, export cookies from a signed-in browser and pass them through `--cookies`. Keep the cookie file outside the repository and outside any shared storage.
-
-## Discord Chatbot
-
-Set `DISCORD_CHATBOT_CHANNEL_ID` to one Discord channel ID. The bot replies to every non-bot message in that channel. It uses the shared `NINE_ROUTER_URL` and `NINE_ROUTER_API_KEY`, with the separate `NINE_ROUTER_CHATBOT_MODEL`.
-
-`discord.js` keeps a per-user conversation history, persists it between restarts, and compresses it to the context budget before every request, so a long conversation does not overflow the model window. The bot replies only to messages in the configured channel and ignores other channels.
-
-## Service Schedule
-
-- `00:00`: Daily usage report and speed test.
-- `12:00`: Second speed test.
-- Every minute: Battery check.
-- Every 15 minutes: New OpenRouter model check.
-- `01:00`: Weekly OpenRouter ranking.
-- `01:30`: Artificial Analysis leaderboard digest.
-- `01:00`: Bing Rewards automation.
-- Every 5 minutes: Repository update check (`setTimeout` loop in `index.js`, not a cron job).
-
-Times use the device or host scheduler timezone.
-
-## Weekly OpenRouter Ranking
-
-`monitor.js` fetches data from:
-
-```text
-https://openrouter.ai/api/v1/models?sort=top-weekly&limit=10
-https://openrouter.ai/api/frontend/v1/rankings/discovery?view=week&metric=tokens
-```
-
-The models endpoint is the source of both the row order and the row names, so the chart keeps the same order as the site page. The discovery endpoint supplies the weekly token total for each model, and its `:free` and `:batch` entries are merged into their parent model so a model is not undercounted when most of its traffic runs on a free variant.
-
-The OpenRouter frontend rankings endpoint is not documented as a stable public API. Its schema, filters, and availability may change. The image caption states the source and formula used.
-
-The Artificial Analysis digest scrapes `https://artificialanalysis.ai/leaderboards/models` and depends on that page's markup, so it breaks silently if the site changes its HTML.
-
-## Verification
-
-Run syntax checks without starting the bot:
+Cross-compile from a Debian/Ubuntu host for Termux (Android NDK or the Termux clang
+with `--target=aarch64-linux-android24`):
 
 ```bash
-node --check index.js
-node --check monitor.js
-node --check repo.js
-node --check notification.js
-node --check discord.js
-node --check bing.js
-git diff --check
+rustup target add aarch64-linux-android
+cargo build --release --target aarch64-linux-android
 ```
 
-`node --check` only checks syntax. Do not run `node index.js` in an environment that forbids access to the required storage, device automation, privileged commands, or network actions.
+CI (`.github/workflows/build.yml`) builds the same target and force-pushes the
+stripped binary plus `LogError404Bot.sha256` to the `build` branch, then runs the
+security scan:
+
+```bash
+curl -fL -o LogError404Bot \
+  https://raw.githubusercontent.com/Norikimika/LogError404Bot/build/LogError404Bot
+chmod +x LogError404Bot
+```
+
+## Run
+
+The `build` branch holds only the compiled binary, its checksum and `.env.example`, so
+it is the cheapest thing to clone on the phone:
+
+```bash
+git clone --depth 1 --branch build \
+  https://github.com/Norikimika/LogError404Bot.git ~/SERVER/LogError404Bot
+cd ~/SERVER/LogError404Bot
+sha256sum -c LogError404Bot.sha256
+cp .env.example .env          # fill it in once
+chmod +x LogError404Bot
+nohup ./LogError404Bot >> ~/SERVER/Backup/rust-bot.out 2>&1 &
+termux-wake-lock
+```
+
+Re-deploy later:
+
+```bash
+cd ~/SERVER/LogError404Bot
+git fetch --depth 1 origin build && git reset --hard FETCH_HEAD
+sha256sum -c LogError404Bot.sha256
+pkill -f LogError404Bot && nohup ./LogError404Bot >> ~/SERVER/Backup/rust-bot.out 2>&1 &
+```
+
+Autostart with Termux:Boot — `~/.termux/boot/start-bot.sh`:
+
+```bash
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+cd ~/SERVER/LogError404Bot && nohup ./LogError404Bot >> ~/SERVER/Backup/rust-bot.out 2>&1 &
+```
+
+## Tests
+
+```bash
+cargo test
+```
+
+Covers duration/byte formatting, CSV price parsing, receipt text (byte-identical to
+the printed struk layout), SVG→PNG rendering, notification dedupe and dumpsys
+parsing, Bing URL/bounds parsing, Discord URL/token helpers.
+
+## Notes
+
+- Images (receipt struk, charts, welcome/goodbye cards) are rendered as SVG → PNG
+  with `resvg`; the receipt keeps the printed Indonesian labels.
+- Discord voice playback is not implemented (no `songbird`/opus/DAVE). Queue and
+  metadata commands work, playback replies that audio is unavailable.
+- Schedules use wall-clock loops; speed tests time out after 180 s.

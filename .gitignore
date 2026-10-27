@@ -1,0 +1,9 @@
+# Rust build output
+/target/
+/target-*
+
+# Local env, logs, scratch
+.env
+*.log
+**/*.rs.bk
+.cargo-clang-android24.sh
