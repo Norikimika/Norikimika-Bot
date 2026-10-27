@@ -1,3 +1,28 @@
+/// HTTP client builder with bundled webpki roots.
+///
+/// reqwest 0.13's default rustls verifier is `rustls-platform-verifier`, which panics on
+/// Android/Termux ("Expect rustls-platform-verifier to be initialized" — it wants a
+/// JNI-initialised app context). Building the config ourselves keeps the Android build working.
+pub fn http() -> reqwest::ClientBuilder {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    // pick the provider explicitly: with several rustls versions in the graph the crate-feature
+    // auto-detection panics ("Could not automatically determine the process-level CryptoProvider")
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("rustls protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    reqwest::Client::builder().use_preconfigured_tls(tls)
+}
+
+/// Same as [`http`], already built with default settings.
+pub fn client() -> reqwest::Client {
+    http().build().expect("build http client")
+}
+
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {

@@ -112,7 +112,7 @@ impl Tg {
     fn from_env() -> Result<Self> {
         Ok(Self {
             client: crate::telegram::Client::from_env()?,
-            http: reqwest::Client::new(),
+            http: crate::util::client(),
             token: crate::config::req("BOT_TOKEN")?,
             chat_id: crate::config::chat_id().unwrap_or(0),
         })
@@ -1077,7 +1077,7 @@ async fn send_connection_restored(tg: &Tg, http: &reqwest::Client, latency: f64,
 
 pub async fn run() -> Result<()> {
     let tg = Tg::from_env()?;
-    let http = reqwest::Client::builder()
+    let http = crate::util::http()
         .timeout(Duration::from_secs(15))
         .user_agent("Norikimika-Bot")
         .build()?;

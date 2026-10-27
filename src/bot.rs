@@ -55,7 +55,7 @@ pub struct Bot {
 impl Bot {
     fn new() -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder()
+            http: crate::util::http()
                 .timeout(Duration::from_secs(120))
                 .build()?,
             token: crate::config::req("BOT_TOKEN")?,
@@ -1438,7 +1438,7 @@ async fn analyze_receipt(base64_image: &str) -> Result<Value> {
         "response_format": { "type": "json_object" }
     });
 
-    let res = reqwest::Client::new()
+    let res = crate::util::client()
         .post(&endpoint)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {api_key}"))

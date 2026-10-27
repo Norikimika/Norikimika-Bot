@@ -94,7 +94,7 @@ async fn tts_to_file(text: &str, audio_path: &Path, timeout_ms: u64) -> Result<(
         .ok_or_else(|| TtsError::Other("NINE_ROUTER_API_KEY is missing; cannot synthesize speech".into()))?;
     let model = config::get("NINE_ROUTER_TTS_MODEL").unwrap_or_else(|| TTS_DEFAULT_MODEL.to_string());
 
-    let client = reqwest::Client::builder()
+    let client = crate::util::http()
         .timeout(Duration::from_millis(timeout_ms))
         .build()
         .map_err(|e| TtsError::Other(e.to_string()))?;
@@ -427,7 +427,7 @@ struct MediaReport {
 
 impl Monitor {
     async fn new(cfg: Config) -> Self {
-        let http = reqwest::Client::new();
+        let http = crate::util::client();
         Self {
             cfg,
             su: false,

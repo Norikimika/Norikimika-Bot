@@ -10,7 +10,7 @@ pub struct Client {
 impl Client {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder()
+            http: crate::util::http()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()?,
             token: crate::config::req("BOT_TOKEN")?,

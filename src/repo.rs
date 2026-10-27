@@ -41,7 +41,7 @@ const GITHUB_REPOS: &[Repo] = &[
 const GITLAB_REPOS: &[Repo] = &[];
 
 fn http() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    Ok(crate::util::http()
         .user_agent("Norikimika-Bot")
         .timeout(Duration::from_secs(30))
         .build()?)

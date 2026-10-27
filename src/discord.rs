@@ -479,7 +479,7 @@ async fn fetch_video_info(video_id: &str) -> Option<Song> {
 // ================== external resolvers ==================
 
 async fn http_text(url: &str) -> Result<String> {
-    let res = reqwest::Client::builder()
+    let res = crate::util::http()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124")
         .timeout(Duration::from_secs(15))
         .build()?
@@ -897,7 +897,7 @@ async fn refresh_alone_timer(ctx: &Context, guild_id: GuildId) {
 // ================== welcome / goodbye banners ==================
 
 async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
-    let res = reqwest::Client::builder()
+    let res = crate::util::http()
         .user_agent("Mozilla/5.0 (compatible; WelcomeBot/1.0)")
         .timeout(Duration::from_secs(20))
         .build()
