@@ -1,0 +1,102 @@
+name: Rust build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [rust]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            tc: aarch64-linux-android24
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          TC: ${{ matrix.tc }}
+        run: |
+          set -euo pipefail
+          # Runner env vars are not visible through the env context.
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+          if [ -z "$NDK" ]; then
+            NDK="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* | tail -1)"
+          fi
+          echo "NDK=$NDK"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SUFFIX="${TARGET//-/_}"
+          export "CC_${SUFFIX}=$BIN/${TC}-clang"
+          export "CXX_${SUFFIX}=$BIN/${TC}-clang++"
+          export "AR_${SUFFIX}=$BIN/llvm-ar"
+          export "CARGO_TARGET_$(echo "$TARGET" | tr 'a-z-' 'A-Z_')_LINKER=$BIN/${TC}-clang"
+          cargo build --release --target "$TARGET"
+          "$BIN/llvm-strip" "target/$TARGET/release/LogError404Bot"
+          ls -lh "target/$TARGET/release/LogError404Bot"
+
+      # The binary is the deliverable: force-push it as the single commit of the
+      # `build` branch so the branch stays small instead of growing every run.
+      - name: Publish to the build branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          cp "target/$TARGET/release/LogError404Bot" "$out/LogError404Bot"
+          ( cd "$out" && sha256sum LogError404Bot > LogError404Bot.sha256 )
+          cd "$out"
+          git init -q -b build
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add LogError404Bot LogError404Bot.sha256
+          git commit -qm "build: ${GITHUB_SHA::7} $TARGET"
+          git push --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" build
+
+  strix:
+    name: Penetration test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h
+
+      - name: Install Strix
+        run: curl -sSL https://strix.ai/install | bash
+
+      - name: Run Strix
+        env:
+          STRIX_LLM: ${{ secrets.STRIX_LLM }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
+        run: strix -n -t ./ --scan-mode quick || true
