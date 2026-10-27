@@ -37,10 +37,6 @@ pub fn req(key: &str) -> anyhow::Result<String> {
     get(key).ok_or_else(|| anyhow::anyhow!("missing env var: {key}"))
 }
 
-pub fn get_or(key: &str, default: &str) -> String {
-    get(key).unwrap_or_else(|| default.to_string())
-}
-
 pub fn int(key: &str, default: i64) -> i64 {
     get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
 }

@@ -45,7 +45,6 @@ struct Song {
     id: Option<String>,
     requested_by: Option<u64>,
     manual: bool,
-    duration: f64,
 }
 
 #[derive(Clone)]
@@ -350,7 +349,6 @@ fn build_track_from_item(item: &Value) -> Option<Song> {
             .to_string(),
         url: format!("https://www.youtube.com/watch?v={id}"),
         id: Some(id),
-        duration: item["duration"].as_f64().unwrap_or(0.0),
         ..Default::default()
     });
     is_valid_song(&song).then_some(song)
@@ -469,7 +467,6 @@ async fn fetch_video_info(video_id: &str) -> Option<Song> {
             .to_string(),
         url: format!("https://www.youtube.com/watch?v={video_id}"),
         id: Some(video_id.to_string()),
-        duration: data["duration"].as_f64().unwrap_or(0.0),
         ..Default::default()
     });
     if !is_valid_song(&song) {

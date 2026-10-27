@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const MOD: &str = "bing";
-pub const SCHEDULE: &str = "0 1 * * *";
 const PRIMARY_PACKAGE: &str = "com.brave.browser";
 const CLONE_PACKAGE: &str = "com.multibox.clone.hub";
 const SEARCH_COUNT: usize = 25;

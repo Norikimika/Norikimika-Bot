@@ -39,7 +39,6 @@ struct Msg {
 
 struct Callback {
     chat_id: i64,
-    thread_id: Option<i64>,
     user_id: i64,
     message_id: i64,
     data: String,
@@ -132,14 +131,6 @@ impl Bot {
         )
         .await
         .map(|_| ())
-    }
-
-    async fn chat_action(&self, chat_id: i64, thread: Option<i64>, action: &str) {
-        let mut body = json!({ "chat_id": chat_id, "action": action });
-        if let Some(t) = thread {
-            body["message_thread_id"] = json!(t);
-        }
-        let _ = self.api("sendChatAction", body).await;
     }
 
     async fn is_admin(&self, chat_id: i64, user_id: i64) -> bool {
@@ -1691,7 +1682,6 @@ pub async fn run() -> Result<()> {
                 let is_admin = bot.is_admin(chat_id, user_id).await;
                 let callback = Callback {
                     chat_id,
-                    thread_id: cb["message"]["message_thread_id"].as_i64(),
                     user_id,
                     message_id: cb["message"]["message_id"].as_i64().unwrap_or(0),
                     data,
