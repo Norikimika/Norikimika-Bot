@@ -31,6 +31,10 @@ use serenity::prelude::*;
 use crate::app::App;
 use crate::util::{self, run_timeout};
 
+use songbird::events::{Event as VoiceEvent, TrackEvent};
+use songbird::input::YoutubeDl;
+use songbird::{Call, SerenityInit};
+
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 const SEARCH_TIMEOUT: u64 = 15;
 const PLAYLIST_TIMEOUT: u64 = 30;
@@ -119,6 +123,8 @@ struct State {
     history: Mutex<HashMap<u64, Vec<Value>>>,
     temp_voice: Mutex<HashSet<u64>>,
     alone: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    /// Guilds whose voice call already carries the track-end handler.
+    voice_hooked: Mutex<HashSet<u64>>,
     stats_running: AtomicBool,
 }
 
@@ -148,7 +154,11 @@ pub fn spawn(app: Arc<App>) {
             | GatewayIntents::GUILD_VOICE_STATES;
 
         let handler = Handler { app, st };
-        let mut client = match Client::builder(&token, intents).event_handler(handler).await {
+        let mut client = match Client::builder(&token, intents)
+            .event_handler(handler)
+            .register_songbird()
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 log(&format!("Discord Login Error: {e}"));
@@ -1523,6 +1533,141 @@ async fn destroy_queue(st: &State, guild_id: u64, delete: bool) {
     }
 }
 
+
+// ================== VOICE PLAYBACK ==================
+
+/// Fires when the current track ends and moves the queue along.
+struct TrackEnded {
+    app: Arc<App>,
+    st: Arc<State>,
+    ctx: Context,
+    guild_id: u64,
+}
+
+#[serenity::async_trait]
+impl songbird::EventHandler for TrackEnded {
+    async fn act(&self, _ev: &songbird::EventContext<'_>) -> Option<VoiceEvent> {
+        advance_queue(&self.app, &self.st, &self.ctx, self.guild_id).await;
+        None
+    }
+}
+
+/// Join (or reuse) the guild's voice call and play `queue.songs[0]`.
+async fn play_current(app: &Arc<App>, st: &Arc<State>, ctx: &Context, guild_id: u64) -> bool {
+    let (song, text_channel, voice_channel) = {
+        let queues = st.queues.lock().await;
+        let Some(queue) = queues.get(&guild_id) else { return false };
+        (queue.songs.first().cloned(), queue.text_channel, queue.voice_channel)
+    };
+    let (Some(song), Some(voice_channel)) = (song, voice_channel) else { return false };
+    let Some(call) = voice_call(ctx, GuildId::new(guild_id), voice_channel).await else {
+        return false;
+    };
+
+    {
+        let mut handler = call.lock().await;
+        let first_hook = st.voice_hooked.lock().await.insert(guild_id);
+        if first_hook {
+            handler.add_global_event(
+                VoiceEvent::Track(TrackEvent::End),
+                TrackEnded {
+                    app: app.clone(),
+                    st: st.clone(),
+                    ctx: ctx.clone(),
+                    guild_id,
+                },
+            );
+        }
+        handler.play_only_input(YoutubeDl::new(app.http.clone(), song.url.clone()).into());
+    }
+
+    {
+        let mut queues = st.queues.lock().await;
+        if let Some(queue) = queues.get_mut(&guild_id) {
+            queue.playing = true;
+            queue.current_song = Some(song.clone());
+        }
+    }
+
+    let mut embed = CreateEmbed::new()
+        .colour(GREEN)
+        .description(format!("🎶 Now playing: [{}]({})", song.title, song.url));
+    if let Some(id) = song_id(&song) {
+        embed = embed.thumbnail(format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"));
+    }
+    send_embed(ctx, text_channel, embed).await;
+    true
+}
+
+async fn voice_call(
+    ctx: &Context,
+    guild_id: GuildId,
+    channel_id: ChannelId,
+) -> Option<Arc<tokio::sync::Mutex<Call>>> {
+    let Some(manager) = songbird::get(ctx).await else {
+        log("[Voice] songbird manager missing");
+        return None;
+    };
+    match manager.join(guild_id, channel_id).await {
+        Ok(call) => Some(call),
+        Err(e) => {
+            log(&format!("[Voice] join {guild_id} -> {channel_id} failed: {e}"));
+            None
+        }
+    }
+}
+
+async fn leave_voice(ctx: &Context, st: &Arc<State>, guild_id: u64) {
+    if let Some(manager) = songbird::get(ctx).await {
+        let _ = manager.remove(GuildId::new(guild_id)).await;
+    }
+    st.voice_hooked.lock().await.remove(&guild_id);
+}
+
+/// Current track finished: drop it, then play the next one, autoplay, or stop.
+async fn advance_queue(app: &Arc<App>, st: &Arc<State>, ctx: &Context, guild_id: u64) {
+    let (next, empty, channel) = {
+        let mut queues = st.queues.lock().await;
+        let Some(queue) = queues.get_mut(&guild_id) else { return };
+        if let Some(done) = queue.songs.first().cloned() {
+            if let Some(id) = song_id(&done) {
+                queue.played_ids.insert(id);
+            }
+            queue.played_keys.insert(song_key(&done));
+            queue.played_urls.insert(song_url_key(&done));
+            queue.last_song = Some(done);
+        }
+        if !queue.songs.is_empty() {
+            queue.songs.remove(0);
+        }
+        (queue.songs.first().cloned(), queue.songs.is_empty(), queue.text_channel)
+    };
+
+    if next.is_some() {
+        play_current(app, st, ctx, guild_id).await;
+        return;
+    }
+    if empty {
+        if let Some(song) = next_autoplay(app, st, guild_id).await {
+            {
+                let mut queues = st.queues.lock().await;
+                if let Some(queue) = queues.get_mut(&guild_id) {
+                    queue.songs.push(song);
+                }
+            }
+            play_current(app, st, ctx, guild_id).await;
+            return;
+        }
+        send_embed(
+            ctx,
+            channel,
+            CreateEmbed::new().colour(BLUE).description("Queue finished."),
+        )
+        .await;
+        leave_voice(ctx, st, guild_id).await;
+    }
+}
+
 /// ponytail: voice — autoplay normally feeds the player; here it just keeps the queue stocked
 /// with a radio suggestion so `!q` and `!ap` still behave.
 async fn next_autoplay(app: &Arc<App>, st: &State, guild_id: u64) -> Option<Song> {
@@ -1783,7 +1928,9 @@ impl Handler {
                             queue.songs.push(song.clone());
                         }
                         drop(queues);
-                        playback_unavailable(ctx, channel, Some(&song)).await;
+                        if !play_current(&self.app, &self.st, ctx, key).await {
+                            playback_unavailable(ctx, channel, Some(&song)).await;
+                        }
                     } else {
                         send_embed(
                             ctx,
@@ -1792,7 +1939,7 @@ impl Handler {
                         )
                         .await;
                     }
-                } else {
+                } else if !play_current(&self.app, &self.st, ctx, key).await {
                     playback_unavailable(ctx, channel, next_song.as_ref()).await;
                 }
             }
@@ -1879,7 +2026,7 @@ impl Handler {
                     "[Disconnect Command] Server: {guild_name} | Disconnected by {}",
                     msg.author.tag()
                 ));
-                // ponytail: voice — connection.destroy() lives here.
+                leave_voice(ctx, &self.st, key).await;
                 destroy_queue(&self.st, key, true).await;
                 send_embed(
                     ctx,
@@ -2044,7 +2191,9 @@ impl Handler {
                 )
                 .await;
             }
-            playback_unavailable(ctx, channel, first.as_ref()).await;
+            if !play_current(&self.app, &self.st, ctx, key).await {
+                playback_unavailable(ctx, channel, first.as_ref()).await;
+            }
             return;
         }
 

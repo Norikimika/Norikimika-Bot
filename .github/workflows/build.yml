@@ -43,6 +43,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           TC: ${{ matrix.tc }}
+          # libopus_sys must build its vendored libopus with the NDK compiler;
+          # pkg-config on the runner would otherwise link the host library.
+          LIBOPUS_BUNDLED: "1"
+          LIBOPUS_STATIC: "1"
         run: |
           set -euo pipefail
           # Runner env vars are not visible through the env context.
@@ -64,6 +68,8 @@ jobs:
       # The binary is the deliverable: force-push it as the single commit of the
       # `build` branch so the branch stays small instead of growing every run.
       - name: Publish to the build branch
+        # Only the main rust branch may publish; a PR must not overwrite the shipped binary.
+        if: github.ref == 'refs/heads/rust'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET: ${{ matrix.target }}
