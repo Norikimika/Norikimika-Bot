@@ -25,11 +25,6 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.os }}
-    # both matrix jobs push to the same `build` branch: same group at job level makes them
-    # queue instead of racing (workflow-level concurrency would not serialise jobs of one run)
-    concurrency:
-      group: publish-build
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
 
@@ -57,9 +52,6 @@ jobs:
   termux:
     name: build (termux aarch64)
     runs-on: ubuntu-latest
-    concurrency:
-      group: publish-build
-      cancel-in-progress: false
     env:
       OPUS_VERSION: v1.5.2
       ANDROID_API: 24

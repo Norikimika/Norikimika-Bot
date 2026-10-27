@@ -46,10 +46,12 @@ to `master` the compiled binary is committed to the **`build` branch** (no artif
 ```
 https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-linux-x86_64
 https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-linux-aarch64
+https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-termux-aarch64
 ```
 
-Download then `chmod +x Norikimika-Bot-linux-*`. The aarch64 build is glibc: it runs on ARM
-servers and inside proot Debian/Ubuntu, not in native Termux.
+Download then `chmod +x Norikimika-Bot-*`. `linux-*` are glibc builds: ARM servers and proot
+Debian/Ubuntu. `termux-aarch64` is the native Android/bionic build (NDK r30, static opus, needs
+Android 7 / API 24+) — it runs directly in Termux without proot.
 
 ## Run
 
