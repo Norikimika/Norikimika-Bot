@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::app::App;
 use crate::util::{
-    active_iface, backup_dir, escape_html, format_duration_ms, format_kb, log_to, now_ms, run,
+    active_iface, data_dir, escape_html, format_duration_ms, format_kb, log_to, now_ms, run,
     run_timeout,
 };
 
@@ -64,7 +64,7 @@ impl Default for State {
 }
 
 fn state_path() -> std::path::PathBuf {
-    backup_dir().join("monitor.json")
+    data_dir().join("monitor.json")
 }
 
 fn load_state() -> State {
@@ -1497,7 +1497,7 @@ fn watchdog(app: Arc<App>) {
 /// ponytail: monitor.js never trims its own log; this keeps the file bounded
 /// (last 1000 lines). Bump the cap if older history is ever needed.
 fn trim_log() {
-    let path = backup_dir().join(LOG);
+    let path = data_dir().join(LOG);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };

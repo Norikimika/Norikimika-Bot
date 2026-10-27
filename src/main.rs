@@ -32,7 +32,7 @@ async fn main() {
 
     // Long-poll offset; the Bot API replays anything we did not confirm.
     let mut offset: i64 = 0;
-    if let Ok(raw) = std::fs::read_to_string(util::backup_dir().join("tg_offset")) {
+    if let Ok(raw) = std::fs::read_to_string(util::data_dir().join("tg_offset")) {
         offset = raw.trim().parse().unwrap_or(0);
     }
 
@@ -56,7 +56,7 @@ async fn main() {
                     }
                     telegram::handle_update(app.clone(), update).await;
                 }
-                let _ = std::fs::write(util::backup_dir().join("tg_offset"), offset.to_string());
+                let _ = std::fs::write(util::data_dir().join("tg_offset"), offset.to_string());
             }
             Err(e) => {
                 let msg = e.to_string();

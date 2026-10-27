@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::app::App;
 use crate::config::Config;
-use crate::util::{backup_dir, log_to, now_ms, run_timeout};
+use crate::util::{data_dir, log_to, now_ms, run_timeout};
 
 const TTS_MAX_ATTEMPTS: usize = 3;
 const TTS_RETRY_BASE_MS: f64 = 800.0;
@@ -273,7 +273,7 @@ impl Monitor {
             max_notifications: or(cfg.max_notifications, 49),
             auto_clear: cfg.auto_clear_enabled,
             pkill_throttle_seconds: or(cfg.pkill_throttle_seconds, 300) as f64,
-            json: backup_dir().join("notification.json"),
+            json: data_dir().join("notification.json"),
             last_clear_kill: 0.0,
             last_clear_time: 0.0,
             su_available: None,

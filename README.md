@@ -48,8 +48,8 @@ Fill in `BOT_TOKEN`, `CHAT_ID`, the `TOPIC_ID_*` values, Nine Router
 `SHEETS_GID`), receipt (`STORE_NAME`, `STORE_ADDRESS`, `STRUK_FONT`,
 `STRUK_FONTSIZE`, `PRINT_CMD`) and Discord (`DISCORD_*`) keys.
 
-Logs and state live in `~/SERVER/Backup/` (`telegram.log`, `monitor.json`,
-`repo.json`, `notification.json`, `memory.json`).
+Logs and state live in `Log/` next to the binary (`telegram.log`, `monitor.json`,
+`repo.json`, `notification.json`, `memory.json`); the directory is created on start.
 
 ## Build
 
@@ -85,22 +85,22 @@ it is the cheapest thing to clone on the phone:
 
 ```bash
 git clone --depth 1 --branch build \
-  https://github.com/Norikimika/LogError404Bot.git ~/SERVER/LogError404Bot
-cd ~/SERVER/LogError404Bot
+  https://github.com/Norikimika/LogError404Bot.git ~/LogError404Bot
+cd ~/LogError404Bot
 sha256sum -c LogError404Bot.sha256
 cp .env.example .env          # fill it in once
 chmod +x LogError404Bot
-nohup ./LogError404Bot >> ~/SERVER/Backup/rust-bot.out 2>&1 &
+mkdir -p Log && nohup ./LogError404Bot >> Log/rust-bot.out 2>&1 &
 termux-wake-lock
 ```
 
 Re-deploy later:
 
 ```bash
-cd ~/SERVER/LogError404Bot
+cd ~/LogError404Bot
 git fetch --depth 1 origin build && git reset --hard FETCH_HEAD
 sha256sum -c LogError404Bot.sha256
-pkill -f LogError404Bot && nohup ./LogError404Bot >> ~/SERVER/Backup/rust-bot.out 2>&1 &
+pkill -f LogError404Bot && mkdir -p Log && nohup ./LogError404Bot >> Log/rust-bot.out 2>&1 &
 ```
 
 Autostart with Termux:Boot — `~/.termux/boot/start-bot.sh`:
@@ -108,7 +108,7 @@ Autostart with Termux:Boot — `~/.termux/boot/start-bot.sh`:
 ```bash
 #!/data/data/com.termux/files/usr/bin/sh
 termux-wake-lock
-cd ~/SERVER/LogError404Bot && nohup ./LogError404Bot >> ~/SERVER/Backup/rust-bot.out 2>&1 &
+cd ~/LogError404Bot && mkdir -p Log && nohup ./LogError404Bot >> Log/rust-bot.out 2>&1 &
 ```
 
 ## Tests

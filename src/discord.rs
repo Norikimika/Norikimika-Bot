@@ -655,7 +655,7 @@ async fn resolve_meta_to_songs(
 // ================== CHATBOT MEMORY ==================
 
 fn memory_file() -> std::path::PathBuf {
-    util::backup_dir().join("memory.json")
+    util::data_dir().join("memory.json")
 }
 
 fn estimate_tokens(text: &str) -> usize {
@@ -990,14 +990,6 @@ fn data_uri(bytes: &[u8], mime: &str) -> String {
     format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
-fn mime_for(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
-        "png" => "image/png",
-        "webp" => "image/webp",
-        _ => "image/jpeg",
-    }
-}
-
 async fn fetch_image(app: &App, url: &str, label: &str) -> anyhow::Result<Vec<u8>> {
     let res = app
         .http
@@ -1030,9 +1022,17 @@ fn fit_size(text: &str, start: u32, min: u32) -> u32 {
 struct CardOpts<'a> {
     title: &'a str,
     text: &'a str,
-    bg_file: &'a str,
     label: &'a str,
     title_color: &'a str,
+}
+
+/// Banner shipped inside the binary; there is no env/file override.
+fn embedded_banner(label: &str) -> Option<&'static [u8]> {
+    match label {
+        "Welcome" => Some(include_bytes!("../banner/welcome.jpg")),
+        "Goodbye" => Some(include_bytes!("../banner/goodbye.jpg")),
+        _ => None,
+    }
 }
 
 async fn build_card(app: &App, user: &User, opts: &CardOpts<'_>) -> anyhow::Result<Vec<u8>> {
@@ -1042,16 +1042,10 @@ async fn build_card(app: &App, user: &User, opts: &CardOpts<'_>) -> anyhow::Resu
     };
     let avatar = fetch_image(app, &avatar_url, opts.label).await?;
 
-    let bg_path = {
-        let p = std::path::PathBuf::from(opts.bg_file);
-        if p.is_absolute() {
-            p
-        } else {
-            std::env::current_dir().unwrap_or_default().join(p)
-        }
-    };
-    let bg = std::fs::read(&bg_path)?;
-    log(&format!("[{}] banner local {} {} bytes", opts.label, bg_path.display(), bg.len()));
+    let bg = embedded_banner(opts.label)
+        .ok_or_else(|| anyhow::anyhow!("no embedded banner for {}", opts.label))?
+        .to_vec();
+    log(&format!("[{}] banner embedded {} bytes", opts.label, bg.len()));
 
     let title_size = fit_size(opts.title, 48, 20);
     let name_size = fit_size(&user.name, 40, 16);
@@ -1070,7 +1064,7 @@ async fn build_card(app: &App, user: &User, opts: &CardOpts<'_>) -> anyhow::Resu
 <text x="400" y="345" font-size="{text_size}" fill="#facc15">{text}</text>
 </g>
 </svg>"##,
-        bg = data_uri(&bg, mime_for(&bg_path)),
+        bg = data_uri(&bg, "image/jpeg"),
         av = data_uri(&avatar, "image/png"),
         title = xml_escape(opts.title),
         name = xml_escape(&user.name),
@@ -2197,21 +2191,19 @@ impl EventHandler for Handler {
             log("[Welcome] DISCORD_WELCOME_CHANNEL_ID not set in .env");
             return;
         };
-        let (title, text, bg_file) = match (
+        let (title, text) = match (
             env_s("DISCORD_WELCOME_TITLE"),
             env_s("DISCORD_WELCOME_TEXT"),
-            env_s("DISCORD_WELCOME_BG_FILE"),
         ) {
-            (Some(t), Some(x), Some(b)) => (t, x, b),
+            (Some(t), Some(x)) => (t, x),
             _ => {
-                log("[Welcome] DISCORD_WELCOME_BG_FILE / _TEXT / _TITLE not set in .env");
+                log("[Welcome] DISCORD_WELCOME_TITLE / _TEXT not set in .env");
                 return;
             }
         };
         let opts = CardOpts {
             title: &title,
             text: &text,
-            bg_file: &bg_file,
             label: "Welcome",
             title_color: "#7dd3fc",
         };
@@ -2251,21 +2243,19 @@ impl EventHandler for Handler {
             log("[Goodbye] DISCORD_GOODBYE_CHANNEL_ID not set in .env");
             return;
         };
-        let (title, text, bg_file) = match (
+        let (title, text) = match (
             env_s("DISCORD_GOODBYE_TITLE"),
             env_s("DISCORD_GOODBYE_TEXT"),
-            env_s("DISCORD_GOODBYE_BG_FILE"),
         ) {
-            (Some(t), Some(x), Some(b)) => (t, x, b),
+            (Some(t), Some(x)) => (t, x),
             _ => {
-                log("[Goodbye] DISCORD_GOODBYE_BG_FILE / _TEXT / _TITLE not set in .env");
+                log("[Goodbye] DISCORD_GOODBYE_TITLE / _TEXT not set in .env");
                 return;
             }
         };
         let opts = CardOpts {
             title: &title,
             text: &text,
-            bg_file: &bg_file,
             label: "Goodbye",
             title_color: "#ef4444",
         };

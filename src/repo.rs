@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 
 use crate::app::App;
-use crate::util::{backup_dir, escape_html, log_to, now_ms};
+use crate::util::{data_dir, escape_html, log_to, now_ms};
 
 const INTERVAL: Duration = Duration::from_secs(300);
 /// index.js: `setTimeout(loop, 300000)` plus a 2s pause between repos.
@@ -68,7 +68,7 @@ async fn run(app: &App) {
 // ================== STATE ==================
 
 fn state_path() -> std::path::PathBuf {
-    backup_dir().join("repo.json")
+    data_dir().join("repo.json")
 }
 
 fn load_state() -> Map<String, Value> {

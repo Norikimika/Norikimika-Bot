@@ -3,12 +3,16 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-pub fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/data/data/com.termux/files/home".into()))
-}
-
-pub fn backup_dir() -> PathBuf {
-    home().join("SERVER").join("Backup")
+/// Everything the bot writes (logs + state) goes to `Log/` beside the binary,
+/// so the install can live anywhere. Nothing is hardcoded to `~`.
+pub fn data_dir() -> PathBuf {
+    let base = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let dir = base.join("Log");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 pub fn now_ms() -> i64 {
@@ -19,10 +23,10 @@ pub fn ts() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// Append one line to ~/SERVER/Backup/<name>.log, creating the directory first.
+/// Append one line to `Log/<name>.log`, creating the directory first.
 pub fn log_to(file: &str, msg: &str) {
     use std::io::Write;
-    let path = backup_dir().join(file);
+    let path = data_dir().join(file);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

@@ -7,3 +7,6 @@
 *.log
 **/*.rs.bk
 .cargo-clang-android24.sh
+
+# Runtime logs and state
+/Log/

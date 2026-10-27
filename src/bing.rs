@@ -13,7 +13,7 @@ use base64::Engine;
 use chrono::{Duration as ChronoDuration, Local, NaiveTime, TimeZone};
 
 use crate::app::App;
-use crate::util::{backup_dir, log_to, run};
+use crate::util::{data_dir, log_to, run};
 
 const SCHEDULE: &str = "0 1 * * *";
 const PRIMARY_PACKAGE: &str = "com.brave.browser";
@@ -35,7 +35,7 @@ const ARTIFACT_NAMES: [&str; 7] = [
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn work_dir() -> PathBuf {
-    backup_dir()
+    data_dir()
 }
 
 fn log(msg: impl AsRef<str>) {
