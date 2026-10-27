@@ -927,7 +927,7 @@ async function connectionInfo() {
   }
 }
 
-async function sendConnectionRestored(latency, downMs) {
+async function sendConnectionRestored(latency, downMs, upMs) {
   const [model, codename, net] = await Promise.all([
     getprop("ro.product.model"),
     getprop("ro.product.device"),
@@ -946,7 +946,7 @@ async function sendConnectionRestored(latency, downMs) {
     `🚀 ISP: ${escapeHTML(net.isp)}\n` +
     `🐢 Latency: ${latency}ms\n` +
     `⏱️ Downtime: ${formatDuration(Date.now() - downMs)}\n` +
-    `⚡ Uptime: ${formatDuration(monitorState.connUpEpoch)}` +
+    `⚡ Uptime: ${formatDuration(Date.now() - upMs)}` +
     `</blockquote>`;
 
   await sendToTelegram(message, TOPIC_ID_CONNECTION);
@@ -963,13 +963,15 @@ async function checkConnection() {
       connFailCount = 0;
       if (monitorState.connDownEpoch) {
         const downMs = Date.now() - monitorState.connDownEpoch;
+        // uptime = streak that just ended; connUpEpoch is reset below, so compute first
+        const upMs = monitorState.connUpEpoch ? monitorState.connDownEpoch - monitorState.connUpEpoch : 0;
         const alerted = !connUp;
         monitorState.connDownEpoch = null;
         monitorState.connUpEpoch = Date.now();
         connUp = true;
         saveMonitorState();
-        log(`Connection restored, downtime ${formatDuration(Date.now() - downMs)}`);
-        if (alerted) await sendConnectionRestored(ping.ms, downMs);
+        log(`Connection restored, downtime ${formatDuration(Date.now() - downMs)}, uptime ${formatDuration(Date.now() - upMs)}`);
+        if (alerted) await sendConnectionRestored(ping.ms, downMs, upMs);
       }
       return;
     }
