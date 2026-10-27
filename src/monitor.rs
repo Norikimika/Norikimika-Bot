@@ -240,11 +240,23 @@ async fn set_input_suspend(value: u8) -> bool {
 }
 
 async fn check_battery(tg: &Tg, state: &mut MonitorState) {
-    let (ok, out) = sh("termux-battery-status", &[]).await;
-    if !ok {
-        logln!(MOD, "Battery monitor failed");
-        return;
-    }
+    // run it directly instead of sh() so the log says *why* it failed
+    let out = match tokio::process::Command::new("termux-battery-status").output().await {
+        Ok(out) if out.status.success() => out.stdout,
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            logln!(MOD, "Battery monitor failed: termux-battery-status exited {} {err}", out.status);
+            return;
+        }
+        Err(e) => {
+            logln!(
+                MOD,
+                "Battery monitor failed: {e} — Termux needs `pkg install termux-api` and the Termux:API app"
+            );
+            return;
+        }
+    };
+    let out = String::from_utf8_lossy(&out).to_string();
     let data: Value = match serde_json::from_str(&out) {
         Ok(v) => v,
         Err(e) => {
