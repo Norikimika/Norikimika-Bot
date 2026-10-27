@@ -50,37 +50,74 @@ jobs:
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          NAME: Norikimika-Bot-linux-${{ matrix.arch }}
-          SHA: ${{ github.sha }}
+        run: bash scripts/publish-build-branch.sh target/release/Norikimika-Bot "Norikimika-Bot-linux-${{ matrix.arch }}"
+
+  # Native Termux/Android binary: bionic-linked, runs without proot. Cross-compiled with the NDK,
+  # so it cannot be executed on the glibc runner — the `build` jobs above run the tests.
+  termux:
+    name: build (termux aarch64)
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-build
+      cancel-in-progress: false
+    env:
+      OPUS_VERSION: v1.5.2
+      ANDROID_API: 24
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          key: termux
+
+      - uses: nttld/setup-ndk@v1.6.0
+        with:
+          ndk-version: r30
+
+      - name: Point cargo at the NDK toolchain
         run: |
           set -euo pipefail
-          cp target/release/Norikimika-Bot "/tmp/$NAME"
-          AUTH="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          PUB="$(mktemp -d)"
-          if git clone --depth 1 --branch build "$AUTH" "$PUB" 2>/dev/null; then
-            echo "build branch exists, updating"
-          else
-            git -C "$PUB" init -q -b build
-            git -C "$PUB" remote add origin "$AUTH"
-          fi
-          cp "/tmp/$NAME" "$PUB/"
-          git -C "$PUB" add -A
-          if git -C "$PUB" diff --cached --quiet; then
-            echo "binary unchanged, nothing to publish"
-            exit 0
-          fi
-          git -C "$PUB" -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -qm "build: $NAME @ $SHA"
-          for attempt in 1 2 3 4 5; do
-            if git -C "$PUB" push -q origin HEAD:build; then
-              echo "published $NAME to build branch"
-              exit 0
-            fi
-            echo "push attempt $attempt rejected, rebasing on remote"
-            git -C "$PUB" fetch -q origin build
-            git -C "$PUB" rebase -q FETCH_HEAD || { git -C "$PUB" rebase --abort; exit 1; }
-            sleep 3
-          done
-          echo "could not publish $NAME" >&2
-          exit 1
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang"
+            echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang"
+            echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar"
+            echo "RANLIB_aarch64_linux_android=$TOOLCHAIN/llvm-ranlib"
+            echo "STRIP=$TOOLCHAIN/llvm-strip"
+          } >> "$GITHUB_ENV"
+
+      # audiopus_sys only links an existing opus, so build a static one for arm64-v8a first
+      - name: Build static opus for Android
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/xiph/opus/archive/refs/tags/${OPUS_VERSION}.tar.gz" | tar xz
+          cmake -S "opus-${OPUS_VERSION#v}" -B opus-build \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM="$ANDROID_API" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/opus-android" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DOPUS_BUILD_PROGRAMS=OFF \
+            -DOPUS_BUILD_TESTING=OFF
+          cmake --build opus-build -j"$(nproc)"
+          cmake --install opus-build
+
+      - name: Build for Termux
+        env:
+          LIBOPUS_LIB_DIR: ${{ github.workspace }}/opus-android
+          OPUS_STATIC: '1'
+          OPUS_NO_PKG: '1'
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target aarch64-linux-android
+          "$STRIP" --strip-unneeded target/aarch64-linux-android/release/Norikimika-Bot
+
+      - name: Publish binary to build branch
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-build-branch.sh target/aarch64-linux-android/release/Norikimika-Bot Norikimika-Bot-termux-aarch64
