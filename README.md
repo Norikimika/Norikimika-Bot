@@ -27,16 +27,20 @@ Needs Rust stable, a C toolchain, and libopus headers (`opus` + `pkg-config` on 
 
 ### Termux (native Android build)
 
-Termux binaries must be built on the device — a Linux aarch64 binary will not run there.
-From Termux (not proot):
+A Linux aarch64 binary will not run in Termux (`not found` — no glibc loader). Two ways:
 
 ```bash
+# 1. prebuilt, no toolchain needed
+curl -L -o Norikimika-Bot https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-termux-aarch64
+chmod +x Norikimika-Bot
+
+# 2. build on the device
 cd Norikimika-Bot && sh scripts/build-termux.sh
 ```
 
-The script installs `rust opus pkg-config binutils` (+ `yt-dlp`), then builds. Run it from
-Termux, and set `STATE_DIR` in `.env` to a Termux path (e.g. `$PREFIX/tmp/Norikimika-Bot`)
-instead of the Debian default.
+The script installs `rust opus pkg-config binutils` (+ `yt-dlp`), then builds. Either way set
+`STATE_DIR` in `.env` to a Termux path (e.g. `$PREFIX/tmp/Norikimika-Bot`) instead of the
+Debian default.
 
 ### CI
 
