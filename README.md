@@ -60,11 +60,15 @@ Android 7 / API 24+) — it runs directly in Termux without proot.
 ## Run
 
 ```bash
-./target/release/Norikimika-Bot repo          # one watcher pass
-./target/release/Norikimika-Bot repo --dry-run   # fetch + print messages, no Telegram send, no state write
-./target/release/Norikimika-Bot monitor       # long-running scheduler
-./target/release/Norikimika-Bot monitor --dry-run # render both PNG layouts to STATE_DIR and exit
+./Norikimika-Bot                 # everything in one process: repo (5 min), monitor, notification,
+                                 # bot, discord (if DISCORD_BOT_TOKEN), bing (01:00)
+./Norikimika-Bot --dry-run       # one repo pass + render both monitor PNGs, no send, no state write
+./Norikimika-Bot repo            # single module, e.g. for cron: */5 * * * * Norikimika-Bot repo
+./Norikimika-Bot monitor         # long-running scheduler only
+./Norikimika-Bot monitor --dry-run # render both PNG layouts to STATE_DIR and exit
 ```
+
+Modules whose env vars are missing just stop themselves with a log line; the rest keep running.
 
 ## Config
 
