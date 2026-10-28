@@ -375,6 +375,24 @@ fn flat_entries(stdout: &str) -> Vec<Song> {
         .unwrap_or_default()
 }
 
+/// Percent-encode a search query for a URL (titles carry `&`, `#`, spaces, emoji).
+fn url_encode(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    for byte in query.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// YouTube Music search instead of the plain YouTube one: same catalogue and video ids, but the
+/// music tab ranks official albums/singles above covers, shorts and reaction clips.
+fn music_search_url(query: &str) -> String {
+    format!("https://music.youtube.com/search?q={}", url_encode(query))
+}
+
 async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
     if query.trim().is_empty() {
         return Vec::new();
@@ -388,7 +406,7 @@ async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
         limit.to_string(),
         "-J".to_string(),
     ];
-    match spawn_ytdlp(args, format!("ytsearch{limit}:{query}"), Duration::from_secs(60)).await {
+    match spawn_ytdlp(args, music_search_url(query), Duration::from_secs(60)).await {
         Ok(stdout) => flat_entries(&stdout),
         Err(e) => {
             logln!(MOD, "[yt-dlp Search Error] {query}: {e}");
@@ -798,7 +816,7 @@ fn play_next<'a>(
             break (song, channel);
         };
 
-        let (song, channel) = prepared;
+        let (mut song, channel) = prepared;
         let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) else {
             logln!(MOD, "[Music] songbird not registered, cannot play {}", song.title);
             if let Some(queue) = queues().lock().await.get_mut(&guild_id) {
@@ -812,6 +830,17 @@ fn play_next<'a>(
             let mut call = call.lock().await;
             match resolve_stream(&song.url).await {
                 Ok(stream) => {
+                    // a music-search hit has no channel, so fill the artist from the resolved stream
+                    if song.artist == "Unknown Artist" {
+                        if let Some(artist) = stream.artist.clone() {
+                            song.artist = artist.clone();
+                            if let Some(queue) = queues().lock().await.get_mut(&guild_id) {
+                                if let Some(queued) = queue.songs.first_mut() {
+                                    queued.artist = artist;
+                                }
+                            }
+                        }
+                    }
                     // songbird would send exactly this request; we send it first so a 403
                     // says why instead of surfacing as "played 0ns".
                     let input: Input = HttpRequest {
@@ -863,6 +892,8 @@ struct Stream {
     url: String,
     headers: reqwest12::header::HeaderMap,
     len: Option<u64>,
+    /// Music search rows carry a title but no channel, so the artist only shows up here.
+    artist: Option<String>,
 }
 
 /// Resolve a watch URL to a playable stream and prove it answers before songbird sees it.
@@ -911,6 +942,10 @@ async fn resolve_stream(web_url: &str) -> Result<Stream> {
             }
         }
         let len = v["filesize"].as_u64().or_else(|| v["filesize_approx"].as_u64());
+        let artist = ["artist", "uploader", "channel", "creator"]
+            .iter()
+            .find_map(|key| v[*key].as_str())
+            .map(clean_artist);
         let mut req = crate::util::sb_client().get(&url).headers(headers.clone());
         if let Some(l) = len {
             req = req.header(reqwest12::header::RANGE, format!("bytes=0-{}", l.saturating_sub(1)));
@@ -924,7 +959,7 @@ async fn resolve_stream(web_url: &str) -> Result<Stream> {
                     codec = v["acodec"].as_str().unwrap_or("?"),
                     len = len
                 );
-                return Ok(Stream { url, headers, len });
+                return Ok(Stream { url, headers, len, artist });
             }
             Ok(resp) => {
                 let status = resp.status();
@@ -1946,6 +1981,32 @@ mod tests {
     }
 
     /// The production path: yt-dlp resolve, then the same GET songbird will send.
+    #[test]
+    fn music_search_url_encodes_the_query() {
+        assert_eq!(music_search_url("cardigan"), "https://music.youtube.com/search?q=cardigan");
+        assert_eq!(
+            music_search_url("taylor swift - cardigan"),
+            "https://music.youtube.com/search?q=taylor%20swift%20-%20cardigan"
+        );
+        assert_eq!(music_search_url("A&B #1"), "https://music.youtube.com/search?q=A%26B%20%231");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn music_search_returns_a_playable_track() {
+        let songs = search_yt_music("taylor swift - cardigan", 1).await;
+        let song = songs.first().expect("a YouTube Music hit");
+        println!("hit: {} | {} | {}", song.title, song.artist, song.url);
+        let stream = resolve_stream(&song.url).await.expect("resolve the stream");
+        println!(
+            "stream: {} bytes, artist {:?}, from {}",
+            stream.len.unwrap_or(0),
+            stream.artist,
+            &stream.url[..60]
+        );
+        assert!(stream.len.unwrap_or(0) > 100_000, "suspiciously small stream");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn resolve_stream_gets_a_playable_url() {
