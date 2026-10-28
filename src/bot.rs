@@ -658,20 +658,9 @@ async fn cmd_speed(bot: &Bot, msg: &Msg) -> Result<()> {
 
 async fn cmd_reboot(bot: &Bot, msg: &Msg) -> Result<()> {
     bot.send(msg.chat_id, msg.thread_id, "♻️ Rebooting system...", Some(msg.message_id), None).await?;
-    // GMS cache cleanup stays inside the two GMS data dirs: the old `find /data/data` deleted
-    // every `*gms*` file on the device, including anything under the Termux home.
-    let (ok, out) = sh_root("find /data/data/com.google.android.gms /data/user_de/0/com.google.android.gms -type f -name '*gms*' -print -exec rm {} \\;").await;
-    if !out.is_empty() {
-        logln!(MOD, "{out}");
-    }
-    if !ok {
-        logln!(MOD, "GMS cleanup failed: {out}");
-        bot.send(msg.chat_id, msg.thread_id, "❌ Failed to reboot", Some(msg.message_id), None).await?;
-        return Ok(());
-    }
-    let (rebooted, _) = sh_root("reboot").await;
+    let (rebooted, out) = sh_root("reboot").await;
     if !rebooted {
-        logln!(MOD, "Reboot failed");
+        logln!(MOD, "Reboot failed: {out}");
         bot.send(msg.chat_id, msg.thread_id, "❌ Failed to reboot", Some(msg.message_id), None).await?;
     }
     Ok(())

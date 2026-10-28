@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
     util::install_crypto_provider();
+    adopt_device_timezone();
 
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
@@ -83,16 +84,41 @@ fn spawn_module(name: &'static str, fut: impl Future<Output = Result<()>> + Send
 }
 
 /// Seconds until the next `hour:00` local time.
-fn secs_until(hour: u32) -> u64 {
-    use chrono::{Datelike, Duration as D, Local, TimeZone};
-    let now = Local::now();
-    let mut next = Local
+fn secs_until_from(now: chrono::DateTime<chrono::Local>, hour: u32) -> u64 {
+    use chrono::{Datelike, Duration as D, TimeZone};
+    let mut next = chrono::Local
         .with_ymd_and_hms(now.year(), now.month(), now.day(), hour, 0, 0)
         .unwrap();
     if next <= now {
         next = next + D::days(1);
     }
     (next - now).num_seconds().max(1) as u64
+}
+
+fn secs_until(hour: u32) -> u64 {
+    secs_until_from(chrono::Local::now(), hour)
+}
+
+/// Pin the schedule to the device timezone and say so in the log.
+///
+/// A Termux process inherits no `TZ`, so `chrono::Local` depends on what bionic falls back to; the
+/// nightly 01:00 job must not silently mean 01:00 UTC.
+fn adopt_device_timezone() {
+    if !std::env::var("TZ").map(|v| !v.is_empty()).unwrap_or(false) {
+        if let Ok(out) = std::process::Command::new("getprop").arg("persist.sys.timezone").output() {
+            let tz = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !tz.is_empty() {
+                std::env::set_var("TZ", &tz);
+            }
+        }
+    }
+    let now = chrono::Local::now();
+    println!(
+        "local time {} (UTC{:+.1}h, TZ {})",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        now.offset().local_minus_utc() as f64 / 3600.0,
+        std::env::var("TZ").unwrap_or_else(|_| "unset".into()),
+    );
 }
 
 /// One process for every module, mirroring the JS `index.js` entry point.
@@ -115,8 +141,18 @@ async fn run_all(dry_run: bool) -> Result<()> {
         }
     });
     tokio::spawn(async move {
+        use chrono::Timelike;
+        // a reboot or restart after 01:00 used to skip the whole day
+        if chrono::Local::now().hour() >= 1 && !bing::ran_today() {
+            logln!("all", "bing catch-up: today's run has not happened yet");
+            if let Err(e) = bing::run().await {
+                logln!("all", "bing error: {e:#}");
+            }
+        }
         loop {
-            tokio::time::sleep(Duration::from_secs(secs_until(1))).await;
+            let wait = secs_until(1);
+            logln!("all", "bing: next run in {wait}s at 01:00 local");
+            tokio::time::sleep(Duration::from_secs(wait)).await;
             if let Err(e) = bing::run().await {
                 logln!("all", "bing error: {e:#}");
             }
@@ -135,4 +171,32 @@ async fn run_all(dry_run: bool) -> Result<()> {
 
     std::future::pending::<()>().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tz_probe_tests {
+    #[test]
+    fn chrono_honours_tz_set_at_runtime() {
+        std::env::set_var("TZ", "Asia/Makassar");
+        let off = chrono::Local::now().offset().local_minus_utc();
+        std::env::remove_var("TZ");
+        assert_eq!(off, 8 * 3600, "chrono ignored the runtime TZ (offset {off}s)");
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use chrono::{Local, TimeZone};
+
+    fn at(h: u32, m: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 10, 29, h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn nightly_job_waits_for_one_am() {
+        assert_eq!(secs_until_from(at(0, 30), 1), 1800);
+        assert_eq!(secs_until_from(at(1, 0), 1), 86_400);
+        assert_eq!(secs_until_from(at(23, 0), 1), 7200);
+    }
 }

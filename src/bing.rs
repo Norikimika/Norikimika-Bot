@@ -430,8 +430,26 @@ pub fn cleanup_artifacts() {
     }
 }
 
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Did today's run already happen? Lives on disk because a reboot erases any in-memory flag.
+pub fn ran_today() -> bool {
+    crate::state::State::load("bing.json").str("last_run").map(|v| v == today()).unwrap_or(false)
+}
+
+fn mark_ran() {
+    let mut state = crate::state::State::load("bing.json");
+    state.set_str("last_run", today());
+    if let Err(e) = state.save() {
+        logln!(MOD, "could not record the run: {e}");
+    }
+}
+
 pub async fn run() -> Result<()> {
     logln!(MOD, "Bing Rewards started");
+    mark_ran();
     for mode in ["brave", "clone"] {
         if mode == "clone" {
             sleep(3000).await;
