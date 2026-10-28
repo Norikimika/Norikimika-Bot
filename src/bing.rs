@@ -21,12 +21,27 @@ const ARTIFACTS: &[&str] = &[
     "rewards-current.tsv",
 ];
 
+/// Absolute path only: `uiautomator dump` and `su -c` run with their own cwd, so a relative
+/// BING_WORK_DIR (e.g. `Logs`) made root write somewhere else and the read back fail.
 fn work_dir() -> PathBuf {
     let dir = crate::config::get("BING_WORK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(crate::config::state_dir);
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).join(dir)
+    };
     let _ = std::fs::create_dir_all(&dir);
-    dir
+    std::fs::canonicalize(&dir).unwrap_or(dir)
+}
+
+/// Where root-owned tools write. Pulled back into `work_dir` afterwards, because a file created
+/// by `su` is root:root 0600 and the Termux app cannot read it.
+const ROOT_TMP: &str = "/data/local/tmp/norikimika-bing";
+
+fn root_tmp(name: &str) -> String {
+    format!("{ROOT_TMP}/{name}")
 }
 
 fn path_in(name: &str) -> PathBuf {
@@ -225,10 +240,15 @@ fn parse_claim_from_tsv(tsv: &str) -> Option<(i32, i32)> {
 // ---------- device steps ----------
 
 async fn dump_ui(filename: &str) -> Result<String> {
-    let target = path_in(filename);
-    shell(&format!("uiautomator dump {}", target.display())).await?;
-    std::fs::read_to_string(&target)
-        .map_err(|e| anyhow!("uiautomator dump wrote nothing to {}: {e}", target.display()))
+    let remote = root_tmp(filename);
+    shell(&format!("mkdir -p {ROOT_TMP} && uiautomator dump {remote}")).await?;
+    let xml = shell(&format!("cat {remote}"))
+        .await
+        .map_err(|e| anyhow!("uiautomator dump left nothing at {remote}: {e}"))?;
+    if xml.trim().is_empty() {
+        return Err(anyhow!("uiautomator dump left {remote} empty"));
+    }
+    Ok(xml)
 }
 
 async fn tap(x: i32, y: i32) -> Result<()> {
@@ -328,14 +348,44 @@ async fn run_searches(mode: &str) -> Result<String> {
     Ok(last_query)
 }
 
+/// Locate tesseract without trusting PATH (same reason as `util::su`).
+fn tesseract_path() -> Option<String> {
+    use std::sync::OnceLock;
+    static FOUND: OnceLock<Option<String>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            if let Some(prefix) = std::env::var_os("PREFIX") {
+                candidates.push(PathBuf::from(prefix).join("bin/tesseract"));
+            }
+            candidates.push(PathBuf::from("/data/data/com.termux/files/usr/bin/tesseract"));
+            if let Some(path) = std::env::var_os("PATH") {
+                candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("tesseract")));
+            }
+            candidates
+                .into_iter()
+                .find(|path| path.is_file())
+                .map(|path| path.display().to_string())
+        })
+        .clone()
+}
+
 async fn parse_ocr_claim() -> Option<(i32, i32)> {
+    let tesseract = tesseract_path()?;
     let image = path_in("rewards-current.png");
     let output = path_in("rewards-current");
-    if shell(&format!("screencap -p {}", image.display())).await.is_err() {
+    let remote = root_tmp("rewards-current.png");
+    let copied = shell(&format!(
+        "mkdir -p {ROOT_TMP} && screencap -p {remote} && cp {remote} {} && chmod 644 {}",
+        image.display(),
+        image.display()
+    ))
+    .await;
+    if copied.is_err() {
         return None;
     }
     run_cmd(
-        "tesseract",
+        &tesseract,
         &[&image.display().to_string(), &output.display().to_string(), "--psm", "11", "tsv"],
     )
     .await
@@ -346,7 +396,10 @@ async fn parse_ocr_claim() -> Option<(i32, i32)> {
 
 async fn claim_if_ready() -> Result<()> {
     let Some((x, y)) = parse_ocr_claim().await else {
-        logln!(MOD, "no ready points, skip claim");
+        match tesseract_path() {
+            Some(_) => logln!(MOD, "no ready points, skip claim"),
+            None => logln!(MOD, "claim skipped: tesseract is not installed (pkg install tesseract)"),
+        }
         return Ok(());
     };
     logln!(MOD, "ready to claim, tapping {x},{y}");
@@ -498,6 +551,23 @@ mod tests {
                    5\t1\t1\t1\t1\t1\t100\t200\t40\t20\t90\tclaim\n";
         assert_eq!(parse_claim_from_tsv(tsv), Some((120, 210)));
         assert_eq!(parse_claim_from_tsv("level\tpage\n5\t1\n"), None);
+    }
+
+    #[test]
+    fn work_dir_is_absolute_even_when_configured_relative() {
+        // `Logs` in .env used to stay relative, so root wrote the dump elsewhere
+        std::env::set_var("BING_WORK_DIR", "target/bing-logs");
+        let dir = work_dir();
+        std::env::remove_var("BING_WORK_DIR");
+        assert!(dir.is_absolute(), "{} is relative", dir.display());
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn tesseract_lookup_is_absolute_when_found() {
+        if let Some(path) = tesseract_path() {
+            assert!(std::path::Path::new(&path).is_file(), "{path} must exist");
+        }
     }
 
     #[test]
