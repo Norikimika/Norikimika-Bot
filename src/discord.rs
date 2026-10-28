@@ -1145,7 +1145,18 @@ async fn reply_embed(ctx: &Context, msg: &Message, description: &str, colour: u3
 
 async fn member_voice_channel(ctx: &Context, msg: &Message) -> Option<ChannelId> {
     let guild_id = msg.guild_id?;
-    ctx.cache.guild(guild_id)?.voice_states.get(&msg.author.id).and_then(|v| v.channel_id)
+    let guild = ctx.cache.guild(guild_id)?;
+    let channel = guild.voice_states.get(&msg.author.id).and_then(|v| v.channel_id);
+    if channel.is_none() {
+        // voice states only reach the cache with the GUILDS + GUILD_VOICE_STATES intents
+        logln!(
+            MOD,
+            "voice gate: no voice state for {} in guild {guild_id} ({} cached states)",
+            msg.author.id,
+            guild.voice_states.len()
+        );
+    }
+    channel
 }
 
 async fn bot_voice_channel(ctx: &Context, guild_id: GuildId) -> Option<ChannelId> {
@@ -1563,7 +1574,8 @@ impl EventHandler for Handler {
 
 pub async fn run() -> Result<()> {
     let token = crate::config::req("DISCORD_BOT_TOKEN")?;
-    let intents = GatewayIntents::GUILD_MESSAGES
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_VOICE_STATES
         | GatewayIntents::GUILD_MEMBERS;
