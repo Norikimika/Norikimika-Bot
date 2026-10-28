@@ -177,12 +177,14 @@ fn format_bytes(kb: f64) -> String {
 async fn send_usage_report(tg: &Tg) {
     logln!(MOD, "Running scheduled daily usage...");
     let iface = active_iface().await;
-    let (ok, out) = sh("vnstat", &["--json"]).await;
-    if !ok {
-        logln!(MOD, "Daily usage vnstat failed");
-        tg.send(crate::config::topic("TOPIC_ID_USAGE"), "❌ Failed to get daily usage").await;
-        return;
-    }
+    let out = match crate::util::capture("vnstat", &["--json"]).await {
+        Ok(out) => out,
+        Err(e) => {
+            logln!(MOD, "Daily usage vnstat failed: {e} — needs vnstat installed and its daemon running (Termux: `pkg install vnstat`)");
+            tg.send(crate::config::topic("TOPIC_ID_USAGE"), "❌ Failed to get daily usage").await;
+            return;
+        }
+    };
     let data: Value = match serde_json::from_str(&out) {
         Ok(v) => v,
         Err(e) => {
@@ -240,14 +242,8 @@ async fn set_input_suspend(value: u8) -> bool {
 }
 
 async fn check_battery(tg: &Tg, state: &mut MonitorState) {
-    // run it directly instead of sh() so the log says *why* it failed
-    let out = match tokio::process::Command::new("termux-battery-status").output().await {
-        Ok(out) if out.status.success() => out.stdout,
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            logln!(MOD, "Battery monitor failed: termux-battery-status exited {} {err}", out.status);
-            return;
-        }
+    let out = match crate::util::capture("termux-battery-status", &[]).await {
+        Ok(out) => out,
         Err(e) => {
             logln!(
                 MOD,
@@ -256,7 +252,6 @@ async fn check_battery(tg: &Tg, state: &mut MonitorState) {
             return;
         }
     };
-    let out = String::from_utf8_lossy(&out).to_string();
     let data: Value = match serde_json::from_str(&out) {
         Ok(v) => v,
         Err(e) => {

@@ -697,13 +697,16 @@ async fn cmd_battery(bot: &Bot, msg: &Msg) -> Result<()> {
 
 async fn cmd_usage(bot: &Bot, msg: &Msg) -> Result<()> {
     let typing = bot.typing_loop(msg.chat_id, msg.thread_id, "typing").await;
-    let (ok, out) = sh("vnstat", &["--json"]).await;
+    let out = crate::util::capture("vnstat", &["--json"]).await;
     typing.abort();
-    if !ok {
-        logln!(MOD, "vnstat failed");
-        bot.send(msg.chat_id, msg.thread_id, "❌ Failed to get usage", Some(msg.message_id), None).await?;
-        return Ok(());
-    }
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => {
+            logln!(MOD, "vnstat failed: {e} — needs vnstat installed and its daemon running (Termux: `pkg install vnstat`)");
+            bot.send(msg.chat_id, msg.thread_id, "❌ Failed to get usage", Some(msg.message_id), None).await?;
+            return Ok(());
+        }
+    };
     let data: Value = match serde_json::from_str(&out) {
         Ok(v) => v,
         Err(e) => {

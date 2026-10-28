@@ -23,6 +23,28 @@ pub fn client() -> reqwest::Client {
     http().build().expect("build http client")
 }
 
+/// Run a command and capture its stdout. On failure the error says *why* (spawn error, or exit
+/// status plus stderr) so log lines are actionable instead of a bare "failed".
+pub async fn capture(cmd: &str, args: &[&str]) -> std::result::Result<String, String> {
+    match tokio::process::Command::new(cmd).args(args).output().await {
+        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            // `ExitStatus`'s Display is "exit status: 3"; keep it to the code
+            let code = match out.status.code() {
+                Some(c) => c.to_string(),
+                None => out.status.to_string(),
+            };
+            Err(if err.is_empty() {
+                format!("exit {code}")
+            } else {
+                format!("exit {code}: {err}")
+            })
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -87,5 +109,16 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         assert_eq!(rupiah(1234567.0), "1.234.567");
         assert_eq!(format_duration(90061), "1d 1h 1m");
+    }
+
+    #[tokio::test]
+    async fn capture_says_why_it_failed() {
+        let missing = capture("definitely-not-a-command-xyz", &[]).await.unwrap_err();
+        assert!(missing.contains("No such file"), "{missing}");
+
+        let failed = capture("sh", &["-c", "echo boom >&2; exit 3"]).await.unwrap_err();
+        assert!(failed.contains("exit 3") && failed.contains("boom"), "{failed}");
+
+        assert_eq!(capture("sh", &["-c", "echo ok"]).await.unwrap().trim(), "ok");
     }
 }
