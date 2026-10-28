@@ -148,6 +148,9 @@ jobs:
           docker system prune -af || true
           df -h
 
+      - name: Configure git
+        run: git config --global init.defaultBranch master
+
       - name: Checkout Repository
         uses: actions/checkout@v7
         with:
