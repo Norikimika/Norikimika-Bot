@@ -21,6 +21,10 @@ reqwest12 = { package = "reqwest", version = "0.12", default-features = false, f
 serde = { version = "1", features = ["derive"] }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend", "voice"] }
 songbird = { version = "0.6", features = ["builtin-queue"] }
+# songbird pulls symphonia with default-features = false, i.e. zero decoders, so every
+# stream died the moment it started. Opus/webm is not decodable by symphonia 0.5 anyway,
+# hence the m4a preference in the yt-dlp args next to YoutubeDl::new_ytdl_like.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4", "mp3", "pcm", "adpcm", "flac", "ogg", "vorbis", "wav"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "fs", "sync", "io-util"] }
 

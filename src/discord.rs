@@ -17,6 +17,7 @@ use songbird::input::{Input, YoutubeDl};
 use songbird::{
     Event as VoiceEvent, EventContext, EventHandler as VoiceEventHandler, SerenityInit, TrackEvent,
 };
+use songbird::tracks::PlayMode;
 use tokio::sync::Mutex;
 
 const MOD: &str = "discord";
@@ -797,7 +798,15 @@ fn play_next<'a>(
         let mut enqueued = false;
         if let Some(call) = songbird.get(guild_id) {
             let mut call = call.lock().await;
-            let input: Input = YoutubeDl::new_ytdl_like("yt-dlp", reqwest12::Client::new(), song.url.clone()).into();
+            // songbird's ytdl picks `ba[abr>0][vcodec=none]/best`, which is usually webm/opus
+            // and symphonia cannot decode opus; sort m4a/AAC first.
+            let input: Input = YoutubeDl::new_ytdl_like("yt-dlp", reqwest12::Client::new(), song.url.clone())
+                .user_args(vec![
+                    "-S".into(),
+                    "ext:m4a,acodec:aac".into(),
+                    "--no-warnings".into(),
+                ])
+                .into();
             call.enqueue_input(input).await;
             enqueued = true;
         }
@@ -839,8 +848,37 @@ struct TrackEndNotifier {
 
 #[async_trait]
 impl VoiceEventHandler for TrackEndNotifier {
-    async fn act(&self, _ctx: &EventContext<'_>) -> Option<VoiceEvent> {
+    async fn act(&self, ev: &EventContext<'_>) -> Option<VoiceEvent> {
+        if let EventContext::Track(tracks) = ev {
+            for (state, _) in tracks.iter() {
+                logln!(
+                    MOD,
+                    "[Music End] {} | played {:?} of the stream",
+                    self.guild_id,
+                    state.play_time
+                );
+            }
+        }
         advance_queue(&self.ctx, self.guild_id).await;
+        None
+    }
+}
+
+/// Without this a broken stream just looked like a fast skip.
+struct TrackErrorNotifier {
+    guild_id: GuildId,
+}
+
+#[async_trait]
+impl VoiceEventHandler for TrackErrorNotifier {
+    async fn act(&self, ev: &EventContext<'_>) -> Option<VoiceEvent> {
+        if let EventContext::Track(tracks) = ev {
+            for (state, _) in tracks.iter() {
+                if let PlayMode::Errored(err) = &state.playing {
+                    logln!(MOD, "[Music Error] {} | {err}", self.guild_id);
+                }
+            }
+        }
         None
     }
 }
@@ -860,6 +898,10 @@ async fn ensure_voice(ctx: &Context, guild_id: GuildId, channel_id: ChannelId) -
         call.add_global_event(
             VoiceEvent::Track(TrackEvent::End),
             TrackEndNotifier { guild_id, ctx: ctx.clone() },
+        );
+        call.add_global_event(
+            VoiceEvent::Track(TrackEvent::Error),
+            TrackErrorNotifier { guild_id },
         );
     }
     logln!(MOD, "[Voice] joined {channel_id}");
@@ -1740,5 +1782,54 @@ mod tests {
             std::fs::write(&path, &png).expect("write banner");
             println!("{label} -> {} ({} bytes)", path.display(), png.len());
         }
+    }
+
+    /// The exact stream songbird will fetch, decoded with the codecs we ship.
+    /// Ignored by default (needs network + yt-dlp): `cargo test --release -- --ignored music`.
+    #[tokio::test]
+    #[ignore]
+    async fn chosen_stream_decodes_to_pcm() {
+        use symphonia::core::codecs::DecoderOptions;
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let url = "https://www.youtube.com/watch?v=K-a8s8OLBSE";
+        let out = tokio::process::Command::new("yt-dlp")
+            .args(["-S", "ext:m4a,acodec:aac", "-f", "ba[abr>0][vcodec=none]/best", "-g", url])
+            .output()
+            .await
+            .expect("run yt-dlp");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let direct = String::from_utf8_lossy(&out.stdout).lines().next().unwrap().trim().to_string();
+        println!("picked: {}", &direct[..direct.find('?').unwrap_or(40).min(direct.len())]);
+
+        let bytes = crate::util::client().get(&direct).send().await.unwrap().bytes().await.unwrap();
+        println!("downloaded {} bytes", bytes.len());
+
+        let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes.to_vec())), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("m4a");
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .expect("probe should know this container");
+        let mut format = probed.format;
+        let track = format.default_track().expect("a track").clone();
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .expect("a decoder for this codec");
+        let mut frames = 0u64;
+        while let Ok(packet) = format.next_packet() {
+            if packet.track_id() != track.id {
+                continue;
+            }
+            frames += decoder.decode(&packet).expect("decode packet").frames() as u64;
+            if frames > 88_200 {
+                break;
+            }
+        }
+        println!("decoded {frames} frames");
+        assert!(frames > 44_100, "only {frames} frames decoded");
     }
 }
