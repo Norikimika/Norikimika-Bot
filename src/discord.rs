@@ -944,7 +944,7 @@ fn centered(canvas: &mut crate::render::Canvas, y: i32, size: f32, face: crate::
 async fn build_banner(user: &User, title: &str, text: &str, bg_bytes: &[u8], title_color: &str) -> Option<Vec<u8>> {
     // Ask for PNG: serenity's avatar_url() hands out WEBP/GIF, and the image crate here only has
     // the png + jpeg decoders, so a webp avatar silently produced an empty circle.
-    let url = match user.avatar.as_deref() {
+    let url = match &user.avatar {
         Some(hash) => format!("https://cdn.discordapp.com/avatars/{}/{hash}.png?size=256", user.id),
         None => user.default_avatar_url(),
     };
