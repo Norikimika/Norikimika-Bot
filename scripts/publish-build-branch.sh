@@ -19,6 +19,10 @@ else
   git -C "$PUB" remote add origin "$AUTH"
 fi
 
+# rebase during a retry needs an identity too, so set it in the repo instead of per-command
+git -C "$PUB" config user.name 'github-actions[bot]'
+git -C "$PUB" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
 cp "/tmp/$NAME" "$PUB/"
 git -C "$PUB" add -A
 if git -C "$PUB" diff --cached --quiet; then
@@ -26,11 +30,9 @@ if git -C "$PUB" diff --cached --quiet; then
   exit 0
 fi
 
-git -C "$PUB" -c user.name='github-actions[bot]' \
-  -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-  commit -qm "build: $NAME @ $SHA"
+git -C "$PUB" commit -qm "build: $NAME @ $SHA"
 
-for attempt in 1 2 3 4 5; do
+for attempt in 1 2 3 4 5 6 7 8; do
   if git -C "$PUB" push -q origin HEAD:build; then
     echo "published $NAME to build branch"
     exit 0
@@ -38,7 +40,7 @@ for attempt in 1 2 3 4 5; do
   echo "push attempt $attempt rejected, rebasing on remote"
   git -C "$PUB" fetch -q origin build
   git -C "$PUB" rebase -q FETCH_HEAD || { git -C "$PUB" rebase --abort; exit 1; }
-  sleep 3
+  sleep $((attempt * 2))
 done
 
 echo "could not publish $NAME" >&2
