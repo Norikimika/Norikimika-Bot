@@ -1644,12 +1644,66 @@ fn parse_message(v: &Value) -> Option<Msg> {
     })
 }
 
+/// Telegram's update offset has to survive restarts. It used to start at 0 every boot, so the
+/// whole 24h backlog was replayed — one `/reboot` therefore rebooted the device on every start.
+fn offset_path() -> PathBuf {
+    crate::config::state_file("telegram-offset.json")
+}
+
+fn read_offset(path: &std::path::Path) -> Option<i64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v["offset"].as_str()?.parse().ok()
+}
+
+fn write_offset(path: &std::path::Path, offset: i64) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, json!({ "offset": offset.to_string() }).to_string())?;
+    std::fs::rename(&tmp, path)
+}
+
+fn load_offset() -> Option<i64> {
+    read_offset(&offset_path())
+}
+
+fn save_offset(offset: i64) {
+    if let Err(e) = write_offset(&offset_path(), offset) {
+        logln!(MOD, "offset save failed: {e}");
+    }
+}
+
+/// With no saved offset, ask for the newest update only instead of replaying the backlog.
+async fn newest_offset(bot: &Bot) -> i64 {
+    let url = format!("https://api.telegram.org/bot{}/getUpdates", bot.token);
+    let res = bot.http.post(&url).json(&json!({"offset": -1, "timeout": 0, "limit": 1})).send().await;
+    match res {
+        Ok(r) => match r.json::<Value>().await {
+            Ok(v) => v["result"][0]["update_id"].as_i64().unwrap_or(-1) + 1,
+            Err(e) => {
+                logln!(MOD, "offset bootstrap parse failed: {e}");
+                0
+            }
+        },
+        Err(e) => {
+            logln!(MOD, "offset bootstrap failed: {e}");
+            0
+        }
+    }
+}
+
 pub async fn run() -> Result<()> {
     let bot = Bot::new()?;
     logln!(MOD, "Bot launched");
     let _ = sh("termux-tts-speak", &["Bot launched"]).await;
 
-    let mut offset: i64 = 0;
+    let mut offset: i64 = match load_offset() {
+        Some(saved) => saved,
+        None => newest_offset(&bot).await,
+    };
+    logln!(MOD, "Offset {offset}");
     loop {
         let url = format!("https://api.telegram.org/bot{}/getUpdates", bot.token);
         let res = bot
@@ -1677,6 +1731,8 @@ pub async fn run() -> Result<()> {
         let empty = Vec::new();
         for update in payload["result"].as_array().unwrap_or(&empty) {
             offset = update["update_id"].as_i64().unwrap_or(offset) + 1;
+            // persist before handling: a reboot in the middle of a command must not replay it
+            save_offset(offset);
 
             if let Some(cb) = update.get("callback_query") {
                 let data = cb["data"].as_str().unwrap_or("").to_string();
@@ -1818,5 +1874,23 @@ mod tests {
     fn encodes_base64() {
         assert_eq!(base64_encode(b"Man"), "TWFu");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
+    }
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+
+    /// A reboot in the middle of a command must not replay that command once the bot is back.
+    #[test]
+    fn offset_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("norikimika-offset-{}", std::process::id()));
+        let path = dir.join("telegram-offset.json");
+        assert_eq!(read_offset(&path), None, "no state file yet");
+        write_offset(&path, 4242).expect("write offset");
+        assert_eq!(read_offset(&path), Some(4242), "first write must be readable");
+        write_offset(&path, 4243).expect("rewrite offset");
+        assert_eq!(read_offset(&path), Some(4243), "restart resumes at the newest offset");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
