@@ -721,7 +721,7 @@ fn play_next<'a>(
     guild_id: GuildId,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
-        let prepared = {
+        let prepared = loop {
             let mut all = queues().lock().await;
             let Some(queue) = all.get_mut(&guild_id) else { return };
             if queue.playing {
@@ -747,6 +747,8 @@ fn play_next<'a>(
                                 queue.played_keys.insert(song_key(&next));
                                 queue.played_urls.insert(song_url_key(&next));
                                 queue.songs.push(next);
+                                drop(all);
+                                continue;
                             }
                             None => {
                                 send_embed_to(snapshot.text_channel, &ctx.http, "Autoplay could not find another track.", 0xFF0000).await;
@@ -764,13 +766,13 @@ fn play_next<'a>(
                     }
                 }
             }
-            let mut all = queues().lock().await;
-            let Some(queue) = all.get_mut(&guild_id) else { return };
+            // reuse the guard we already hold — locking queues() again here deadlocked every
+            // music command (tokio Mutex is not reentrant)
             let song = normalize_song(queue.songs[0].clone());
             if !is_valid_song(&song) {
                 queue.songs.remove(0);
                 drop(all);
-                return Box::pin(play_next(ctx, guild_id)).await;
+                continue;
             }
             queue.songs[0] = song.clone();
             queue.last_song = Some(song.clone());
@@ -779,11 +781,19 @@ fn play_next<'a>(
             queue.played_urls.insert(song_url_key(&song));
             queue.playing = true;
             queue.fail_count = 0;
-            (song, queue.text_channel)
+            let channel = queue.text_channel;
+            break (song, channel);
         };
 
         let (song, channel) = prepared;
-        let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) else { return };
+        let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) else {
+            logln!(MOD, "[Music] songbird not registered, cannot play {}", song.title);
+            if let Some(queue) = queues().lock().await.get_mut(&guild_id) {
+                queue.playing = false;
+            }
+            send_embed_to(channel, &ctx.http, "Voice is not available right now.", 0xFF0000).await;
+            return;
+        };
         let mut enqueued = false;
         if let Some(call) = songbird.get(guild_id) {
             let mut call = call.lock().await;
@@ -927,9 +937,19 @@ fn centered(canvas: &mut crate::render::Canvas, y: i32, size: f32, face: crate::
 }
 
 /// 800x400 banner: cover-scaled background, darkened, circular avatar, three centred text rows.
-async fn build_banner(member: &Member, title: &str, text: &str, bg_bytes: &[u8], title_color: &str) -> Option<Vec<u8>> {
-    let avatar = fetch_bytes(&member.user.face()).await;
-    compose_banner(bg_bytes, avatar.as_deref(), &member.user.name, title, text, title_color)
+/// Takes a `User` (not a `Member`): on leave the member is already gone from the guild, so a REST
+/// lookup 404s and the goodbye banner was never sent.
+async fn build_banner(user: &User, title: &str, text: &str, bg_bytes: &[u8], title_color: &str) -> Option<Vec<u8>> {
+    // the custom avatar when set, otherwise Discord's default one
+    let url = user
+        .avatar_url()
+        .map(|u| format!("{u}?size=256"))
+        .unwrap_or_else(|| user.default_avatar_url());
+    let avatar = fetch_bytes(&url).await;
+    if avatar.is_none() {
+        logln!(MOD, "[Banner] avatar fetch failed for {} ({url})", user.name);
+    }
+    compose_banner(bg_bytes, avatar.as_deref(), &user.name, title, text, title_color)
 }
 
 /// Pure banner compositor (no network), so it can be exercised without a Discord gateway.
@@ -1021,7 +1041,7 @@ async fn handle_member_join(ctx: &Context, member: &Member) {
         return;
     };
     let text = text.replace("{user}", &member.user.name);
-    let Some(png) = build_banner(member, &title, &text, WELCOME_BG, "#7dd3fc").await else {
+    let Some(png) = build_banner(&member.user, &title, &text, WELCOME_BG, "#7dd3fc").await else {
         logln!(MOD, "[Welcome] banner render failed");
         return;
     };
@@ -1037,7 +1057,7 @@ async fn handle_member_join(ctx: &Context, member: &Member) {
     logln!(MOD, "[Welcome] Sent for {}", member.user.name);
 }
 
-async fn handle_member_leave(ctx: &Context, guild_id: GuildId, user: &User) {
+async fn handle_member_leave(ctx: &Context, _guild_id: GuildId, user: &User) {
     let channel_id = crate::config::get("DISCORD_GOODBYE_CHANNEL_ID").and_then(|v| v.parse::<u64>().ok());
     let (Some(channel_id), Some(text), Some(title)) = (
         channel_id,
@@ -1047,12 +1067,8 @@ async fn handle_member_leave(ctx: &Context, guild_id: GuildId, user: &User) {
         logln!(MOD, "[Goodbye] DISCORD_GOODBYE_CHANNEL_ID / _TEXT / _TITLE not set in .env");
         return;
     };
-    let Ok(member) = guild_id.member(&ctx.http, user.id).await else {
-        logln!(MOD, "[Goodbye] member {} not found", user.name);
-        return;
-    };
     let text = text.replace("{user}", &user.name);
-    let Some(png) = build_banner(&member, &title, &text, GOODBYE_BG, "#ef4444").await else {
+    let Some(png) = build_banner(user, &title, &text, GOODBYE_BG, "#ef4444").await else {
         logln!(MOD, "[Goodbye] banner render failed");
         return;
     };
@@ -1348,12 +1364,17 @@ async fn cmd_play(ctx: &Context, msg: &Message, query: &str) -> Result<()> {
     let voice_channel = member_voice_channel(ctx, msg).await.expect("checked above");
 
     let songs = resolve_query(query, Some(msg.author.id.get())).await;
+    logln!(MOD, "[Resolve] {query:?} -> {} track(s)", songs.len());
     if songs.is_empty() {
         reply_embed(ctx, msg, "No valid tracks were found.", 0xFF0000).await;
         return Ok(());
     }
 
-    ensure_voice(ctx, guild_id, voice_channel).await?;
+    if let Err(e) = ensure_voice(ctx, guild_id, voice_channel).await {
+        logln!(MOD, "[Voice] join failed: {e:#}");
+        reply_embed(ctx, msg, &format!("Could not join your voice channel: {e}"), 0xFF0000).await;
+        return Ok(());
+    }
 
     let is_playlist = query.contains("list=") || query.contains("/playlist");
     let collection = if query.contains("open.spotify.com/") {
