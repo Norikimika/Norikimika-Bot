@@ -15,43 +15,25 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.arch }})
+    name: build (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            arch: x86_64
+            name: linux-x86_64
+            android: false
+            bin: target/release/Norikimika-Bot
           - os: ubuntu-24.04-arm
-            arch: aarch64
+            name: linux-aarch64
+            android: false
+            bin: target/release/Norikimika-Bot
+          # bionic build for Termux; cross-compiled, so it cannot run on the glibc runner
+          - os: ubuntu-latest
+            name: termux-aarch64
+            android: true
+            bin: target/aarch64-linux-android/release/Norikimika-Bot
     runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.3
-
-      # songbird links libopus at build time; fonts/banners are compiled in from assets/
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
-
-      - name: Test
-        run: cargo test --release --locked
-
-      - name: Build
-        run: cargo build --release --locked
-
-      - name: Publish binary to build branch
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-build-branch.sh target/release/Norikimika-Bot "Norikimika-Bot-linux-${{ matrix.arch }}"
-
-  # Native Termux/Android binary: bionic-linked, runs without proot. Cross-compiled with the NDK,
-  # so it cannot be executed on the glibc runner — the `build` jobs above run the tests.
-  termux:
-    name: build (termux aarch64)
-    runs-on: ubuntu-latest
     env:
       OPUS_VERSION: v1.5.2
       ANDROID_API: 24
@@ -59,17 +41,35 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.android }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ matrix.android }}
         with:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2.9.3
         with:
-          key: termux
+          key: ${{ matrix.name }}
+
+      # songbird links libopus at build time; fonts/banners are compiled in from assets/
+      - name: Install system deps
+        if: ${{ !matrix.android }}
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config
+
+      - name: Test
+        if: ${{ !matrix.android }}
+        run: cargo test --release --locked
+
+      - name: Build
+        if: ${{ !matrix.android }}
+        run: cargo build --release --locked
 
       - uses: nttld/setup-ndk@v1.6.0
+        if: ${{ matrix.android }}
         with:
           ndk-version: r30
 
       - name: Point cargo at the NDK toolchain
+        if: ${{ matrix.android }}
         run: |
           set -euo pipefail
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -83,6 +83,7 @@ jobs:
 
       # audiopus_sys only links an existing opus, so build a static one for arm64-v8a first
       - name: Build static opus for Android
+        if: ${{ matrix.android }}
         run: |
           set -euo pipefail
           curl -sSL "https://github.com/xiph/opus/archive/refs/tags/${OPUS_VERSION}.tar.gz" | tar xz
@@ -99,6 +100,7 @@ jobs:
           cmake --install opus-build
 
       - name: Build for Termux
+        if: ${{ matrix.android }}
         env:
           LIBOPUS_LIB_DIR: ${{ github.workspace }}/opus-android
           OPUS_STATIC: '1'
@@ -106,10 +108,10 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --locked --target aarch64-linux-android
-          "$STRIP" --strip-unneeded target/aarch64-linux-android/release/Norikimika-Bot
+          "$STRIP" --strip-unneeded "${{ matrix.bin }}"
 
       - name: Publish binary to build branch
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-build-branch.sh target/aarch64-linux-android/release/Norikimika-Bot Norikimika-Bot-termux-aarch64
+        run: bash scripts/publish-build-branch.sh "${{ matrix.bin }}" "Norikimika-Bot-${{ matrix.name }}"
