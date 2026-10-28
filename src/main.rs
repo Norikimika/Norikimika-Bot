@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
+    util::install_crypto_provider();
+
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return Ok(());

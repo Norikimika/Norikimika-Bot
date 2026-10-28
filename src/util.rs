@@ -45,6 +45,17 @@ pub async fn capture(cmd: &str, args: &[&str]) -> std::result::Result<String, St
     }
 }
 
+/// Install the process-wide rustls crypto provider.
+///
+/// Both `ring` (via serenity/songbird's reqwest 0.12) and `aws-lc-rs` (via reqwest 0.13) end up in
+/// the dependency graph, so rustls cannot pick one itself: anything that builds a default TLS
+/// config — e.g. songbird's `YoutubeDl` with `reqwest12::Client::new()` — panics with
+/// "Could not automatically determine the process-level CryptoProvider". One call at startup fixes
+/// all of them, including code inside dependencies.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -120,5 +131,18 @@ mod tests {
         assert!(failed.contains("exit 3") && failed.contains("boom"), "{failed}");
 
         assert_eq!(capture("sh", &["-c", "echo ok"]).await.unwrap().trim(), "ok");
+    }
+
+    /// Without the installed provider this is the exact call that panicked inside songbird.
+    #[test]
+    fn installing_the_provider_makes_default_tls_configs_work() {
+        install_crypto_provider();
+        // reaching the end without the "Could not automatically determine ... CryptoProvider"
+        // panic is the assertion
+        let _config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        // songbird builds exactly this client for yt-dlp; it panicked before the fix
+        let _songbird_style = reqwest12::Client::new();
     }
 }

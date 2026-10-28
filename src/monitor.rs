@@ -1069,17 +1069,42 @@ async fn send_connection_restored(tg: &Tg, http: &reqwest::Client, latency: f64,
     let (model, codename) = tokio::join!(getprop("ro.product.model"), getprop("ro.product.device"));
     let (ip, isp) = connection_info(http).await;
     let now = chrono::Local::now();
-    let message = format!(
-        "<b>✅ Connection Restored</b>\n<blockquote>📱 Device: {}\n📟 Codename: {}\n⏰ Time: {}\n🌐 IP: {}\n🚀 ISP: {}\n🐢 Latency: {latency}ms\n⏱️ Downtime: {}\n⚡ Uptime: {}</blockquote>",
-        escape_html(&model),
-        escape_html(&codename),
-        now.format("%d-%m-%Y, %H:%M:%S"),
-        escape_html(&ip),
-        escape_html(&isp),
-        format_duration(((now_ms() - down_ms) / 1000).max(0) as u64),
-        format_duration(((now_ms() - up_ms) / 1000).max(0) as u64),
+    let message = connection_restored_message(
+        &model,
+        &codename,
+        &now.format("%d-%m-%Y, %H:%M:%S").to_string(),
+        &ip,
+        &isp,
+        latency,
+        down_ms,
+        up_ms,
     );
     tg.send(crate::config::topic("TOPIC_ID_CONNECTION"), &message).await;
+}
+
+/// `down_ms`/`up_ms` are already durations. (The JS subtracted them from `Date.now()` again,
+/// which produced the "20754d downtime" nonsense.)
+#[allow(clippy::too_many_arguments)]
+fn connection_restored_message(
+    model: &str,
+    codename: &str,
+    time: &str,
+    ip: &str,
+    isp: &str,
+    latency: f64,
+    down_ms: i64,
+    up_ms: i64,
+) -> String {
+    format!(
+        "<b>✅ Connection Restored</b>\n<blockquote>📱 Device: {}\n📟 Codename: {}\n⏰ Time: {}\n🌐 IP: {}\n🚀 ISP: {}\n🐢 Latency: {latency}ms\n⏱️ Downtime: {}\n⚡ Uptime: {}</blockquote>",
+        escape_html(model),
+        escape_html(codename),
+        time,
+        escape_html(ip),
+        escape_html(isp),
+        format_duration((down_ms / 1000).max(0) as u64),
+        format_duration((up_ms / 1000).max(0) as u64),
+    )
 }
 
 pub async fn run() -> Result<()> {
@@ -1235,4 +1260,26 @@ pub fn render_selftest() -> Result<Vec<std::path::PathBuf>> {
         out.push(path);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_restored_reports_real_durations() {
+        let msg = connection_restored_message(
+            "22021211RG",
+            "munch",
+            "28-10-2026, 16:07:31",
+            "1.2.3.4",
+            "ISP",
+            42.0,
+            45_000,
+            3_725_000,
+        );
+        assert!(msg.contains("Downtime: 45s"), "{msg}");
+        assert!(msg.contains("Uptime: 1h 2m"), "{msg}");
+        assert!(!msg.contains("20754"), "{msg}");
+    }
 }
