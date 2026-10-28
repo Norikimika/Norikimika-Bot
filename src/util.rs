@@ -23,6 +23,41 @@ pub fn client() -> reqwest::Client {
     http().build().expect("build http client")
 }
 
+/// Locate a privileged shell.
+///
+/// `su` is only on PATH when the bot is started from an interactive Termux shell; as a service it
+/// inherited a PATH without `$PREFIX/bin`, and every `su -c` failed with a bare "No such file or
+/// directory (os error 2)" that named nothing.
+pub fn su() -> String {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    static SU: OnceLock<String> = OnceLock::new();
+    SU.get_or_init(|| {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(prefix) = std::env::var_os("PREFIX") {
+            candidates.push(PathBuf::from(prefix).join("bin/su"));
+        }
+        candidates.extend(
+            [
+                "/data/data/com.termux/files/usr/bin/su",
+                "/system/bin/su",
+                "/system/xbin/su",
+                "/system/sbin/su",
+                "/sbin/su",
+                "/debug_ramdisk/su",
+                "/su/bin/su",
+            ]
+            .map(PathBuf::from),
+        );
+        candidates
+            .into_iter()
+            .find(|path| path.exists())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "su".to_string())
+    })
+    .clone()
+}
+
 /// reqwest 0.12 client for songbird's types (`HttpRequest`, `YoutubeDl` live on 0.12).
 pub fn sb_client() -> reqwest12::Client {
     reqwest12::Client::new()
@@ -140,6 +175,16 @@ mod tests {
         assert_eq!(format_duration(90061), "1d 1h 1m");
     }
 
+
+    #[test]
+    fn su_is_found_without_a_usable_path() {
+        // the bot may be started from a service whose PATH has no $PREFIX/bin
+        let resolved = su();
+        assert!(!resolved.is_empty());
+        if resolved != "su" {
+            assert!(std::path::Path::new(&resolved).exists(), "{resolved} must exist");
+        }
+    }
 
     #[test]
     fn vnstat_hint_names_the_real_problem() {

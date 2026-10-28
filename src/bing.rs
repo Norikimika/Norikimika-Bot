@@ -8,6 +8,8 @@ const MOD: &str = "bing";
 const PRIMARY_PACKAGE: &str = "com.brave.browser";
 const CLONE_PACKAGE: &str = "com.multibox.clone.hub";
 const SEARCH_COUNT: usize = 25;
+/// `su` blocks on an unanswered root prompt and device commands can hang with the screen off.
+const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 const URL_BAR_ATTEMPTS: usize = 6;
 const ARTIFACTS: &[&str] = &[
     "brave-current.xml",
@@ -35,31 +37,42 @@ async fn sleep(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
-/// Run a binary directly (no shell), cwd = work dir.
-async fn run_cmd(cmd: &str, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new(cmd)
-        .args(args)
-        .current_dir(work_dir())
-        .output()
-        .await?;
+/// Spawn helper: a missing cwd makes spawn fail with a bare "No such file or directory"
+/// that named neither the program nor the directory, so both are checked here.
+async fn spawn(program: &str, args: &[&str]) -> Result<String> {
+    let dir = work_dir();
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    if dir.is_dir() {
+        command.current_dir(&dir);
+    } else {
+        logln!(MOD, "work dir {} is not usable, running without cwd", dir.display());
+    }
+    let out = tokio::time::timeout(CMD_TIMEOUT, command.output())
+        .await
+        .map_err(|_| anyhow!("{program} timed out after {}s", CMD_TIMEOUT.as_secs()))?
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => anyhow!("{program} not found in PATH ({e})"),
+            _ => anyhow!("{program}: {e}"),
+        })?;
     if !out.status.success() {
-        return Err(anyhow!("{cmd} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| out.status.to_string());
+        return Err(anyhow!("{program} exit {code}: {err}"));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Run a binary directly (no shell), cwd = work dir.
+async fn run_cmd(cmd: &str, args: &[&str]) -> Result<String> {
+    spawn(cmd, args).await
+}
+
 /// Run a command as root through `su -c`.
 async fn shell(cmd: &str) -> Result<String> {
-    let out = tokio::process::Command::new("su")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(work_dir())
-        .output()
-        .await?;
-    if !out.status.success() {
-        return Err(anyhow!("su -c '{cmd}' failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    spawn(&crate::util::su(), &["-c", cmd])
+        .await
+        .map_err(|e| anyhow!("root shell needed for `{cmd}`: {e}"))
 }
 
 async fn shell_best_effort(cmd: &str) {
@@ -214,7 +227,8 @@ fn parse_claim_from_tsv(tsv: &str) -> Option<(i32, i32)> {
 async fn dump_ui(filename: &str) -> Result<String> {
     let target = path_in(filename);
     shell(&format!("uiautomator dump {}", target.display())).await?;
-    Ok(std::fs::read_to_string(target)?)
+    std::fs::read_to_string(&target)
+        .map_err(|e| anyhow!("uiautomator dump wrote nothing to {}: {e}", target.display()))
 }
 
 async fn tap(x: i32, y: i32) -> Result<()> {
@@ -448,7 +462,7 @@ fn mark_ran() {
 }
 
 pub async fn run() -> Result<()> {
-    logln!(MOD, "Bing Rewards started");
+    logln!(MOD, "Bing Rewards started (root shell: {})", crate::util::su());
     mark_ran();
     for mode in ["brave", "clone"] {
         if mode == "clone" {

@@ -278,7 +278,7 @@ async fn sh(cmd: &str, args: &[&str]) -> (bool, String) {
 async fn sh_root(cmd: &str) -> (bool, String) {
     // `su` blocks forever when the root prompt is never answered, which used to hang the
     // whole command handler; time it out instead.
-    let fut = tokio::process::Command::new("su")
+    let fut = tokio::process::Command::new(crate::util::su())
         .arg("-c")
         .arg(cmd)
         .kill_on_drop(true)
