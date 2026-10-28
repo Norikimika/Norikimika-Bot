@@ -846,6 +846,7 @@ impl VoiceEventHandler for TrackEndNotifier {
 }
 
 async fn ensure_voice(ctx: &Context, guild_id: GuildId, channel_id: ChannelId) -> Result<()> {
+    logln!(MOD, "[Voice] joining {channel_id} in {guild_id}");
     let songbird = songbird::get(ctx)
         .await
         .ok_or_else(|| anyhow!("songbird not registered"))?
@@ -861,6 +862,7 @@ async fn ensure_voice(ctx: &Context, guild_id: GuildId, channel_id: ChannelId) -
             TrackEndNotifier { guild_id, ctx: ctx.clone() },
         );
     }
+    logln!(MOD, "[Voice] joined {channel_id}");
     Ok(())
 }
 
@@ -940,11 +942,12 @@ fn centered(canvas: &mut crate::render::Canvas, y: i32, size: f32, face: crate::
 /// Takes a `User` (not a `Member`): on leave the member is already gone from the guild, so a REST
 /// lookup 404s and the goodbye banner was never sent.
 async fn build_banner(user: &User, title: &str, text: &str, bg_bytes: &[u8], title_color: &str) -> Option<Vec<u8>> {
-    // the custom avatar when set, otherwise Discord's default one
-    let url = user
-        .avatar_url()
-        .map(|u| format!("{u}?size=256"))
-        .unwrap_or_else(|| user.default_avatar_url());
+    // Ask for PNG: serenity's avatar_url() hands out WEBP/GIF, and the image crate here only has
+    // the png + jpeg decoders, so a webp avatar silently produced an empty circle.
+    let url = match user.avatar.as_deref() {
+        Some(hash) => format!("https://cdn.discordapp.com/avatars/{}/{hash}.png?size=256", user.id),
+        None => user.default_avatar_url(),
+    };
     let avatar = fetch_bytes(&url).await;
     if avatar.is_none() {
         logln!(MOD, "[Banner] avatar fetch failed for {} ({url})", user.name);
@@ -989,18 +992,21 @@ fn compose_banner(
     // avatar, circle-clipped
     let av_x = (W - AV) / 2;
     if let Some(bytes) = avatar_bytes {
-        if let Ok(avatar) = image::load_from_memory(bytes) {
-            let avatar = image::imageops::resize(&avatar.to_rgba8(), AV, AV, image::imageops::FilterType::Lanczos3);
-            let c = AV as f64 / 2.0;
-            for y in 0..AV {
-                for x in 0..AV {
-                    let (dx, dy) = (x as f64 - c + 0.5, y as f64 - c + 0.5);
-                    if (dx * dx + dy * dy).sqrt() > c {
-                        continue;
+        match image::load_from_memory(bytes) {
+            Ok(avatar) => {
+                let avatar = image::imageops::resize(&avatar.to_rgba8(), AV, AV, image::imageops::FilterType::Lanczos3);
+                let c = AV as f64 / 2.0;
+                for y in 0..AV {
+                    for x in 0..AV {
+                        let (dx, dy) = (x as f64 - c + 0.5, y as f64 - c + 0.5);
+                        if (dx * dx + dy * dy).sqrt() > c {
+                            continue;
+                        }
+                        canvas_img.put_pixel(av_x + x, AV_Y + y, *avatar.get_pixel(x, y));
                     }
-                    canvas_img.put_pixel(av_x + x, AV_Y + y, *avatar.get_pixel(x, y));
                 }
             }
+            Err(e) => logln!(MOD, "[Banner] avatar decode failed: {e}"),
         }
     }
 
@@ -1370,10 +1376,19 @@ async fn cmd_play(ctx: &Context, msg: &Message, query: &str) -> Result<()> {
         return Ok(());
     }
 
-    if let Err(e) = ensure_voice(ctx, guild_id, voice_channel).await {
-        logln!(MOD, "[Voice] join failed: {e:#}");
-        reply_embed(ctx, msg, &format!("Could not join your voice channel: {e}"), 0xFF0000).await;
-        return Ok(());
+    let joined = tokio::time::timeout(Duration::from_secs(20), ensure_voice(ctx, guild_id, voice_channel)).await;
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            logln!(MOD, "[Voice] join failed: {e:#}");
+            reply_embed(ctx, msg, &format!("Could not join your voice channel: {e}"), 0xFF0000).await;
+            return Ok(());
+        }
+        Err(_) => {
+            logln!(MOD, "[Voice] join timed out after 20s for {voice_channel}");
+            reply_embed(ctx, msg, "Joining your voice channel timed out.", 0xFF0000).await;
+            return Ok(());
+        }
     }
 
     let is_playlist = query.contains("list=") || query.contains("/playlist");
