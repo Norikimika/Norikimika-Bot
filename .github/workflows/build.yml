@@ -38,6 +38,10 @@ jobs:
       OPUS_VERSION: v1.5.2
       ANDROID_API: 24
     steps:
+      # actions/checkout runs `git init`, which nags about the default branch name
+      - name: Quiet git init hint
+        run: git config --global init.defaultBranch master
+
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
