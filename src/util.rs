@@ -23,6 +23,11 @@ pub fn client() -> reqwest::Client {
     http().build().expect("build http client")
 }
 
+/// reqwest 0.12 client for songbird's types (`HttpRequest`, `YoutubeDl` live on 0.12).
+pub fn sb_client() -> reqwest12::Client {
+    reqwest12::Client::new()
+}
+
 /// Run a command and capture its stdout. On failure the error says *why* (spawn error, or exit
 /// status plus stderr) so log lines are actionable instead of a bare "failed".
 pub async fn capture(cmd: &str, args: &[&str]) -> std::result::Result<String, String> {

@@ -13,7 +13,7 @@ use serenity::all::{
     Ready, User,
 };
 use serenity::async_trait;
-use songbird::input::{Input, YoutubeDl};
+use songbird::input::{HttpRequest, Input};
 use songbird::{
     Event as VoiceEvent, EventContext, EventHandler as VoiceEventHandler, SerenityInit, TrackEvent,
 };
@@ -798,20 +798,22 @@ fn play_next<'a>(
         let mut enqueued = false;
         if let Some(call) = songbird.get(guild_id) {
             let mut call = call.lock().await;
-            // songbird's ytdl picks `ba[abr>0][vcodec=none]/best`, which is usually webm/opus
-            // and symphonia cannot decode opus; sort m4a/AAC first.
-            let input: Input = YoutubeDl::new_ytdl_like("yt-dlp", reqwest12::Client::new(), song.url.clone())
-                .user_args(vec![
-                    "-S".into(),
-                    "ext:m4a,acodec:aac".into(),
-                    // yt-dlp's own warning is "no supported JavaScript runtime"; give it the
-                    // node that is already on the box instead of hiding the warning.
-                    "--js-runtimes".into(),
-                    "node".into(),
-                ])
-                .into();
-            call.enqueue_input(input).await;
-            enqueued = true;
+            match resolve_stream(&song.url).await {
+                Ok(stream) => {
+                    // songbird would send exactly this request; we send it first so a 403
+                    // says why instead of surfacing as "played 0ns".
+                    let input: Input = HttpRequest {
+                        client: crate::util::sb_client(),
+                        request: stream.url,
+                        headers: stream.headers,
+                        content_length: stream.len,
+                    }
+                    .into();
+                    call.enqueue_input(input).await;
+                    enqueued = true;
+                }
+                Err(e) => logln!(MOD, "[Music Resolve] {} | {e:#}", song.title),
+            }
         }
         if !enqueued {
             {
@@ -842,6 +844,86 @@ fn play_next<'a>(
         }
         logln!(MOD, "[Music Stream Start] {guild_id} | {} - {}", song.title, song.artist);
     })
+}
+
+/// A direct CDN stream plus the headers yt-dlp says it needs.
+struct Stream {
+    url: String,
+    headers: reqwest12::header::HeaderMap,
+    len: Option<u64>,
+}
+
+/// Resolve a watch URL to a playable stream and prove it answers before songbird sees it.
+///
+/// songbird's `YoutubeDl` keeps the CDN's reply to itself, so a 403 turned into
+/// "played 0ns of the stream"; doing the request here means the log says what YouTube said.
+/// Two extraction strategies: m4a/AAC (what symphonia can decode) and, if the CDN refuses,
+/// the android_vr client.
+async fn resolve_stream(web_url: &str) -> Result<Stream> {
+    let mut last = String::from("no attempt ran");
+    for (attempt, extra) in [
+        ["-S", "ext:m4a,acodec:aac"],
+        ["--extractor-args", "youtube:player_client=android_vr"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        let out = tokio::process::Command::new("yt-dlp")
+            .args(["--js-runtimes", "node", "-j", "--no-playlist", "-f", "ba[abr>0][vcodec=none]/best"])
+            .args(extra)
+            .arg(web_url)
+            .output()
+            .await
+            .map_err(|e| anyhow!("run yt-dlp: {e}"))?;
+        if !out.status.success() {
+            last = format!("yt-dlp {}", crate::util::truncate(String::from_utf8_lossy(&out.stderr).trim(), 160));
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else {
+            last = "yt-dlp printed no JSON".into();
+            continue;
+        };
+        let Some(url) = v["url"].as_str().map(str::to_string) else {
+            last = "yt-dlp found no stream url".into();
+            continue;
+        };
+        let mut headers = reqwest12::header::HeaderMap::new();
+        if let Some(map) = v["http_headers"].as_object() {
+            for (k, val) in map {
+                if let (Ok(name), Ok(value)) = (
+                    reqwest12::header::HeaderName::from_bytes(k.as_bytes()),
+                    reqwest12::header::HeaderValue::from_str(val.as_str().unwrap_or_default()),
+                ) {
+                    headers.insert(name, value);
+                }
+            }
+        }
+        let len = v["filesize"].as_u64().or_else(|| v["filesize_approx"].as_u64());
+        let mut req = crate::util::sb_client().get(&url).headers(headers.clone());
+        if let Some(l) = len {
+            req = req.header(reqwest12::header::RANGE, format!("bytes=0-{}", l.saturating_sub(1)));
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                logln!(
+                    MOD,
+                    "[Music HTTP] {status} {codec} {len:?} bytes",
+                    status = resp.status(),
+                    codec = v["acodec"].as_str().unwrap_or("?"),
+                    len = len
+                );
+                return Ok(Stream { url, headers, len });
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                last = format!("{status}: {}", crate::util::truncate(body.trim(), 160));
+            }
+            Err(e) => last = format!("{e:#}"),
+        }
+        logln!(MOD, "[Music HTTP] attempt {} refused: {last}", attempt + 1);
+    }
+    Err(anyhow!("{last}"))
 }
 
 struct TrackEndNotifier {
@@ -1838,5 +1920,16 @@ mod tests {
         }
         println!("decoded {frames} frames");
         assert!(frames > 44_100, "only {frames} frames decoded");
+    }
+
+    /// The production path: yt-dlp resolve, then the same GET songbird will send.
+    #[tokio::test]
+    #[ignore]
+    async fn resolve_stream_gets_a_playable_url() {
+        let s = resolve_stream("https://www.youtube.com/watch?v=K-a8s8OLBSE")
+            .await
+            .expect("resolve a stream");
+        println!("url {} len {:?}", &s.url[..70], s.len);
+        assert!(s.len.unwrap_or(0) > 100_000, "suspiciously small stream");
     }
 }
