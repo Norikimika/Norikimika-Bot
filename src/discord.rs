@@ -138,11 +138,12 @@ fn clean_artist(value: &str) -> String {
             value = value[pos + 1..].trim().to_string();
         }
     }
-    let lowered = value.to_lowercase();
+    // positions come from the original string: `to_lowercase` can change byte lengths
+    // (İ, ẞ), and slicing a lowercased copy used to panic mid-char.
     let mut cut = value.len();
     for marker in ["-", "–", "—", ":"] {
-        if let Some(pos) = lowered.find(marker) {
-            let tail = &lowered[pos..];
+        for (pos, _) in value.match_indices(marker) {
+            let tail = value[pos..].to_lowercase();
             if tail.contains("topic") || tail.contains("official") || tail.contains("vevo") {
                 cut = cut.min(pos);
             }
@@ -161,14 +162,21 @@ fn clean_title(title: &str, artist: &str) -> String {
     let artist = clean_artist(artist);
     if artist != "Unknown Artist" {
         let needle = artist.to_lowercase();
-        if value.to_lowercase().starts_with(&needle) {
-            value = value[artist.len()..].trim_start().trim_start_matches(['-', '–', '—', ':']).trim_start().to_string();
+        if value.to_lowercase().starts_with(&needle) && value.is_char_boundary(artist.len()) {
+            value = value[artist.len()..]
+                .trim_start()
+                .trim_start_matches(['-', '–', '—', ':'])
+                .trim_start()
+                .to_string();
         }
+        // `get` returns None instead of panicking when the offset is not a char boundary
         if let Some(pos) = value.to_lowercase().rfind(&needle) {
-            let before = value[..pos].trim_end();
-            let trimmed = before.trim_end_matches(['-', '–', '—', ':']).trim_end();
-            if trimmed.len() < before.len() {
-                value = trimmed.to_string();
+            if let Some(before) = value.get(..pos) {
+                let before = before.trim_end();
+                let trimmed = before.trim_end_matches(['-', '–', '—', ':']).trim_end();
+                if trimmed.len() < before.len() {
+                    value = trimmed.to_string();
+                }
             }
         }
     }
@@ -177,12 +185,16 @@ fn clean_title(title: &str, artist: &str) -> String {
         "(mv", "(visualizer", "(remix", "(cover", "(lagu",
     ] {
         if let Some(pos) = value.to_lowercase().find(noise) {
-            value = value[..pos].trim_end().to_string();
+            if let Some(head) = value.get(..pos) {
+                value = head.trim_end().to_string();
+            }
         }
     }
-    let lower = value.to_lowercase();
-    if let Some(pos) = lower.rfind(" lyrics").or_else(|| lower.rfind(" lyric")) {
-        value = value[..pos].to_string();
+    let lowered = value.to_lowercase();
+    if let Some(pos) = lowered.rfind(" lyrics").or_else(|| lowered.rfind(" lyric")) {
+        if let Some(head) = value.get(..pos) {
+            value = head.to_string();
+        }
     }
     let out = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.is_empty() {
@@ -1754,6 +1766,17 @@ pub async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn non_ascii_titles_do_not_panic() {
+        // `to_lowercase` can change byte lengths (İ becomes i + combining dot), and slicing the
+        // original string at a lowercased offset used to panic inside the music queue
+        assert_eq!(clean_artist("İstanbul - Topic"), "İstanbul");
+        assert!(!clean_title("İSTANBUL - Şarkı (Official Video)", "İstanbul").is_empty());
+        assert!(!clean_title("ẞETA — Song lyrics", "ẞETA").is_empty());
+        assert!(!clean_title("Song İ lyrics", "Unknown Artist").is_empty());
+    }
 
     #[test]
     fn extracts_video_ids_and_normalizes() {

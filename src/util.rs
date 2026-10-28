@@ -61,6 +61,19 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
+/// Android denies `/proc/net/dev` to app UIDs and vnstat needs a database before it can report
+/// anything, so "install vnstat" is the wrong advice once it is installed.
+pub fn vnstat_hint(err: &str) -> String {
+    let lower = err.to_lowercase();
+    if lower.contains("database directory") || lower.contains("database is empty") {
+        "❌ Usage unavailable: vnstat has no database yet — run `vnstatd` (it has to stay running).".into()
+    } else if lower.contains("permission denied") {
+        "❌ Usage unavailable: Android blocks /proc/net/dev for app UIDs, so `vnstatd` must run as root.".into()
+    } else {
+        format!("❌ Failed to get usage: {}", escape_html(err))
+    }
+}
+
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -125,6 +138,17 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         assert_eq!(rupiah(1234567.0), "1.234.567");
         assert_eq!(format_duration(90061), "1d 1h 1m");
+    }
+
+
+    #[test]
+    fn vnstat_hint_names_the_real_problem() {
+        let missing = vnstat_hint("exit 1: Error: Unable to open database directory \"/x\": No such file");
+        assert!(missing.contains("no database"), "{missing}");
+        let denied = vnstat_hint("exit 1: Error: Permission denied");
+        assert!(denied.contains("root"), "{denied}");
+        let other = vnstat_hint("exit 2: boom <b>");
+        assert!(other.contains("boom &lt;b&gt;"), "{other}");
     }
 
     #[tokio::test]

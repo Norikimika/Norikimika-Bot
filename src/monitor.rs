@@ -180,8 +180,8 @@ async fn send_usage_report(tg: &Tg) {
     let out = match crate::util::capture("vnstat", &["--json"]).await {
         Ok(out) => out,
         Err(e) => {
-            logln!(MOD, "Daily usage vnstat failed: {e} — needs vnstat installed and its daemon running (Termux: `pkg install vnstat`)");
-            tg.send(crate::config::topic("TOPIC_ID_USAGE"), "❌ Failed to get daily usage").await;
+            logln!(MOD, "Daily usage vnstat failed: {e}");
+            tg.send(crate::config::topic("TOPIC_ID_USAGE"), &crate::util::vnstat_hint(&e)).await;
             return;
         }
     };

@@ -75,10 +75,17 @@ Modules whose env vars are missing just stop themselves with a log line; the res
 Reads `.env` from the working directory (or `ENV_FILE=/path/to/.env`); real environment
 variables win over the file. Same variable names as the JS `.env.example`.
 
-Extra variable this port adds:
+Extra variables this port adds:
 
 - `STATE_DIR` — where state JSON, logs and rendered images live. Default
   `/root/.local/share/Norikimika-Bot`.
+- `ADMIN_IDS` — comma separated Telegram user IDs that may run admin commands. Checked before
+  the chat-admin lookup, so the gate no longer depends on who is admin in the group. The bot
+  never calls `restrictChatMember`: non-admins get a refusal, not a mute.
+
+`/usage` and the daily usage report read `vnstat --json`. On Android `/proc/net/dev` is denied to
+app UIDs, so `vnstatd` has to run as root (and the database must exist); the bot reports which of
+the two is missing instead of assuming vnstat is not installed.
 
 ## Differences from the JS
 

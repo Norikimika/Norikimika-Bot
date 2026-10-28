@@ -39,7 +39,6 @@ struct Msg {
 
 struct Callback {
     chat_id: i64,
-    user_id: i64,
     message_id: i64,
     data: String,
     is_admin: bool,
@@ -134,6 +133,17 @@ impl Bot {
     }
 
     async fn is_admin(&self, chat_id: i64, user_id: i64) -> bool {
+        // explicit operator allow-list wins: chat-admin lookup alone made the gate depend on
+        // whoever happens to be admin in the group.
+        if let Some(list) = crate::config::get("ADMIN_IDS") {
+            if list
+                .split(',')
+                .filter_map(|id| id.trim().parse::<i64>().ok())
+                .any(|id| id == user_id)
+            {
+                return true;
+            }
+        }
         let key = (chat_id, user_id);
         let now = chrono::Utc::now().timestamp();
         {
@@ -156,32 +166,19 @@ impl Bot {
         is_admin
     }
 
-    async fn mute(&self, chat_id: i64, user_id: i64) {
-        let until = chrono::Utc::now().timestamp() + 5 * 60;
-        let _ = self
-            .api(
-                "restrictChatMember",
-                json!({
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "permissions": { "can_send_messages": false },
-                    "until_date": until,
-                }),
-            )
-            .await;
-    }
-
-    /// Gate for admin-only commands: mute + reply when the sender is not an admin.
+    /// Gate for admin-only commands: deny + reply when the sender is not an admin.
+    ///
+    /// The bot no longer calls restrictChatMember: muting people is not its job, and doing it
+    /// from a command handler meant any stranger could make the bot punish group members.
     async fn require_admin(&self, msg: &Msg) -> bool {
         if self.is_admin(msg.chat_id, msg.user_id).await {
             return true;
         }
-        self.mute(msg.chat_id, msg.user_id).await;
         let _ = self
             .send(
                 msg.chat_id,
                 msg.thread_id,
-                "⛔ Not authorized. You are muted for 5 minutes.",
+                "⛔ Not authorized.",
                 Some(msg.message_id),
                 None,
             )
@@ -279,9 +276,17 @@ async fn sh(cmd: &str, args: &[&str]) -> (bool, String) {
 }
 
 async fn sh_root(cmd: &str) -> (bool, String) {
-    match tokio::process::Command::new("su").arg("-c").arg(cmd).output().await {
-        Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Err(_) => (false, String::new()),
+    // `su` blocks forever when the root prompt is never answered, which used to hang the
+    // whole command handler; time it out instead.
+    let fut = tokio::process::Command::new("su")
+        .arg("-c")
+        .arg(cmd)
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(Duration::from_secs(20), fut).await {
+        Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(Err(_)) => (false, String::new()),
+        Err(_) => (false, "su timed out: grant root access for Termux".into()),
     }
 }
 
@@ -653,12 +658,14 @@ async fn cmd_speed(bot: &Bot, msg: &Msg) -> Result<()> {
 
 async fn cmd_reboot(bot: &Bot, msg: &Msg) -> Result<()> {
     bot.send(msg.chat_id, msg.thread_id, "♻️ Rebooting system...", Some(msg.message_id), None).await?;
-    let (ok, out) = sh_root("find /data/data -type f -name '*gms*' -print -exec rm {} \\;").await;
+    // GMS cache cleanup stays inside the two GMS data dirs: the old `find /data/data` deleted
+    // every `*gms*` file on the device, including anything under the Termux home.
+    let (ok, out) = sh_root("find /data/data/com.google.android.gms /data/user_de/0/com.google.android.gms -type f -name '*gms*' -print -exec rm {} \\;").await;
     if !out.is_empty() {
         logln!(MOD, "{out}");
     }
     if !ok {
-        logln!(MOD, "GMS cleanup failed");
+        logln!(MOD, "GMS cleanup failed: {out}");
         bot.send(msg.chat_id, msg.thread_id, "❌ Failed to reboot", Some(msg.message_id), None).await?;
         return Ok(());
     }
@@ -702,8 +709,8 @@ async fn cmd_usage(bot: &Bot, msg: &Msg) -> Result<()> {
     let out = match out {
         Ok(out) => out,
         Err(e) => {
-            logln!(MOD, "vnstat failed: {e} — needs vnstat installed and its daemon running (Termux: `pkg install vnstat`)");
-            bot.send(msg.chat_id, msg.thread_id, "❌ Failed to get usage", Some(msg.message_id), None).await?;
+            logln!(MOD, "vnstat failed: {e}");
+            bot.send(msg.chat_id, msg.thread_id, &crate::util::vnstat_hint(&e), Some(msg.message_id), None).await?;
             return Ok(());
         }
     };
@@ -989,8 +996,7 @@ async fn cmd_playback(bot: &Bot, msg: &Msg) -> Result<()> {
 
 async fn handle_callback(bot: &Bot, cb: &Callback, callback_id: &str) -> Result<()> {
     if !cb.is_admin {
-        bot.mute(cb.chat_id, cb.user_id).await;
-        bot.answer_callback(callback_id, "⛔ Not authorized. You are muted for 5 minutes.", true).await?;
+        bot.answer_callback(callback_id, "⛔ Not authorized.", true).await?;
         return Ok(());
     }
 
@@ -1591,13 +1597,12 @@ async fn handle_message(bot: &Bot, msg: Msg) -> Result<()> {
         return Ok(());
     }
 
-    // Non-command chatter in the main topic: mute non-admins.
+    // Non-command chatter in the main topic from non-admins: warn, never mute (see require_admin).
     if in_topic && !text.trim_start().starts_with('/') && !bot.is_admin(msg.chat_id, msg.user_id).await {
-        bot.mute(msg.chat_id, msg.user_id).await;
         bot.send(
             msg.chat_id,
             msg.thread_id,
-            "⛔ Commands only! You are muted for 5 minutes.",
+            "⛔ Commands only!",
             Some(msg.message_id),
             None,
         )
@@ -1741,7 +1746,6 @@ pub async fn run() -> Result<()> {
                 let is_admin = bot.is_admin(chat_id, user_id).await;
                 let callback = Callback {
                     chat_id,
-                    user_id,
                     message_id: cb["message"]["message_id"].as_i64().unwrap_or(0),
                     data,
                     is_admin,

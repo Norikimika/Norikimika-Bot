@@ -362,12 +362,17 @@ fn time_str(ms: i64) -> String {
 }
 
 fn format_message(n: &Found, app_name: &str) -> String {
+    // title/text come from arbitrary app notifications and are sent with parse_mode=HTML:
+    // unescaped "&" or "<" broke the whole message (and let an app inject markup).
     format!(
-        "<b>🔔 New {app_name} Notification</b>\n\
+        "<b>🔔 New {} Notification</b>\n\
          <blockquote>⏰ Time: {}\n\
          📝 Title: {}\n\
          💬 Text: {}</blockquote>",
-        n.time_str, n.title, n.text
+        crate::util::escape_html(app_name),
+        n.time_str,
+        crate::util::escape_html(&n.title),
+        crate::util::escape_html(&n.text)
     )
 }
 
@@ -907,6 +912,21 @@ pub async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_html_is_escaped() {
+        // notification text is arbitrary app output and goes out with parse_mode=HTML
+        let n = Found {
+            pkg: "com.example".into(),
+            title: "A & B <b>".into(),
+            text: "1 < 2 & 3 > 2".into(),
+            timestamp: 0,
+            time_str: "2026-10-29 00:00:00".into(),
+        };
+        let msg = format_message(&n, "GoPay");
+        assert!(msg.contains("A &amp; B &lt;b&gt;"), "{msg}");
+        assert!(msg.contains("1 &lt; 2 &amp; 3 &gt; 2"), "{msg}");
+    }
 
     #[test]
     fn speech_endpoint_shapes() {
