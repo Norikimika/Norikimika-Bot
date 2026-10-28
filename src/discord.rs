@@ -804,7 +804,10 @@ fn play_next<'a>(
                 .user_args(vec![
                     "-S".into(),
                     "ext:m4a,acodec:aac".into(),
-                    "--no-warnings".into(),
+                    // yt-dlp's own warning is "no supported JavaScript runtime"; give it the
+                    // node that is already on the box instead of hiding the warning.
+                    "--js-runtimes".into(),
+                    "node".into(),
                 ])
                 .into();
             call.enqueue_input(input).await;
@@ -1789,11 +1792,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn chosen_stream_decodes_to_pcm() {
-        use symphonia::core::codecs::DecoderOptions;
-        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::codecs::audio::AudioDecoderOptions;
+        use symphonia::core::codecs::CodecParameters;
+        use symphonia::core::formats::probe::Hint;
+        use symphonia::core::formats::{FormatOptions, TrackType};
         use symphonia::core::io::MediaSourceStream;
         use symphonia::core::meta::MetadataOptions;
-        use symphonia::core::probe::Hint;
 
         let url = "https://www.youtube.com/watch?v=K-a8s8OLBSE";
         let out = tokio::process::Command::new("yt-dlp")
@@ -1812,16 +1816,19 @@ mod tests {
         let mut hint = Hint::new();
         hint.with_extension("m4a");
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
             .expect("probe should know this container");
-        let mut format = probed.format;
-        let track = format.default_track().expect("a track").clone();
+        let mut format = probed;
+        let track = format.default_track(TrackType::Audio).expect("an audio track").clone();
+        let CodecParameters::Audio(params) = track.codec_params.as_ref().expect("codec params") else {
+            panic!("default track is not audio")
+        };
         let mut decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+            .make_audio_decoder(params, &AudioDecoderOptions::default())
             .expect("a decoder for this codec");
         let mut frames = 0u64;
-        while let Ok(packet) = format.next_packet() {
-            if packet.track_id() != track.id {
+        while let Ok(Some(packet)) = format.next_packet() {
+            if packet.track_id != track.id {
                 continue;
             }
             frames += decoder.decode(&packet).expect("decode packet").frames() as u64;

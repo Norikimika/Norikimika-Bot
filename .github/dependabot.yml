@@ -6,6 +6,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # songbird 0.6 pins symphonia ^0.5; a 0.6 in our own manifest becomes a second copy
+    # with its own features, which silently takes the decoders away from songbird again.
+    ignore:
+      - dependency-name: symphonia
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-patch:
         applies-to: version-updates
