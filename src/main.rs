@@ -99,9 +99,12 @@ where
 /// Seconds until the next `hour:00` local time.
 fn secs_until_from(now: chrono::DateTime<chrono::Local>, hour: u32) -> u64 {
     use chrono::{Datelike, Duration as D, TimeZone};
-    let mut next = chrono::Local
-        .with_ymd_and_hms(now.year(), now.month(), now.day(), hour, 0, 0)
-        .unwrap();
+    // with_ymd_and_hms panics on a bad hour and returns None inside a DST gap
+    let mut next = match chrono::Local.with_ymd_and_hms(now.year(), now.month(), now.day(), hour, 0, 0) {
+        chrono::LocalResult::Single(t) => t,
+        chrono::LocalResult::Ambiguous(earliest, _) => earliest,
+        chrono::LocalResult::None => now + D::hours(1),
+    };
     if next <= now {
         next = next + D::days(1);
     }
@@ -144,8 +147,9 @@ async fn run_all(dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    // repo every 5 minutes, bing daily at 01:00 — same cadence as the JS loop()
-    tokio::spawn(async move {
+    // repo every 5 minutes, bing daily at 01:00 — same cadence as the JS loop(), supervised so a
+    // panic cannot leave the schedule silently dead
+    spawn_module("repo", || async {
         loop {
             if let Err(e) = repo::run(false).await {
                 logln!("all", "repo error: {e:#}");
@@ -153,7 +157,7 @@ async fn run_all(dry_run: bool) -> Result<()> {
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
-    tokio::spawn(async move {
+    spawn_module("bing", || async {
         use chrono::Timelike;
         // a reboot or restart after 01:00 used to skip the whole day
         if chrono::Local::now().hour() >= 1 && !bing::ran_today() {

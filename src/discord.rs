@@ -1646,7 +1646,11 @@ async fn cmd_play(ctx: &Context, msg: &Message, query: &str) -> Result<()> {
     if !require_same_voice(ctx, msg, guild_id, "play music").await {
         return Ok(());
     }
-    let voice_channel = member_voice_channel(ctx, msg).await.expect("checked above");
+    // the member can leave between the check and here, so this is not an invariant
+    let Some(voice_channel) = member_voice_channel(ctx, msg).await else {
+        reply_embed(ctx, msg, "You need to join a voice channel first!", 0xFF0000).await;
+        return Ok(());
+    };
 
     let songs = resolve_query(query, Some(msg.author.id.get())).await;
     logln!(MOD, "[Resolve] {query:?} -> {} track(s)", songs.len());
