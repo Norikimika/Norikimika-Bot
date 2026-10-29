@@ -177,6 +177,13 @@ mod tests {
 
 
     #[test]
+    fn app_client_builds_without_the_platform_verifier() {
+        // reqwest 0.13's default client asks rustls-platform-verifier for roots, which panics on
+        // Android; every request must go through this builder instead
+        let _ = client();
+    }
+
+    #[test]
     fn su_is_found_without_a_usable_path() {
         // the bot may be started from a service whose PATH has no $PREFIX/bin
         let resolved = su();

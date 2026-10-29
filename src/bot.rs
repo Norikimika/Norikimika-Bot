@@ -1059,7 +1059,9 @@ async fn fetch_price_rows() -> Result<Vec<Vec<String>>> {
     let sheets_id = crate::config::req("SHEETS_ID")?;
     let gid = crate::config::get("SHEETS_GID").unwrap_or_else(|| "0".into());
     let url = format!("https://docs.google.com/spreadsheets/d/{sheets_id}/export?format=csv&gid={gid}");
-    let csv = reqwest::get(&url).await?.text().await?;
+    // `reqwest::get` builds a default client whose TLS verifier is rustls-platform-verifier on
+    // Android, which panics ("Expect rustls-platform-verifier to be initialized"). Use util::client().
+    let csv = crate::util::client().get(&url).send().await?.text().await?;
 
     let mut rows = Vec::new();
     for line in csv.split('\n') {
@@ -1172,7 +1174,7 @@ fn tt_status_text(platform: &str, uploader: &str, title: &str, status: &str) -> 
 }
 
 async fn download(url: &str) -> Result<Vec<u8>> {
-    Ok(reqwest::get(url).await?.bytes().await?.to_vec())
+    Ok(crate::util::client().get(url).send().await?.bytes().await?.to_vec())
 }
 
 async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
@@ -1277,7 +1279,7 @@ async fn send_slides(bot: &Bot, chat_id: i64, thread: Option<i64>, items: &[(Str
 async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
     if is_douyin {
         let api = format!("https://douyin.wtf/api/hybrid/video_data?url={}&minimal=true", urlencoding(url));
-        let json: Value = reqwest::get(&api).await?.json().await?;
+        let json: Value = crate::util::client().get(&api).send().await?.json().await?;
         if json["code"].as_i64() != Some(200) {
             return Err(anyhow!(json["message"].as_str().unwrap_or("Failed to fetch media from Douyin API").to_string()));
         }
@@ -1313,7 +1315,7 @@ async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
         Ok(TtMedia { title, uploader, video, images, slides: Vec::new(), audio })
     } else {
         let api = format!("https://www.tikwm.com/api/?url={}&hd=1", urlencoding(url));
-        let json: Value = reqwest::get(&api).await?.json().await?;
+        let json: Value = crate::util::client().get(&api).send().await?.json().await?;
         if json["code"].as_i64() != Some(0) {
             return Err(anyhow!(json["msg"].as_str().unwrap_or("Failed to fetch media from TikTok API").to_string()));
         }
