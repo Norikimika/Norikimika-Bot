@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - rust
+    # Documentation cannot change the binary, so a README-only push skips the build
+    # instead of spending 10 minutes rebuilding the same three targets.
+    paths-ignore:
+      - '**.md'
   pull_request:
     paths:
       - '.github/workflows/build.yml'
