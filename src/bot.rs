@@ -11,6 +11,9 @@ const MOD: &str = "telegram";
 const DEFAULT_RETRIES: usize = 2;
 const DEFAULT_RETRY_DELAY_MS: u64 = 2000;
 const ADMIN_CACHE_TTL_SECS: i64 = 5 * 60;
+/// One command may not hold a handler slot forever (downloads legitimately take minutes).
+const HANDLER_TIMEOUT: Duration = Duration::from_secs(300);
+const SH_TIMEOUT: Duration = Duration::from_secs(60);
 const YT_AUDIO_FORMAT: &str = "251/140/bestaudio";
 const YT_PRIMARY_CLIENT_ARG: &str = "youtube:player_client=web_embedded";
 const AUDIO_EXTS: &[&str] = &["webm", "m4a", "mp3", "opus", "ogg", "aac", "flac", "wav"];
@@ -44,11 +47,12 @@ struct Callback {
     is_admin: bool,
 }
 
+#[derive(Clone)]
 pub struct Bot {
     http: reqwest::Client,
     token: String,
     topic_id: Option<i64>,
-    admins: tokio::sync::Mutex<std::collections::HashMap<(i64, i64), (bool, i64)>>,
+    admins: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<(i64, i64), (bool, i64)>>>,
 }
 
 impl Bot {
@@ -59,7 +63,7 @@ impl Bot {
                 .build()?,
             token: crate::config::req("BOT_TOKEN")?,
             topic_id: topic("TOPIC_ID"),
-            admins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            admins: std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -268,10 +272,14 @@ impl Bot {
 
 // ================== shared helpers ==================
 
+/// Termux helpers can block forever (no TTS engine, waiting for the API app), and every call here
+/// used to hold the whole polling loop hostage.
 async fn sh(cmd: &str, args: &[&str]) -> (bool, String) {
-    match tokio::process::Command::new(cmd).args(args).output().await {
-        Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Err(_) => (false, String::new()),
+    let fut = tokio::process::Command::new(cmd).args(args).kill_on_drop(true).output();
+    match tokio::time::timeout(SH_TIMEOUT, fut).await {
+        Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(Err(_)) => (false, String::new()),
+        Err(_) => (false, format!("{cmd} timed out after {}s", SH_TIMEOUT.as_secs())),
     }
 }
 
@@ -291,9 +299,11 @@ async fn sh_root(cmd: &str) -> (bool, String) {
 }
 
 async fn sh_shell(cmd: &str) -> (bool, String) {
-    match tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await {
-        Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Err(_) => (false, String::new()),
+    let fut = tokio::process::Command::new("sh").arg("-c").arg(cmd).kill_on_drop(true).output();
+    match tokio::time::timeout(SH_TIMEOUT, fut).await {
+        Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(Err(_)) => (false, String::new()),
+        Err(_) => (false, format!("`{cmd}` timed out after {}s", SH_TIMEOUT.as_secs())),
     }
 }
 
@@ -1688,6 +1698,28 @@ async fn newest_offset(bot: &Bot) -> i64 {
     }
 }
 
+/// One Telegram update. Kept separate so the poll loop can run it off-thread and time it out.
+async fn handle_update(bot: &Bot, update: Value) -> Result<()> {
+    if let Some(cb) = update.get("callback_query") {
+        let data = cb["data"].as_str().unwrap_or("").to_string();
+        let chat_id = cb["message"]["chat"]["id"].as_i64().unwrap_or(0);
+        let user_id = cb["from"]["id"].as_i64().unwrap_or(0);
+        let is_admin = bot.is_admin(chat_id, user_id).await;
+        let callback = Callback {
+            chat_id,
+            message_id: cb["message"]["message_id"].as_i64().unwrap_or(0),
+            data,
+            is_admin,
+        };
+        let callback_id = cb["id"].as_str().unwrap_or("").to_string();
+        return handle_callback(bot, &callback, &callback_id).await;
+    }
+    if let Some(msg) = parse_message(&update) {
+        return handle_message(bot, msg).await;
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     let bot = Bot::new()?;
     logln!(MOD, "Bot launched");
@@ -1698,6 +1730,8 @@ pub async fn run() -> Result<()> {
         None => newest_offset(&bot).await,
     };
     logln!(MOD, "Offset {offset}");
+    let mut failures = 0u32;
+    let mut idle_polls = 0u32;
     loop {
         let url = format!("https://api.telegram.org/bot{}/getUpdates", bot.token);
         let res = bot
@@ -1711,15 +1745,30 @@ pub async fn run() -> Result<()> {
         let payload: Value = match res {
             Ok(r) => r.json().await.unwrap_or(Value::Null),
             Err(e) => {
-                logln!(MOD, "getUpdates failed: {e}");
+                failures += 1;
+                logln!(MOD, "getUpdates failed ({failures}): {e}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
         if !payload["ok"].as_bool().unwrap_or(false) {
-            logln!(MOD, "getUpdates not ok: {payload}");
+            failures += 1;
+            logln!(MOD, "getUpdates not ok ({failures}): {payload}");
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
+        }
+        if failures > 0 {
+            logln!(MOD, "getUpdates recovered after {failures} failure(s)");
+            failures = 0;
+        }
+        // ~50s per long poll: this heartbeat says "alive but quiet", which a silent bot never did
+        if payload["result"].as_array().map(|r| r.is_empty()).unwrap_or(true) {
+            idle_polls += 1;
+            if idle_polls % 20 == 0 {
+                logln!(MOD, "poll idle, no updates for {idle_polls} polls");
+            }
+        } else {
+            idle_polls = 0;
         }
 
         let empty = Vec::new();
@@ -1728,29 +1777,21 @@ pub async fn run() -> Result<()> {
             // persist before handling: a reboot in the middle of a command must not replay it
             save_offset(offset);
 
-            if let Some(cb) = update.get("callback_query") {
-                let data = cb["data"].as_str().unwrap_or("").to_string();
-                let chat_id = cb["message"]["chat"]["id"].as_i64().unwrap_or(0);
-                let user_id = cb["from"]["id"].as_i64().unwrap_or(0);
-                let is_admin = bot.is_admin(chat_id, user_id).await;
-                let callback = Callback {
-                    chat_id,
-                    message_id: cb["message"]["message_id"].as_i64().unwrap_or(0),
-                    data,
-                    is_admin,
-                };
-                let callback_id = cb["id"].as_str().unwrap_or("").to_string();
-                if let Err(e) = handle_callback(&bot, &callback, &callback_id).await {
-                    logln!(MOD, "callback error: {e}");
+            // Handlers used to run inline, so one slow command (a download, a `termux-tts-speak`
+            // with no engine, a video render) stopped the bot from reading the next one until it
+            // finished — commands looked dead while the process was fine.
+            let bot = bot.clone();
+            let update = update.clone();
+            tokio::spawn(async move {
+                let task = tokio::spawn(async move { handle_update(&bot, update).await });
+                match tokio::time::timeout(HANDLER_TIMEOUT, task).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(e))) => logln!(MOD, "handler error: {e:#}"),
+                    Ok(Err(e)) if e.is_panic() => logln!(MOD, "handler panicked: {e}"),
+                    Ok(Err(e)) => logln!(MOD, "handler aborted: {e}"),
+                    Err(_) => logln!(MOD, "handler timed out after {}s", HANDLER_TIMEOUT.as_secs()),
                 }
-                continue;
-            }
-
-            if let Some(msg) = parse_message(update) {
-                if let Err(e) = handle_message(&bot, msg).await {
-                    logln!(MOD, "handler error: {e}");
-                }
-            }
+            });
         }
     }
 }

@@ -75,10 +75,23 @@ async fn main() -> Result<()> {
     }
 }
 
-fn spawn_module(name: &'static str, fut: impl Future<Output = Result<()>> + Send + 'static) {
+/// Supervise a module: a returned `Err`, a `?` on a missing env var or a panic used to leave the
+/// process alive with that module silently gone (Telegram commands "dead" while the bot runs).
+fn spawn_module<F, Fut>(name: &'static str, factory: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
     tokio::spawn(async move {
-        if let Err(e) = fut.await {
-            logln!("all", "{name} stopped: {e:#}");
+        loop {
+            match tokio::spawn(factory()).await {
+                Ok(Ok(())) => logln!("all", "{name} finished on its own"),
+                Ok(Err(e)) => logln!("all", "{name} stopped: {e:#}"),
+                Err(e) if e.is_panic() => logln!("all", "{name} panicked: {e}"),
+                Err(e) => logln!("all", "{name} aborted: {e}"),
+            }
+            logln!("all", "{name} restarting in 15s");
+            tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
 }
@@ -160,11 +173,11 @@ async fn run_all(dry_run: bool) -> Result<()> {
     });
 
     // long-running modules; a missing env var only stops that one
-    spawn_module("monitor", monitor::run());
-    spawn_module("notification", notification::run());
-    spawn_module("bot", bot::run());
+    spawn_module("monitor", monitor::run);
+    spawn_module("notification", notification::run);
+    spawn_module("bot", bot::run);
     if config::get("DISCORD_BOT_TOKEN").is_some() {
-        spawn_module("discord", discord::run());
+        spawn_module("discord", discord::run);
     } else {
         logln!("all", "discord skipped: DISCORD_BOT_TOKEN not set");
     }
