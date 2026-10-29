@@ -379,6 +379,10 @@ struct ModelRow {
     context: f64,
     price_in: Option<f64>,
     price_out: Option<f64>,
+    /// Image generators report `prompt`/`completion` as "0", which used to be printed as "Free".
+    /// They are not free, they are billed per image, so they get their own label.
+    is_image: bool,
+    price_image: Option<f64>,
 }
 
 fn format_context(value: f64) -> String {
@@ -393,6 +397,30 @@ fn format_context(value: f64) -> String {
         return format!("{}K", (value / 1e3).round());
     }
     format!("{}", value.round())
+}
+
+/// OpenRouter sends prices as strings ("0.000003"), but a number shows up now and then.
+fn price_value(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// What goes in the two price columns. An image generator reports "0" for prompt and
+/// completion because it does not sell tokens; printing "Free" for it is simply wrong.
+fn price_cells(m: &ModelRow) -> (String, String) {
+    if m.is_image {
+        let out = match m.price_image {
+            Some(p) if p.is_finite() && p > 0.0 => {
+                if p < 0.01 {
+                    format!("From ${p:.4}")
+                } else {
+                    format!("From ${p:.2}")
+                }
+            }
+            _ => "From".to_string(),
+        };
+        return ("—".to_string(), out);
+    }
+    (format_price(m.price_in), format_price(m.price_out))
 }
 
 fn format_price(value: Option<f64>) -> String {
@@ -473,7 +501,8 @@ fn render_new_models(list: &[ModelRow], total: usize, extra: &str) -> Result<Vec
     c.text(146, 153, 14.0, Face::MonoBold, colors("muted"), "MODEL / PROVIDER / RELEASED");
     c.text_right(700, 153, 14.0, Face::MonoBold, colors("muted"), "CONTEXT");
     c.text_right(835, 153, 14.0, Face::MonoBold, colors("muted"), "INPUT / M");
-    c.text_right(1030, 153, 14.0, Face::MonoBold, colors("muted"), "OUTPUT / M");
+    let output_header = if list.iter().any(|m| m.is_image) { "OUTPUT / IMG" } else { "OUTPUT / M" };
+    c.text_right(1030, 153, 14.0, Face::MonoBold, colors("muted"), output_header);
 
     for (i, m) in list.iter().enumerate() {
         let y = header_h + i as u32 * (row_h + gap);
@@ -500,8 +529,9 @@ fn render_new_models(list: &[ModelRow], total: usize, extra: &str) -> Result<Vec
         c.text(146, (y + 65) as i32, 16.0, Face::Body, colors("muted"), &sub);
 
         c.text_right(700, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &format_context(m.context));
-        c.text_right(835, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &format_price(m.price_in));
-        c.text_right(1030, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &format_price(m.price_out));
+        let (price_in, price_out) = price_cells(m);
+        c.text_right(835, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &price_in);
+        c.text_right(1030, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &price_out);
 
         let desc_color = if i == 0 { hex("#DDE8DD") } else { hex("#C7D0C9") };
         let mut lines = c.wrap(Face::Body, 20.0, &m.desc, 1000.0);
@@ -594,14 +624,31 @@ async fn check_openrouter_models(tg: &Tg, http: &reqwest::Client, state: &mut Mo
                 }
             };
             let context = m["context_length"].as_f64().or_else(|| m["top_provider"]["context_length"].as_f64()).unwrap_or(0.0);
+            let modalities: Vec<&str> = m["architecture"]["output_modalities"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let price_in: Option<f64> = price_value(&m["pricing"]["prompt"]);
+            let price_out: Option<f64> = price_value(&m["pricing"]["completion"]);
+            let price_image: Option<f64> = price_value(&m["pricing"]["image"])
+                .or_else(|| price_value(&m["pricing"]["request"]))
+                .filter(|p| p.is_finite() && *p > 0.0);
+            // Image-only when it emits images and no text; a model that does both keeps its
+            // token prices, which are the numbers people actually compare.
+            let is_image = (modalities.contains(&"image") && !modalities.contains(&"text"))
+                || (price_image.is_some()
+                    && price_in.unwrap_or(0.0) == 0.0
+                    && price_out.unwrap_or(0.0) == 0.0);
             ModelRow {
                 name,
                 id,
                 date,
                 desc,
                 context,
-                price_in: m["pricing"]["prompt"].as_str().and_then(|s| s.parse().ok()),
-                price_out: m["pricing"]["completion"].as_str().and_then(|s| s.parse().ok()),
+                price_in,
+                price_out,
+                is_image,
+                price_image,
             }
         })
         .collect();
@@ -1337,6 +1384,8 @@ pub fn render_selftest() -> Result<Vec<std::path::PathBuf>> {
             context: 200000.0,
             price_in: Some(0.000001),
             price_out: Some(0.000002),
+            is_image: false,
+            price_image: None,
         })
         .collect();
     let lb = LbConfig {
@@ -1374,6 +1423,43 @@ pub fn render_selftest() -> Result<Vec<std::path::PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(is_image: bool, price_in: Option<f64>, price_out: Option<f64>, price_image: Option<f64>) -> ModelRow {
+        ModelRow {
+            name: "m".into(),
+            id: "v/m".into(),
+            date: "29 Oct 2026".into(),
+            desc: "d".into(),
+            context: 33_000.0,
+            price_in,
+            price_out,
+            is_image,
+            price_image,
+        }
+    }
+
+    #[test]
+    fn image_models_show_a_starting_price_instead_of_free() {
+        let (inp, out) = price_cells(&row(true, Some(0.0), Some(0.0), Some(0.04)));
+        assert_eq!(inp, "—", "an image model has no per-token input price");
+        assert_eq!(out, "From $0.04");
+        assert!(!out.contains("Free"), "a per-image model is not free");
+    }
+
+    #[test]
+    fn image_models_without_a_known_price_still_say_from() {
+        let (_, out) = price_cells(&row(true, Some(0.0), Some(0.0), None));
+        assert_eq!(out, "From");
+    }
+
+    #[test]
+    fn text_models_keep_their_token_prices() {
+        assert_eq!(price_cells(&row(false, Some(0.0), Some(0.0), None)), ("Free".into(), "Free".into()));
+        assert_eq!(
+            price_cells(&row(false, Some(0.000003), Some(0.000015), None)),
+            ("$3.00".into(), "$15.00".into())
+        );
+    }
 
     #[test]
     fn connection_restored_reports_real_durations() {
