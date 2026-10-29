@@ -375,7 +375,7 @@ fn client_args_for_default() -> Vec<String> {
 async fn spawn_ytdlp(args: Vec<String>, target: String, timeout: Duration) -> Result<String> {
     let mut client = YT_CLIENTS[0];
     let mut extra = client_args(client);
-    let mut refused: Vec<String> = Vec::new();
+    let mut refused: Vec<&'static str> = Vec::new();
     loop {
         match run_ytdlp(&args, &extra, &target, timeout).await {
             Ok(out) => return Ok(out),
@@ -389,8 +389,8 @@ async fn spawn_ytdlp(args: Vec<String>, target: String, timeout: Duration) -> Re
                 );
                 match reason {
                     YtDlpFailure::BotWall => {
-                        refused.push(client.to_string());
-                        match YT_CLIENTS.iter().find(|c| !refused.contains(*c)) {
+                        refused.push(client);
+                        match YT_CLIENTS.iter().copied().find(|c| !refused.iter().any(|r| r == c)) {
                             Some(next) => {
                                 client = next;
                                 extra = client_args(client);
