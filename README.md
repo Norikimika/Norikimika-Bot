@@ -17,8 +17,7 @@ same deployment model as the JS: run each service under its own supervisor entry
 ## Build
 
 ```bash
-export PATH=/root/.cargo/bin:$PATH
-cargo build --release
+cargo build --release   # from a shell where cargo is already on PATH
 ```
 
 Needs Rust stable, a C toolchain, and libopus headers (`opus` + `pkg-config` on Termux,
@@ -31,7 +30,7 @@ A Linux aarch64 binary will not run in Termux (`not found` — no glibc loader).
 
 ```bash
 # 1. prebuilt, no toolchain needed
-curl -L -o Norikimika-Bot https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-termux-aarch64
+curl -L -o Norikimika-Bot https://github.com/Norikimika/Norikimika-Bot/raw/build/Norikimika-Bot-termux-aarch64
 chmod +x Norikimika-Bot
 
 # 2. build on the device
@@ -44,13 +43,15 @@ Debian default.
 
 ### CI
 
-`.github/workflows/build.yml` builds and tests on `x86_64` and `aarch64` runners. On every push
-to `master` the compiled binary is committed to the **`build` branch** (no artifacts):
+`.github/workflows/build.yml` runs, per platform: `cargo test --release --locked`,
+`cargo clippy --release --all-targets --locked -- -D warnings` and the build itself. A separate
+`Penetration Test` job (Strix) scans the tree once all builds pass. On every push to `master` the
+compiled binary is committed to the **`build` branch** (no artifacts):
 
 ```
-https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-linux-x86_64
-https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-linux-aarch64
-https://github.com/<owner>/<repo>/raw/build/Norikimika-Bot-termux-aarch64
+https://github.com/Norikimika/Norikimika-Bot/raw/build/Norikimika-Bot-linux-x86_64
+https://github.com/Norikimika/Norikimika-Bot/raw/build/Norikimika-Bot-linux-aarch64
+https://github.com/Norikimika/Norikimika-Bot/raw/build/Norikimika-Bot-termux-aarch64
 ```
 
 Download then `chmod +x Norikimika-Bot-*`. `linux-*` are glibc builds: ARM servers and proot
@@ -72,20 +73,95 @@ Modules whose env vars are missing just stop themselves with a log line; the res
 
 ## Config
 
-Reads `.env` from the working directory (or `ENV_FILE=/path/to/.env`); real environment
-variables win over the file. Same variable names as the JS `.env.example`.
+`.env` is read from the working directory, or from `ENV_FILE=/path/to/.env`. Real environment
+variables win over the file. `.env.example` lists names only, with no values — fill in what your
+modules need; a module whose env is incomplete stops itself with one log line while the rest keep
+running.
 
-Extra variables this port adds:
+### Core
 
-- `STATE_DIR` — where state JSON, logs and rendered images live. Default
-  `/root/.local/share/Norikimika-Bot`.
-- `ADMIN_IDS` — comma separated Telegram user IDs that may run admin commands. Checked before
-  the chat-admin lookup, so the gate no longer depends on who is admin in the group. The bot
-  never calls `restrictChatMember`: non-admins get a refusal, not a mute.
+| Variable | Used by | Required | Default | Notes |
+|---|---|---|---|---|
+| `BOT_TOKEN` | bot, monitor, notification | yes | – | Token from @BotFather. Empty stops the Telegram modules. |
+| `CHAT_ID` | notification | yes | – | Target group/channel id (negative for groups). |
+| `ADMIN_IDS` | bot | no | empty | Comma separated Telegram user ids allowed to run admin commands. Empty means group admins only. The bot never calls `restrictChatMember`: non-admins are refused, not muted. |
+| `STATE_DIR` | all | no | `/root/.local/share/Norikimika-Bot` | State JSON (anti-spam, Telegram offset, `bing.json`), `<module>.log`, rendered PNGs. Written atomically (tmp + rename). |
+| `ENV_FILE` | all | no | `.env` | Where to read the env file when it is not in the working directory. |
 
-`/usage` and the daily usage report read `vnstat --json`. On Android `/proc/net/dev` is denied to
-app UIDs, so `vnstatd` has to run as root (and the database must exist); the bot reports which of
-the two is missing instead of assuming vnstat is not installed.
+### Telegram topics
+
+All optional; empty means the main chat with no thread. The value is a `message_thread_id`.
+
+| Variable | Notes |
+|---|---|
+| `TOPIC_ID` | The bot's main topic; used to tell chatter in that topic apart. |
+| `TOPIC_ID_USAGE` | `/usage` and the daily vnstat report. |
+| `TOPIC_ID_STATUS` | Device status, uptime/downtime, dashboard screenshots. |
+| `TOPIC_ID_SPEED` | Speedtest results. |
+| `TOPIC_ID_CONNECTION` | Connection lost/restored notifications. |
+| `TOPIC_ID_UPDATE` | Commit/release notifications (repo module). |
+| `TOPIC_ID_TIKTOK` | `/tt` downloads. |
+| `TOPIC_ID_INTAKE` | Incoming receipts; falls back to `416182`. |
+| `TOPIC_ID_PREVIEW` | Receipt preview before printing. |
+| `TOPIC_ID_MUSIC`, `TOPIC_ID_MUSIC2` | Targets for `/music` and `/music2`. |
+| `TOPIC_ID_V380`, `TOPIC_ID_TUYA`, `TOPIC_ID_AL_QURAN`, `TOPIC_ID_GOPAY` | Per-app notifications (notification module). |
+
+### Media and downloads
+
+| Variable | Used by | Default | Notes |
+|---|---|---|---|
+| `DOWNLOAD_DIR` | bot | `STATE_DIR/media` | Scratch space for `/tt`, audio and thumbnails. |
+| `BING_WORK_DIR` | bing | `STATE_DIR` | Screenshots and `uiautomator` dumps. **Must be absolute** — a relative value is resolved against the bot's cwd, which is how the dump used to be written somewhere else and then fail to read. |
+| `YTDLP_PROXY` | discord, bot | – | Passed as `--proxy` to every yt-dlp call. |
+
+### Repositories and APIs
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `GITHUB_TOKEN` | repo | GitHub API token (rate limit 60 → 5000/h, required for private repos). |
+| `GITLAB_TOKEN` | repo | GitLab API token for repos hosted there. |
+
+### Receipts, prices and AI
+
+| Variable | Used by | Required | Default | Notes |
+|---|---|---|---|---|
+| `NINE_ROUTER_URL` | bot, notification | for receipts and voice notes | – | Base URL of the endpoint (OpenAI-compatible). |
+| `NINE_ROUTER_API_KEY` | bot, notification | same | – | Key for that endpoint. |
+| `NINE_ROUTER_VISION_MODEL` | bot | for receipts | – | Vision model that reads the receipt photo. |
+| `NINE_ROUTER_TTS_MODEL` | notification | no | built-in default | TTS model for voice notes. |
+| `STORE_NAME`, `STORE_ADDRESS` | bot | no | empty | Header drawn on the receipt image. |
+| `PRINT_CMD` | bot | no | empty | Print command, invoked as `<PRINT_CMD> "<path.png>"`. Empty sends the image only. |
+| `SHEETS_ID` | bot | for `/price` | – | Google Sheet id read by `/price` (CSV export). |
+| `SHEETS_GID` | bot | no | `0` | Sheet gid. |
+
+### Discord
+
+| Variable | Required | Notes |
+|---|---|---|
+| `DISCORD_BOT_TOKEN` | no | Empty skips the discord module; everything else keeps running. |
+| `DISCORD_WELCOME_CHANNEL_ID`, `DISCORD_GOODBYE_CHANNEL_ID` | for banners | Target channel. Missing → the event is only logged. |
+| `DISCORD_WELCOME_TITLE`, `DISCORD_WELCOME_TEXT`, `DISCORD_GOODBYE_TITLE`, `DISCORD_GOODBYE_TEXT` | for banners | Banner text; `{user}` is replaced with the member name. |
+
+### Notification module
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AUTO_CLEAR_ENABLED` | `true` | Clear a notification from the shade after forwarding (`1/true/yes`). |
+| `CHECK_INTERVAL` | `2` | Seconds between notification polls (minimum 1). |
+| `MAX_NOTIFICATIONS` | `49` | Maximum notifications handled per cycle. |
+| `DB_CLEANUP_CYCLES` | `180` | Prune the internal database every N cycles. |
+| `DB_RETENTION_SECONDS` | `86400` | Age before an entry is pruned. |
+| `DEDUPE_WINDOW_SECONDS` | `300` | Window in which two notifications count as the same. |
+| `PKILL_THROTTLE_SECONDS` | `300` | Minimum gap between `pkill` calls. |
+
+### Android environment notes
+
+- `/usage` and the daily report read `vnstat --json`. `/proc/net/dev` is denied to app UIDs, so
+  `vnstatd` must run as root and its database must exist; the bot says which of the two is missing.
+- The bing module needs `su` (grant root once in Magisk), `uiautomator` and `am`. Claiming points
+  needs `tesseract` (`pkg install tesseract`); without it the log reads `claim skipped: tesseract is
+  not installed` instead of "no ready points".
+- Discord music needs `yt-dlp` and `node` on the Termux PATH.
 
 ## Differences from the JS
 
