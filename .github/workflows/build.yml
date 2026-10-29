@@ -164,7 +164,19 @@ jobs:
           fetch-depth: 0
 
       - name: Install Strix
-        run: curl -sSL https://strix.ai/install | bash
+        run: |
+          set -euo pipefail
+          # the installer asks strix.ai for the current version; that endpoint has flaked before
+          for attempt in 1 2 3; do
+            if curl -sSL https://strix.ai/install | bash; then
+              echo "strix installed (attempt $attempt)"
+              exit 0
+            fi
+            echo "strix install attempt $attempt failed, retrying in 30s"
+            sleep 30
+          done
+          echo "strix installer could not fetch version information after 3 attempts" >&2
+          exit 1
 
       - name: Run Strix
         env:
