@@ -18,6 +18,20 @@ const TTS_RETRY_BASE_MS: u64 = 800;
 const TTS_TIMEOUT_MS: u64 = 25_000;
 const TTS_DEFAULT_MODEL: &str = "edge-tts/id-ID-GadisNeural";
 
+/// Announcements play at full volume, except at night: 00:00-05:00 keeps it at 20.
+const QUIET_VOLUME: i64 = 20;
+const QUIET_UNTIL_HOUR: u32 = 5;
+
+/// Volume for an announcement. `max` is what the stream reports, so a device whose ceiling is
+/// lower than 20 still gets its own maximum instead of a value it cannot reach.
+fn tts_volume(max: i64, hour: u32) -> i64 {
+    if hour < QUIET_UNTIL_HOUR {
+        QUIET_VOLUME.min(max)
+    } else {
+        max
+    }
+}
+
 const TELEGRAM_RETRY: u32 = 3;
 const TELEGRAM_RETRY_BACKOFF: u32 = 2;
 
@@ -727,11 +741,17 @@ impl Monitor {
                 .and_then(|v| v.as_i64())
                 .filter(|m| *m > 0)
             {
-                let max_s = max.to_string();
-                let (ok, _, err) = exec("termux-volume", &["music", &max_s], Duration::from_secs(5)).await;
+                let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
+                let target = tts_volume(max, hour);
+                let target_s = target.to_string();
+                let (ok, _, err) = exec("termux-volume", &["music", &target_s], Duration::from_secs(5)).await;
                 if ok {
-                    report.volume = Some(max);
-                    logln!(MOD, "Music volume set to max ({max})");
+                    report.volume = Some(target);
+                    if target < max {
+                        logln!(MOD, "Music volume set to {target} (night level, {hour:02}:00-05:00; max is {max})");
+                    } else {
+                        logln!(MOD, "Music volume set to max ({max})");
+                    }
                 } else {
                     logln!(MOD, "ERROR Failed to set music volume: {}", err.trim());
                 }
@@ -1007,5 +1027,21 @@ mod tests {
         assert!(!is_retryable_tts_error(&TtsError::Http(401, String::new())));
         assert!(is_retryable_tts_error(&TtsError::Other("fetch failed".into())));
         assert!(!is_retryable_tts_error(&TtsError::Other("bad model".into())));
+    }
+
+    #[test]
+    fn announcements_are_quieter_between_midnight_and_five() {
+        for hour in 0..5 {
+            assert_eq!(tts_volume(25, hour), 20, "hour {hour} must stay at 20");
+        }
+        assert_eq!(tts_volume(25, 5), 25);
+        assert_eq!(tts_volume(25, 12), 25);
+        assert_eq!(tts_volume(25, 23), 25);
+    }
+
+    #[test]
+    fn a_quiet_device_still_gets_its_own_maximum() {
+        assert_eq!(tts_volume(15, 3), 15);
+        assert_eq!(tts_volume(0, 3), 0);
     }
 }
