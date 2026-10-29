@@ -1157,19 +1157,35 @@ async fn refresh_alone_timer(ctx: &Context, guild_id: GuildId) {
 // ================== welcome / goodbye banners ==================
 
 async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {
-    let res = crate::util::http()
+    let client = match crate::util::http()
         .user_agent("Mozilla/5.0 (compatible; WelcomeBot/1.0)")
         .timeout(Duration::from_secs(20))
         .build()
-        .ok()?
-        .get(url)
-        .send()
-        .await
-        .ok()?;
+    {
+        Ok(client) => client,
+        Err(e) => {
+            logln!(MOD, "[Banner] could not build an http client: {e:#}");
+            return None;
+        }
+    };
+    let res = match client.get(url).send().await {
+        Ok(res) => res,
+        Err(e) => {
+            crate::util::log_once(MOD, "banner-fetch", &format!("[Banner] fetch {url} failed: {e:#}"));
+            return None;
+        }
+    };
     if !res.status().is_success() {
+        crate::util::log_once(MOD, "banner-status", &format!("[Banner] {url} answered {}", res.status()));
         return None;
     }
-    res.bytes().await.ok().map(|b| b.to_vec())
+    match res.bytes().await {
+        Ok(bytes) => Some(bytes.to_vec()),
+        Err(e) => {
+            crate::util::log_once(MOD, "banner-body", &format!("[Banner] {url} body failed: {e:#}"));
+            None
+        }
+    }
 }
 
 fn shrink_to(canvas: &crate::render::Canvas, face: crate::render::Face, text: &str, start: f32, min: f32, max_w: f32) -> f32 {

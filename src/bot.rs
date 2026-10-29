@@ -329,6 +329,17 @@ fn ytdlp_args(args: Vec<String>) -> Vec<String> {
     }
 }
 
+/// Download one media part; on failure say why instead of dropping it silently.
+async fn download_logged(url: &str, what: &str) -> Option<Vec<u8>> {
+    match download(url).await {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            crate::util::log_once(MOD, what, &format!("[TT] {what} download failed: {e:#}"));
+            None
+        }
+    }
+}
+
 fn find_downloaded_audio(file_id: &str) -> Option<PathBuf> {
     let dir = dir();
     std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
@@ -901,9 +912,6 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
             "performer": performer,
             "duration": info["duration"].as_i64().unwrap_or(0),
         });
-        if let Some(obj) = extra.as_object_mut() {
-            let _ = obj;
-        }
         let sent = bot
             .send_file("sendAudio", msg.chat_id, target_topic.or(msg.thread_id), "audio", bytes, &filename, extra.take())
             .await;
@@ -1307,7 +1315,7 @@ async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
 
         let mut images = Vec::new();
         for (i, image) in image_urls.iter().enumerate() {
-            if let Ok(bytes) = download(image).await {
+            if let Some(bytes) = download_logged(image, "image").await {
                 images.push(("photo".to_string(), bytes, format!("photo_{:02}.jpg", i + 1)));
             }
         }
@@ -1316,7 +1324,7 @@ async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
             _ => None,
         };
         let audio = match audio_url {
-            Some(a) => download(&a).await.ok(),
+            Some(a) => download_logged(&a, "audio").await,
             None => None,
         };
         Ok(TtMedia { title, uploader, video, images, slides: Vec::new(), audio })
@@ -1340,11 +1348,11 @@ async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
             for i in 0..n {
                 let tag = format!("{:02}", i + 1);
                 if let Some(live) = live_urls.get(i) {
-                    if let Ok(bytes) = download(live).await {
+                    if let Some(bytes) = download_logged(live, "slide video").await {
                         slides.push(("video".to_string(), bytes, format!("slide_{tag}.mp4")));
                     }
                 } else if let Some(img) = image_urls.get(i) {
-                    if let Ok(bytes) = download(img).await {
+                    if let Some(bytes) = download_logged(img, "slide image").await {
                         slides.push(("photo".to_string(), bytes, format!("slide_{tag}.jpg")));
                     }
                 }
@@ -1354,7 +1362,7 @@ async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
         let mut images = Vec::new();
         if slides.is_empty() {
             for (i, image) in image_urls.iter().enumerate() {
-                if let Ok(bytes) = download(image).await {
+                if let Some(bytes) = download_logged(image, "image").await {
                     images.push(("photo".to_string(), bytes, format!("photo_{:02}.jpg", i + 1)));
                 }
             }
@@ -1364,7 +1372,7 @@ async fn fetch_tt_media(url: &str, is_douyin: bool) -> Result<TtMedia> {
             _ => None,
         };
         let audio = match audio_url {
-            Some(a) => download(&a).await.ok(),
+            Some(a) => download_logged(&a, "audio").await,
             None => None,
         };
         Ok(TtMedia { title, uploader, video, images, slides, audio })
@@ -1595,7 +1603,14 @@ async fn handle_message(bot: &Bot, msg: Msg) -> Result<()> {
 
     if let Some(file_id) = &msg.photo_file_id {
         if bot.require_admin(&msg).await {
-            let _ = cmd_receipt(bot, &msg, file_id).await;
+            // a failing receipt used to vanish: no reply, no log, user waiting
+            if let Err(e) = cmd_receipt(bot, &msg, file_id).await {
+                logln!(MOD, "[Receipt] {e:#}");
+                let text = format!("❌ Receipt failed: {}", escape_html(&format!("{e:#}")));
+                if let Err(send_err) = bot.send(msg.chat_id, msg.thread_id, &text, Some(msg.message_id), None).await {
+                    logln!(MOD, "[Receipt] could not report the failure: {send_err}");
+                }
+            }
         }
         return Ok(());
     }
@@ -1732,7 +1747,10 @@ async fn handle_update(bot: &Bot, update: Value) -> Result<()> {
 pub async fn run() -> Result<()> {
     let bot = Bot::new()?;
     logln!(MOD, "Bot launched");
-    let _ = sh("termux-tts-speak", &["Bot launched"]).await;
+    let (announced, out) = sh("termux-tts-speak", &["Bot launched"]).await;
+    if !announced {
+        logln!(MOD, "startup announcement failed: {}", crate::util::truncate(out.trim(), 120));
+    }
 
     let mut offset: i64 = match load_offset() {
         Some(saved) => saved,

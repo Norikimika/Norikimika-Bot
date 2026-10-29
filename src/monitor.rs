@@ -1044,12 +1044,30 @@ async fn getprop(prop: &str) -> String {
 
 async fn connection_info(http: &reqwest::Client) -> (String, String) {
     let ip = match http.get("https://ipinfo.io/ip").send().await {
-        Ok(r) => r.text().await.ok(),
-        Err(_) => None,
+        Ok(r) => match r.text().await {
+            Ok(text) => Some(text),
+            Err(e) => {
+                crate::util::log_once(MOD, "ipinfo-ip-body", &format!("[Connection] ipinfo/ip body failed: {e:#}"));
+                None
+            }
+        },
+        Err(e) => {
+            crate::util::log_once(MOD, "ipinfo-ip", &format!("[Connection] ipinfo/ip failed: {e:#}"));
+            None
+        }
     };
     let org = match http.get("https://ipinfo.io/org").send().await {
-        Ok(r) => r.text().await.ok(),
-        Err(_) => None,
+        Ok(r) => match r.text().await {
+            Ok(text) => Some(text),
+            Err(e) => {
+                crate::util::log_once(MOD, "ipinfo-org-body", &format!("[Connection] ipinfo/org body failed: {e:#}"));
+                None
+            }
+        },
+        Err(e) => {
+            crate::util::log_once(MOD, "ipinfo-org", &format!("[Connection] ipinfo/org failed: {e:#}"));
+            None
+        }
     };
     let ip = ip.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "N/A".into());
     let isp = org

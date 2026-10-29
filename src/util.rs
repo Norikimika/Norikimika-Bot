@@ -85,6 +85,24 @@ pub async fn capture(cmd: &str, args: &[&str]) -> std::result::Result<String, St
     }
 }
 
+/// Log a failure once per key.
+///
+/// Pollers (repo every few seconds, the connection watcher) would otherwise either flood the log
+/// with the same error or, as before, drop it entirely; a new problem is still reported.
+pub fn log_once(module: &str, key: &str, message: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = match seen.lock() {
+        Ok(mut seen) => seen.insert(format!("{module}:{key}")),
+        Err(_) => true,
+    };
+    if first {
+        crate::logx::log_to(module, message);
+    }
+}
+
 /// Install the process-wide rustls crypto provider.
 ///
 /// Both `ring` (via serenity/songbird's reqwest 0.12) and `aws-lc-rs` (via reqwest 0.13) end up in
@@ -175,6 +193,14 @@ mod tests {
         assert_eq!(format_duration(90061), "1d 1h 1m");
     }
 
+
+    #[test]
+    fn log_once_keeps_the_first_message_per_key() {
+        // no panic, no poisoning: the second call must be a no-op
+        log_once("test", "same-key", "first");
+        log_once("test", "same-key", "second");
+        log_once("test", "other-key", "third");
+    }
 
     #[test]
     fn app_client_builds_without_the_platform_verifier() {

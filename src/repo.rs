@@ -162,31 +162,48 @@ impl Watcher {
             // Release: id + asset signature (asset re-uploads bump updated_at).
             let mut release_changed = false;
             let mut release_data = Value::Null;
-            if let Ok(r) = self
+            match self
                 .http
                 .get(format!("https://api.github.com/repos/{}/{}/releases/latest", repo.owner, repo.repo))
                 .headers(headers.clone())
                 .send()
                 .await
             {
-                if r.status().is_success() {
-                    if let Ok(data) = r.json::<Value>().await {
-                        let id = data["id"].as_i64().unwrap_or(0).to_string();
-                        let sig = data["assets"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .map(|x| format!("{}:{}", x["id"], x["updated_at"].as_str().unwrap_or("")))
-                                    .collect::<Vec<_>>()
-                                    .join("|")
-                            })
-                            .unwrap_or_default();
-                        if id != "0" && (Some(id.as_str()) != state.str(&release_key) || Some(sig.as_str()) != state.str(&asset_key)) {
-                            release_changed = true;
-                            state.set_str(&release_key, id);
-                            state.set_str(&asset_key, sig);
+                Err(e) => crate::util::log_once(
+                    MOD,
+                    &format!("release-{}", repo.repo),
+                    &format!("[Repo] {}/{} releases: {e:#}", repo.owner, repo.repo),
+                ),
+                Ok(r) if !r.status().is_success() => crate::util::log_once(
+                    MOD,
+                    &format!("release-status-{}", repo.repo),
+                    &format!("[Repo] {}/{} releases answered {}", repo.owner, repo.repo, r.status()),
+                ),
+                Ok(r) => {
+                    match r.json::<Value>().await {
+                        Err(e) => crate::util::log_once(
+                            MOD,
+                            &format!("release-json-{}", repo.repo),
+                            &format!("[Repo] {}/{} releases json: {e:#}", repo.owner, repo.repo),
+                        ),
+                        Ok(data) => {
+                            let id = data["id"].as_i64().unwrap_or(0).to_string();
+                            let sig = data["assets"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .map(|x| format!("{}:{}", x["id"], x["updated_at"].as_str().unwrap_or("")))
+                                        .collect::<Vec<_>>()
+                                        .join("|")
+                                })
+                                .unwrap_or_default();
+                            if id != "0" && (Some(id.as_str()) != state.str(&release_key) || Some(sig.as_str()) != state.str(&asset_key)) {
+                                release_changed = true;
+                                state.set_str(&release_key, id);
+                                state.set_str(&asset_key, sig);
+                            }
+                            release_data = data;
                         }
-                        release_data = data;
                     }
                 }
             }
@@ -194,21 +211,36 @@ impl Watcher {
             // Tags
             let mut tag_changed = false;
             let mut latest_tag: Option<String> = None;
-            if let Ok(r) = self
+            match self
                 .http
                 .get(format!("https://api.github.com/repos/{}/{}/tags?per_page=1", repo.owner, repo.repo))
                 .headers(headers.clone())
                 .send()
                 .await
             {
-                if r.status().is_success() {
-                    if let Ok(data) = r.json::<Value>().await {
+                Err(e) => crate::util::log_once(
+                    MOD,
+                    &format!("tags-{}", repo.repo),
+                    &format!("[Repo] {}/{} tags: {e:#}", repo.owner, repo.repo),
+                ),
+                Ok(r) if !r.status().is_success() => crate::util::log_once(
+                    MOD,
+                    &format!("tags-status-{}", repo.repo),
+                    &format!("[Repo] {}/{} tags answered {}", repo.owner, repo.repo, r.status()),
+                ),
+                Ok(r) => match r.json::<Value>().await {
+                    Err(e) => crate::util::log_once(
+                        MOD,
+                        &format!("tags-json-{}", repo.repo),
+                        &format!("[Repo] {}/{} tags json: {e:#}", repo.owner, repo.repo),
+                    ),
+                    Ok(data) => {
                         if let Some(name) = data.get(0).and_then(|t| t["name"].as_str()) {
                             latest_tag = Some(name.to_string());
                             tag_changed = state.str(&tag_key) != Some(name);
                         }
                     }
-                }
+                },
             }
 
             let has_new_commit = state.str(&sha_key) != Some(latest_sha.as_str());
@@ -224,9 +256,24 @@ impl Watcher {
                     "https://api.github.com/repos/{}/{}/actions/runs?per_page=5&branch={branch}",
                     repo.owner, repo.repo
                 );
-                if let Ok(r) = self.http.get(&url).headers(headers.clone()).send().await {
-                    if r.status().is_success() {
-                        if let Ok(data) = r.json::<Value>().await {
+                match self.http.get(&url).headers(headers.clone()).send().await {
+                    Err(e) => crate::util::log_once(
+                        MOD,
+                        &format!("runs-{}", repo.repo),
+                        &format!("[Repo] {}/{} actions runs: {e:#}", repo.owner, repo.repo),
+                    ),
+                    Ok(r) if !r.status().is_success() => crate::util::log_once(
+                        MOD,
+                        &format!("runs-status-{}", repo.repo),
+                        &format!("[Repo] {}/{} actions runs answered {}", repo.owner, repo.repo, r.status()),
+                    ),
+                    Ok(r) => match r.json::<Value>().await {
+                        Err(e) => crate::util::log_once(
+                            MOD,
+                            &format!("runs-json-{}", repo.repo),
+                            &format!("[Repo] {}/{} actions runs json: {e:#}", repo.owner, repo.repo),
+                        ),
+                        Ok(data) => {
                             if let Some(runs) = data["workflow_runs"].as_array() {
                                 if let Some(run) = runs.iter().find(|x| x["head_sha"].as_str() == Some(latest_sha.as_str())) {
                                     actions_text = format!(
@@ -236,7 +283,7 @@ impl Watcher {
                                 }
                             }
                         }
-                    }
+                    },
                 }
             }
 
@@ -337,13 +384,36 @@ impl Watcher {
                 _ => {
                     let url = format!("https://gitlab.com/api/v4/projects/{encoded_path}/repository/branches");
                     match self.http.get(&url).headers(headers.clone()).send().await {
-                        Ok(r) if r.status().is_success() => r
-                            .json::<Value>()
-                            .await
-                            .ok()
-                            .and_then(|d| d.as_array().map(|a| a.iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect()))
-                            .unwrap_or_default(),
-                        _ => Vec::new(),
+                        Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+                            Ok(d) => d
+                                .as_array()
+                                .map(|a| a.iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect())
+                                .unwrap_or_default(),
+                            Err(e) => {
+                                crate::util::log_once(
+                                    MOD,
+                                    &format!("gitlab-branches-{}", repo.repo),
+                                    &format!("[Repo] {}/{} branches json: {e:#}", repo.owner, repo.repo),
+                                );
+                                Vec::new()
+                            }
+                        },
+                        Ok(r) => {
+                            crate::util::log_once(
+                                MOD,
+                                &format!("gitlab-branches-status-{}", repo.repo),
+                                &format!("[Repo] {}/{} branches answered {}", repo.owner, repo.repo, r.status()),
+                            );
+                            Vec::new()
+                        }
+                        Err(e) => {
+                            crate::util::log_once(
+                                MOD,
+                                &format!("gitlab-branches-err-{}", repo.repo),
+                                &format!("[Repo] {}/{} branches: {e:#}", repo.owner, repo.repo),
+                            );
+                            Vec::new()
+                        }
                     }
                 }
             };
