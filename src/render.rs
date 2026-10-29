@@ -118,8 +118,8 @@ impl Canvas {
         }
         let px = self.img.get_pixel_mut(x as u32, y as u32);
         let a = coverage.clamp(0.0, 1.0);
-        for i in 0..3 {
-            px.0[i] = (px.0[i] as f32 * (1.0 - a) + color[i] as f32 * a) as u8;
+        for (i, channel) in px.0.iter_mut().take(3).enumerate() {
+            *channel = (*channel as f32 * (1.0 - a) + color[i] as f32 * a) as u8;
         }
         px.0[3] = 255;
     }

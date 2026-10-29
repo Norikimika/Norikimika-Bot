@@ -740,7 +740,8 @@ async fn resolve_meta_to_songs(tracks: Vec<(String, String)>, requester: Option<
     let mut found = Vec::new();
     for chunk in tracks.chunks(3) {
         let mut handles = Vec::new();
-        for (artist, title) in chunk.iter().cloned() {
+        for pair in chunk {
+            let (artist, title) = (pair.0.clone(), pair.1.clone());
             handles.push(tokio::spawn(async move {
                 search_yt_music(&format!("{artist} - {title}"), 1).await.into_iter().next()
             }));
@@ -900,7 +901,7 @@ fn play_next<'a>(
         };
 
         let (mut song, channel) = prepared;
-        let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) else {
+        let Some(songbird) = songbird::get(ctx).await else {
             logln!(MOD, "[Music] songbird not registered, cannot play {}", song.title);
             if let Some(queue) = queues().lock().await.get_mut(&guild_id) {
                 queue.playing = false;
@@ -952,7 +953,7 @@ fn play_next<'a>(
             return;
         }
 
-        let artist_text = (song.artist != "Unknown Artist").then(|| format!(" by {}", song.artist)).unwrap_or_default();
+        let artist_text = if song.artist != "Unknown Artist" { format!(" by {}", song.artist) } else { String::new() };
         let req_text = match (song.manual, song.requested_by) {
             (true, Some(id)) => format!("\nRequested by: <@{id}>"),
             _ => "\n*(Autoplay)*".to_string(),
@@ -1143,7 +1144,7 @@ async fn refresh_alone_timer(ctx: &Context, guild_id: GuildId) {
             }
         }
         queues().lock().await.remove(&guild_id);
-        if let Some(songbird) = songbird::get(&ctx).await.map(|s| s.clone()) {
+        if let Some(songbird) = songbird::get(&ctx).await {
             if let Some(call) = songbird.get(guild_id) {
                 let call = call.lock().await;
                 call.queue().stop();
@@ -1493,7 +1494,7 @@ fn requester_tag(queue: Option<&GuildQueue>) -> String {
 }
 
 async fn stop_playback(ctx: &Context, guild_id: GuildId) {
-    if let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) {
+    if let Some(songbird) = songbird::get(ctx).await {
         if let Some(call) = songbird.get(guild_id) {
             let call = call.lock().await;
             call.queue().stop();
@@ -1545,7 +1546,7 @@ async fn cmd_queue(ctx: &Context, msg: &Message) {
         (true, Some(id)) => format!(" | Requested by: <@{id}>"),
         _ => " | *(Autoplay)*".to_string(),
     };
-    let artist_text = (now.artist != "Unknown Artist").then(|| format!("by {}", now.artist)).unwrap_or_default();
+    let artist_text = if now.artist != "Unknown Artist" { format!("by {}", now.artist) } else { String::new() };
     let mut description = format!(
         "**Now Playing:**\n[{}]({}) {}{}\n\n**Up Next:**\n",
         now.title, now.url, artist_text, req_info
@@ -1714,7 +1715,7 @@ async fn cmd_play(ctx: &Context, msg: &Message, query: &str) -> Result<()> {
         }
         None if was_playing => {
             if let Some(first) = added.first() {
-                let artist_text = (first.artist != "Unknown Artist").then(|| format!(" by {}", first.artist)).unwrap_or_default();
+                let artist_text = if first.artist != "Unknown Artist" { format!(" by {}", first.artist) } else { String::new() };
                 let mut card = CreateEmbed::new()
                     .colour(0x00FF00)
                     .description(format!("Added to queue: [{}]({}){}", first.title, first.url, artist_text));
@@ -1749,7 +1750,7 @@ async fn cmd_skip(ctx: &Context, msg: &Message) {
         return;
     }
     let current = queue.songs[0].clone();
-    let artist_text = (current.artist != "Unknown Artist").then(|| format!(" by {}", current.artist)).unwrap_or_default();
+    let artist_text = if current.artist != "Unknown Artist" { format!(" by {}", current.artist) } else { String::new() };
     reply_embed(ctx, msg, &format!("**{}**{} was skipped by {}", current.title, artist_text, msg.author.name), 0xFFFF00).await;
     // stopping the track fires TrackEnd, which advances the queue
     stop_playback(ctx, guild_id).await;
@@ -1796,7 +1797,7 @@ async fn cmd_disconnect(ctx: &Context, msg: &Message) {
     }
     logln!(MOD, "[Disconnect Command] {guild_id} | Disconnected by {}", msg.author.name);
     destroy_queue(guild_id).await;
-    if let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) {
+    if let Some(songbird) = songbird::get(ctx).await {
         if let Err(e) = songbird.remove(guild_id).await {
             logln!(MOD, "[Voice] leave failed: {e}");
         }

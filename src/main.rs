@@ -106,7 +106,7 @@ fn secs_until_from(now: chrono::DateTime<chrono::Local>, hour: u32) -> u64 {
         chrono::LocalResult::None => now + D::hours(1),
     };
     if next <= now {
-        next = next + D::days(1);
+        next += D::days(1);
     }
     (next - now).num_seconds().max(1) as u64
 }

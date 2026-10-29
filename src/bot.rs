@@ -47,12 +47,26 @@ struct Callback {
     is_admin: bool,
 }
 
+/// One file upload: the arguments of `send_file`, which clippy rightly called too many.
+struct Upload<'a> {
+    kind: &'a str,
+    chat_id: i64,
+    thread: Option<i64>,
+    field: &'a str,
+    bytes: Vec<u8>,
+    filename: &'a str,
+    extra: Value,
+}
+
+/// (chat_id, user_id) -> (is_admin, checked_at)
+type AdminCache = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<(i64, i64), (bool, i64)>>>;
+
 #[derive(Clone)]
 pub struct Bot {
     http: reqwest::Client,
     token: String,
     topic_id: Option<i64>,
-    admins: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<(i64, i64), (bool, i64)>>>,
+    admins: AdminCache,
 }
 
 impl Bot {
@@ -225,18 +239,19 @@ impl Bot {
         Ok(self.http.get(url).send().await?.bytes().await?.to_vec())
     }
 
-    /// Upload one or more files with `kind` = sendPhoto/sendVideo/sendAudio/sendDocument.
-    async fn send_file(&self, kind: &str, chat_id: i64, thread: Option<i64>, field: &str, bytes: Vec<u8>, filename: &str, extra: Value) -> Result<()> {
-        let part = reqwest::multipart::Part::bytes(bytes)
-            .file_name(filename.to_string())
+    /// Upload one file with `kind` = sendPhoto/sendVideo/sendAudio/sendDocument.
+    async fn send_file(&self, up: Upload<'_>) -> Result<()> {
+        let kind = up.kind;
+        let part = reqwest::multipart::Part::bytes(up.bytes)
+            .file_name(up.filename.to_string())
             .mime_str("application/octet-stream")?;
         let mut form = reqwest::multipart::Form::new()
-            .text("chat_id", chat_id.to_string())
-            .part(field.to_string(), part);
-        if let Some(t) = thread {
+            .text("chat_id", up.chat_id.to_string())
+            .part(up.field.to_string(), part);
+        if let Some(t) = up.thread {
             form = form.text("message_thread_id", t.to_string());
         }
-        if let Some(obj) = extra.as_object() {
+        if let Some(obj) = up.extra.as_object() {
             for (k, v) in obj {
                 form = form.text(k.clone(), v.as_str().unwrap_or("").to_string());
             }
@@ -282,7 +297,7 @@ async fn sh(cmd: &str, args: &[&str]) -> (bool, String) {
     let fut = tokio::process::Command::new(cmd).args(args).kill_on_drop(true).output();
     match tokio::time::timeout(SH_TIMEOUT, fut).await {
         Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(Err(_)) => (false, String::new()),
+        Ok(Err(e)) => (false, format!("{cmd}: {e}")),
         Err(_) => (false, format!("{cmd} timed out after {}s", SH_TIMEOUT.as_secs())),
     }
 }
@@ -297,7 +312,7 @@ async fn sh_root(cmd: &str) -> (bool, String) {
         .output();
     match tokio::time::timeout(Duration::from_secs(20), fut).await {
         Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(Err(_)) => (false, String::new()),
+        Ok(Err(e)) => (false, format!("su: {e}")),
         Err(_) => (false, "su timed out: grant root access for Termux".into()),
     }
 }
@@ -805,7 +820,7 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
     let query = msg
         .text
         .trim()
-        .trim_start_matches(|c: char| c == '/' )
+        .trim_start_matches('/')
         .split_once(char::is_whitespace)
         .map(|(_, rest)| rest.trim().to_string())
         .unwrap_or_default();
@@ -913,7 +928,15 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
             "duration": info["duration"].as_i64().unwrap_or(0),
         });
         let sent = bot
-            .send_file("sendAudio", msg.chat_id, target_topic.or(msg.thread_id), "audio", bytes, &filename, extra.take())
+            .send_file(Upload {
+                kind: "sendAudio",
+                chat_id: msg.chat_id,
+                thread: target_topic.or(msg.thread_id),
+                field: "audio",
+                bytes,
+                filename: &filename,
+                extra: extra.take(),
+            })
             .await;
         status = if sent.is_ok() { "Success" } else { "Failed" };
         bot.edit(msg.chat_id, info_message, &music_info_text(&title, &performer, &duration, status), None).await?;
@@ -921,9 +944,9 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
 
     typing.abort();
     // best-effort cleanup of downloaded audio + thumbnails
-    let _ = std::fs::remove_file(&thumb_base.with_extension("jpg"));
-    let _ = std::fs::remove_file(&thumb_base.with_extension("webp"));
-    let _ = std::fs::remove_file(&thumb_base.with_extension("png"));
+    let _ = std::fs::remove_file(thumb_base.with_extension("jpg"));
+    let _ = std::fs::remove_file(thumb_base.with_extension("webp"));
+    let _ = std::fs::remove_file(thumb_base.with_extension("png"));
     if let Some(path) = find_downloaded_audio(&file_id) {
         let _ = std::fs::remove_file(path);
     }
@@ -1120,7 +1143,7 @@ async fn cmd_price(bot: &Bot, msg: &Msg, keyword: &str) -> Result<()> {
     let filtered: Vec<&&Vec<String>> = data_rows
         .iter()
         .filter(|r| {
-            r.get(0).map(|c| c.to_lowercase().contains(&keyword)).unwrap_or(false)
+            r.first().map(|c| c.to_lowercase().contains(&keyword)).unwrap_or(false)
                 || r.get(1).map(|c| c.to_lowercase().contains(&keyword)).unwrap_or(false)
         })
         .collect();
@@ -1237,7 +1260,16 @@ async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
             } else if !media.images.is_empty() {
                 send_slides(bot, msg.chat_id, target_topic, &media.images).await
             } else if let Some(video) = &media.video {
-                bot.send_file("sendVideo", msg.chat_id, target_topic, "video", video.clone(), "video.mp4", json!({})).await
+                bot.send_file(Upload {
+                    kind: "sendVideo",
+                    chat_id: msg.chat_id,
+                    thread: target_topic,
+                    field: "video",
+                    bytes: video.clone(),
+                    filename: "video.mp4",
+                    extra: json!({}),
+                })
+                .await
             } else {
                 Err(anyhow!("No media downloaded from {platform} response"))
             };
@@ -1248,15 +1280,15 @@ async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
             } else {
                 if let Some(audio) = &media.audio {
                     if let Err(e) = bot
-                        .send_file(
-                            "sendAudio",
-                            msg.chat_id,
-                            target_topic,
-                            "audio",
-                            audio.clone(),
-                            "audio.mp3",
-                            json!({ "title": title, "performer": media.uploader }),
-                        )
+                        .send_file(Upload {
+                            kind: "sendAudio",
+                            chat_id: msg.chat_id,
+                            thread: target_topic,
+                            field: "audio",
+                            bytes: audio.clone(),
+                            filename: "audio.mp3",
+                            extra: json!({ "title": title, "performer": media.uploader }),
+                        })
                         .await
                     {
                         logln!(MOD, "[TT] audio upload failed: {e}");
@@ -1283,7 +1315,17 @@ async fn send_slides(bot: &Bot, chat_id: i64, thread: Option<i64>, items: &[(Str
     if items.len() == 1 {
         let (kind, bytes, name) = &items[0];
         let method = if kind == "photo" { "sendPhoto" } else { "sendVideo" };
-        return bot.send_file(method, chat_id, thread, "photo", bytes.clone(), name, json!({})).await;
+        return bot
+            .send_file(Upload {
+                kind: method,
+                chat_id,
+                thread,
+                field: "photo",
+                bytes: bytes.clone(),
+                filename: name,
+                extra: json!({}),
+            })
+            .await;
     }
     for chunk in items.chunks(10) {
         bot.send_media_group(chat_id, thread, chunk.to_vec()).await?;
@@ -1546,7 +1588,16 @@ async fn cmd_receipt(bot: &Bot, msg: &Msg, file_id: &str) -> Result<()> {
 
         let struk = build_struk(&data);
         let png = render_struk_image(&struk)?;
-        bot.send_file("sendPhoto", msg.chat_id, target_thread, "photo", png.clone(), "receipt.png", json!({})).await?;
+        bot.send_file(Upload {
+            kind: "sendPhoto",
+            chat_id: msg.chat_id,
+            thread: target_thread,
+            field: "photo",
+            bytes: png.clone(),
+            filename: "receipt.png",
+            extra: json!({}),
+        })
+        .await?;
 
         match crate::config::get("PRINT_CMD") {
             Some(cmd) if !cmd.is_empty() => {
