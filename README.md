@@ -45,7 +45,7 @@ Debian default.
 
 `.github/workflows/build.yml` runs, per platform: `cargo test --release --locked`,
 `cargo clippy --release --all-targets --locked -- -D warnings` and the build itself. A separate
-`Penetration Test` job (Strix) scans the tree once all builds pass. On every push to `master` the
+`Penetration Test` job (Strix) scans the tree once all builds pass. On every push to `rust` the
 compiled binary is committed to the **`build` branch** (no artifacts):
 
 ```

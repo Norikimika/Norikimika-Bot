@@ -3,7 +3,7 @@ name: build
 on:
   push:
     branches:
-      - master
+      - rust
   pull_request:
     paths:
       - '.github/workflows/build.yml'
