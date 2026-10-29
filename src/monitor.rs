@@ -86,18 +86,24 @@ fn save_state(state: &MonitorState) {
     }
 }
 
-/// Run a command, returning (success, stdout).
+const SH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run a command, returning (success, stdout-or-why-it-failed).
 async fn sh(cmd: &str, args: &[&str]) -> (bool, String) {
-    match tokio::process::Command::new(cmd).args(args).output().await {
-        Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Err(_) => (false, String::new()),
+    let fut = tokio::process::Command::new(cmd).args(args).kill_on_drop(true).output();
+    match tokio::time::timeout(SH_TIMEOUT, fut).await {
+        Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(Err(e)) => (false, format!("{cmd}: {e}")),
+        Err(_) => (false, format!("{cmd} timed out after {}s", SH_TIMEOUT.as_secs())),
     }
 }
 
 async fn sh_shell(cmd: &str) -> (bool, String) {
-    match tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await {
-        Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
-        Err(_) => (false, String::new()),
+    let fut = tokio::process::Command::new("sh").arg("-c").arg(cmd).kill_on_drop(true).output();
+    match tokio::time::timeout(SH_TIMEOUT, fut).await {
+        Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
+        Ok(Err(e)) => (false, format!("`{cmd}`: {e}")),
+        Err(_) => (false, format!("`{cmd}` timed out after {}s", SH_TIMEOUT.as_secs())),
     }
 }
 

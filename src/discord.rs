@@ -1377,7 +1377,10 @@ async fn update_stats_guild(ctx: &Context, guild_id: GuildId) -> Result<()> {
             let bots = list.iter().filter(|m| m.user.bot).count();
             (list.len(), list.len() - bots, bots)
         }
-        Err(_) => (ctx.cache.guild(guild_id).map(|g| g.member_count as usize).unwrap_or(0), 0, 0),
+        Err(e) => {
+            logln!(MOD, "[Stats] member list failed, using the cached count: {e}");
+            (ctx.cache.guild(guild_id).map(|g| g.member_count as usize).unwrap_or(0), 0, 0)
+        }
     };
 
     let channels = guild_id.channels(&ctx.http).await?;
