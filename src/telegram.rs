@@ -30,12 +30,25 @@ impl Client {
         }
 
         for attempt in 0..3 {
-            let res = self.http.post(&url).json(&body).send().await?;
+            let res = match self.http.post(&url).json(&body).send().await {
+                Ok(res) => res,
+                // DNS or TLS not ready yet — a second attempt usually works, and the caller
+                // (connection watchdog) still gets the final error if it does not.
+                Err(e) if attempt < 2 => {
+                    crate::logx::log_to("telegram", &format!("send attempt {} failed, retrying: {e:#}", attempt + 1));
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(e) => return Err(anyhow!("Telegram unreachable after 3 attempts: {e:#}")),
+            };
             let status = res.status();
-            let payload: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
             if status.is_success() {
                 return Ok(());
             }
+            let payload: serde_json::Value = match res.json().await {
+                Ok(v) => v,
+                Err(e) => return Err(anyhow!("Telegram API error: {status} - body unreadable: {e:#}")),
+            };
             let retry_after = payload["parameters"]["retry_after"].as_u64().unwrap_or(5);
             if status.as_u16() == 429 && attempt < 2 {
                 tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;

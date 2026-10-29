@@ -14,6 +14,11 @@ const CONN_URL: &str = "https://www.gstatic.com/generate_204";
 const CONN_HOST: &str = "www.gstatic.com";
 const CONN_FAIL_LIMIT: u32 = 7;
 const CONN_INTERVAL_SECS: u64 = 10;
+/// Clean checks in a row before a restore is announced. One answer is not proof: a link that
+/// just came back often answers once and drops again.
+const CONN_STABLE_CHECKS: u32 = 2;
+/// How many cycles a restore message may keep retrying before it is given up on.
+const ALERT_MAX_ATTEMPTS: u32 = 10;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -125,9 +130,15 @@ impl Tg {
     }
 
     async fn send(&self, topic: Option<i64>, html: &str) {
-        if let Err(e) = self.client.send_html(self.chat_id, topic, html).await {
-            logln!(MOD, "❌ Telegram failed: {e}");
+        if let Err(e) = self.try_send(topic, html).await {
+            logln!(MOD, "❌ Telegram failed: {e:#}");
         }
+    }
+
+    /// Same as `send`, but the caller decides what a failure means. The connection watchdog
+    /// needs the error: right after a reconnect the send itself is what fails.
+    async fn try_send(&self, topic: Option<i64>, html: &str) -> Result<()> {
+        self.client.send_html(self.chat_id, topic, html).await
     }
 
     async fn send_photo(&self, topic: Option<i64>, png: Vec<u8>, caption: &str) {
@@ -1089,21 +1100,43 @@ async fn connection_info(http: &reqwest::Client) -> (String, String) {
     (ip, isp)
 }
 
-async fn send_connection_restored(tg: &Tg, http: &reqwest::Client, latency: f64, down_ms: i64, up_ms: i64) {
+/// A restore is only announced once the link has answered this many times in a row.
+fn restore_is_stable(good_streak: u32) -> bool {
+    good_streak >= CONN_STABLE_CHECKS
+}
+
+/// Next attempt number after a failed alert send, or `None` when the budget is spent.
+fn next_alert_attempt(failed_attempts: u32) -> Option<u32> {
+    let next = failed_attempts + 1;
+    (next < ALERT_MAX_ATTEMPTS).then_some(next)
+}
+
+/// A restore that still has to reach Telegram. Kept around after a failed send: right after a
+/// reconnect DNS and TLS are often not ready yet, so the first attempt is the one that fails.
+#[derive(Clone)]
+struct ConnAlert {
+    restored_at: chrono::DateTime<chrono::Local>,
+    latency: f64,
+    down_ms: i64,
+    up_ms: i64,
+    attempts: u32,
+}
+
+/// One attempt at the restore message, with the failure handed back to the caller.
+async fn try_send_alert(tg: &Tg, http: &reqwest::Client, alert: &ConnAlert) -> Result<()> {
     let (model, codename) = tokio::join!(getprop("ro.product.model"), getprop("ro.product.device"));
     let (ip, isp) = connection_info(http).await;
-    let now = chrono::Local::now();
     let message = connection_restored_message(
         &model,
         &codename,
-        &now.format("%d-%m-%Y, %H:%M:%S").to_string(),
+        &alert.restored_at.format("%d-%m-%Y, %H:%M:%S").to_string(),
         &ip,
         &isp,
-        latency,
-        down_ms,
-        up_ms,
+        alert.latency,
+        alert.down_ms,
+        alert.up_ms,
     );
-    tg.send(crate::config::topic("TOPIC_ID_CONNECTION"), &message).await;
+    tg.try_send(crate::config::topic("TOPIC_ID_CONNECTION"), &message).await
 }
 
 /// `down_ms`/`up_ms` are already durations. (The JS subtracted them from `Date.now()` again,
@@ -1149,8 +1182,31 @@ pub async fn run() -> Result<()> {
         tokio::spawn(async move {
             let mut conn_up = true;
             let mut fails = 0u32;
+            let mut good_streak = 0u32;
+            let mut pending: Option<ConnAlert> = None;
             let mut state = load_state();
             loop {
+                // Retry a restore message that did not make it out last cycle.
+                if let Some(alert) = pending.take() {
+                    pending = match try_send_alert(&tg, &http, &alert).await {
+                        Ok(()) => {
+                            logln!(MOD, "Connection alert delivered (attempt {})", alert.attempts + 1);
+                            None
+                        }
+                        Err(e) => match next_alert_attempt(alert.attempts) {
+                            Some(attempts) => {
+                                logln!(MOD, "Connection alert attempt {attempts} failed, retrying: {e:#}");
+                                Some(ConnAlert { attempts, ..alert })
+                            }
+                            None => {
+                                let attempts = alert.attempts + 1;
+                                logln!(MOD, "Connection alert dropped after {attempts} attempts: {e:#}");
+                                None
+                            }
+                        },
+                    };
+                }
+
                 let (ping_ok, ms, reason) = ping_host(CONN_HOST).await;
                 let code = if ping_ok {
                     http.head(CONN_URL)
@@ -1164,23 +1220,52 @@ pub async fn run() -> Result<()> {
                 };
                 if ping_ok && (code == 200 || code == 204) {
                     fails = 0;
+                    good_streak += 1;
                     if let Some(down) = state.conn_down_ms {
-                        let down_ms = now_ms() - down;
-                        let up_ms = if state.conn_up_ms > 0 { down - state.conn_up_ms } else { 0 };
-                        let alerted = !conn_up;
-                        state.conn_down_ms = None;
-                        state.conn_up_ms = now_ms();
-                        conn_up = true;
-                        save_state(&state);
-                        logln!(MOD, "Connection restored, downtime {}, uptime {}",
-                            format_duration((down_ms / 1000).max(0) as u64),
-                            format_duration((up_ms / 1000).max(0) as u64));
-                        if alerted {
-                            send_connection_restored(&tg, &http, ms, down_ms, up_ms).await;
+                        // A link that just came back usually answers once and then drops again.
+                        // Announcing on the first answer is what made the message arrive over a
+                        // connection that was still unstable, or not arrive at all.
+                        if !restore_is_stable(good_streak) {
+                            crate::util::log_once(
+                                MOD,
+                                "conn-wait-stable",
+                                "Connection answered once, waiting for it to hold before announcing",
+                            );
+                        } else {
+                            let down_ms = now_ms() - down;
+                            let up_ms = if state.conn_up_ms > 0 { down - state.conn_up_ms } else { 0 };
+                            let alerted = !conn_up;
+                            state.conn_down_ms = None;
+                            state.conn_up_ms = now_ms();
+                            conn_up = true;
+                            save_state(&state);
+                            logln!(MOD, "Connection restored, downtime {}, uptime {}",
+                                format_duration((down_ms / 1000).max(0) as u64),
+                                format_duration((up_ms / 1000).max(0) as u64));
+                            if alerted {
+                                let alert = ConnAlert {
+                                    restored_at: chrono::Local::now(),
+                                    latency: ms,
+                                    down_ms,
+                                    up_ms,
+                                    attempts: 0,
+                                };
+                                pending = match try_send_alert(&tg, &http, &alert).await {
+                                    Ok(()) => {
+                                        logln!(MOD, "Connection alert delivered (attempt 1)");
+                                        None
+                                    }
+                                    Err(e) => {
+                                        logln!(MOD, "Connection alert attempt 1 failed, retrying: {e:#}");
+                                        Some(ConnAlert { attempts: 1, ..alert })
+                                    }
+                                };
+                            }
                         }
                     }
                 } else {
                     fails += 1;
+                    good_streak = 0;
                     let why = if ping_ok { format!("HTTP={code}") } else { reason };
                     logln!(MOD, "Connection lost {fails}/{CONN_FAIL_LIMIT} ({why})");
                     if state.conn_down_ms.is_none() {
@@ -1305,5 +1390,21 @@ mod tests {
         assert!(msg.contains("Downtime: 45s"), "{msg}");
         assert!(msg.contains("Uptime: 1h 2m"), "{msg}");
         assert!(!msg.contains("20754"), "{msg}");
+    }
+
+    #[test]
+    fn one_clean_check_is_not_enough_to_announce_a_restore() {
+        assert!(!restore_is_stable(0));
+        assert!(!restore_is_stable(1), "a single answer is what made the alert miss");
+        assert!(restore_is_stable(2));
+        assert!(restore_is_stable(7));
+    }
+
+    #[test]
+    fn alert_retries_stop_after_the_budget() {
+        assert_eq!(next_alert_attempt(0), Some(1));
+        assert_eq!(next_alert_attempt(ALERT_MAX_ATTEMPTS - 2), Some(ALERT_MAX_ATTEMPTS - 1));
+        assert_eq!(next_alert_attempt(ALERT_MAX_ATTEMPTS - 1), None);
+        assert_eq!(next_alert_attempt(ALERT_MAX_ATTEMPTS), None);
     }
 }
