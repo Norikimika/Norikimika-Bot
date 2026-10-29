@@ -34,7 +34,7 @@ modules:
   bing          Bing Rewards automation
 
 env: BOT_TOKEN, CHAT_ID, TOPIC_ID_UPDATE, GITHUB_TOKEN, GITLAB_TOKEN,
-     STATE_DIR (default /root/.local/share/Norikimika-Bot)
+     STATE_DIR (default $HOME/Norikimika-Bot)
 ";
 
 #[tokio::main]

@@ -85,7 +85,7 @@ running.
 | `BOT_TOKEN` | bot, monitor, notification | yes | – | Token from @BotFather. Empty stops the Telegram modules. |
 | `CHAT_ID` | notification | yes | – | Target group/channel id (negative for groups). |
 | `ADMIN_IDS` | bot | no | empty | Comma separated Telegram user ids allowed to run admin commands. Empty means group admins only. The bot never calls `restrictChatMember`: non-admins are refused, not muted. |
-| `STATE_DIR` | all | no | `/root/.local/share/Norikimika-Bot` | State JSON (anti-spam, Telegram offset, `bing.json`), `<module>.log`, rendered PNGs. Written atomically (tmp + rename). |
+| `STATE_DIR` | all | no | `$HOME/Norikimika-Bot` | State JSON (anti-spam, Telegram offset, `bing.json`), `<module>.log`, rendered PNGs. Written atomically (tmp + rename). Default is `$HOME/Norikimika-Bot` — visible on purpose, these are logs you open; `TMPDIR/Norikimika-Bot` if `HOME` is unset. |
 | `ENV_FILE` | all | no | `.env` | Where to read the env file when it is not in the working directory. |
 
 ### Telegram topics
