@@ -27,7 +27,6 @@ const GOODBYE_BG: &[u8] = include_bytes!("../assets/banners/goodbye.jpg");
 const SPOTIFY_MAX_TRACKS: usize = 50;
 const ALONE_TIMEOUT_SECS: u64 = 300;
 const PLAY_FAIL_LIMIT: u32 = 3;
-const YT_FALLBACK_CLIENTS: &[&str] = &["web_safari", "mweb", "tv"];
 const YT_PRIMARY_CLIENT_ARGS: [&str; 2] = ["--extractor-args", "youtube:player_client=android_vr"];
 const STATS_DEFS: &[(&str, &str)] = &[
     ("all", "🧩┃all members"),
@@ -261,38 +260,69 @@ fn can_control_queue(msg: &Message, queue: Option<&GuildQueue>) -> bool {
 
 // ================== yt-dlp plumbing ==================
 
-fn is_bot_check(message: &str) -> bool {
+/// Why yt-dlp failed, read from what it printed.
+///
+/// The old code treated every one of these as "bot check" and silently retried another client —
+/// useless for a format problem and it hid the real message. Only a genuine refusal is retried.
+#[derive(Debug, PartialEq, Eq)]
+enum YtDlpFailure {
+    /// YouTube wants a sign-in / cookie for this client. Another client can still work.
+    BotWall,
+    /// Our format selector asked for something the video does not have: not a client problem.
+    Format,
+    /// The CDN refused or dropped the media transfer.
+    Cdn,
+    Other,
+}
+
+fn classify_ytdlp_error(message: &str) -> YtDlpFailure {
     let lower = message.to_lowercase();
-    [
+    const BOT_WALL: &[&str] = &[
         "confirm you're not a bot",
         "confirm youre not a bot",
         "sign in to confirm",
         "page needs to be reloaded",
         "precondition check failed",
-        "requested format is not available",
-        "no video formats found",
+    ];
+    const FORMAT: &[&str] = &["requested format is not available", "no video formats found", "requested format not available"];
+    const CDN: &[&str] = &[
         "unable to download video data",
         "http error 403",
         "http error 429",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+        "read timed out",
+        "giving up after",
+        "connection reset",
+    ];
+    let hit = |needles: &[&str]| needles.iter().any(|n| lower.contains(*n));
+    if hit(BOT_WALL) {
+        YtDlpFailure::BotWall
+    } else if hit(FORMAT) {
+        YtDlpFailure::Format
+    } else if hit(CDN) {
+        YtDlpFailure::Cdn
+    } else {
+        YtDlpFailure::Other
+    }
+}
+
+/// Audio format chain: `ba` alone fails on videos that only expose a muxed stream, and a chain
+/// always has a next option, so "Requested format is not available" is never our own doing.
+const YT_AUDIO_FORMAT_CHAIN: &str = "ba[abr>0][vcodec=none]/ba/b";
+
+/// Clients tried in order. android_vr needs no PO token and still serves m4a/AAC.
+const YT_CLIENTS: &[&str] = &["android_vr", "web_safari", "mweb", "tv"];
+
+fn client_args(client: &str) -> Vec<String> {
+    vec!["--extractor-args".to_string(), format!("youtube:player_client={client}")]
+}
+
+#[cfg(test)]
+fn client_of(extra: &[String]) -> Option<&str> {
+    extra.iter().find_map(|a| a.strip_prefix("youtube:player_client="))
 }
 
 fn has_client_arg(extra: &[String]) -> bool {
     extra.iter().any(|a| a.contains("player_client"))
-}
-
-/// Next unused extractor client, used to retry once YouTube throws a bot check at us.
-fn next_bot_check_args(extra: &[String]) -> Option<Vec<String>> {
-    let used: Vec<&str> = extra
-        .iter()
-        .filter_map(|a| a.strip_prefix("youtube:player_client="))
-        .collect();
-    YT_FALLBACK_CLIENTS
-        .iter()
-        .find(|c| !used.contains(c))
-        .map(|c| vec!["--extractor-args".to_string(), format!("youtube:player_client={c}")])
 }
 
 async fn run_ytdlp(args: &[String], extra: &[String], target: &str, timeout: Duration) -> Result<String> {
@@ -303,8 +333,17 @@ async fn run_ytdlp(args: &[String], extra: &[String], target: &str, timeout: Dur
     }
     let mut client_args: Vec<String> = Vec::new();
     if !has_client_arg(args) && !has_client_arg(extra) {
-        client_args = YT_PRIMARY_CLIENT_ARGS.iter().map(|s| s.to_string()).collect();
+        client_args = client_args_for_default();
     }
+    // transient CDN hiccups are worth a retry inside yt-dlp; that is a fix, not a dodge
+    all.extend([
+        "--retries".to_string(),
+        "3".to_string(),
+        "--fragment-retries".to_string(),
+        "3".to_string(),
+        "--socket-timeout".to_string(),
+        "15".to_string(),
+    ]);
     all.extend(args.iter().cloned());
     all.extend(client_args);
     all.extend(extra.iter().cloned());
@@ -327,16 +366,48 @@ async fn run_ytdlp(args: &[String], extra: &[String], target: &str, timeout: Dur
     }
 }
 
-/// Run yt-dlp, retrying with a different YouTube client when it reports a bot check.
+fn client_args_for_default() -> Vec<String> {
+    YT_PRIMARY_CLIENT_ARGS.iter().map(|s| s.to_string()).collect()
+}
+
+/// Run yt-dlp, walking to the next client only when YouTube actually refuses the current one.
+/// Every attempt is logged with its reason, so a real failure is visible instead of swallowed.
 async fn spawn_ytdlp(args: Vec<String>, target: String, timeout: Duration) -> Result<String> {
-    let mut extra: Vec<String> = Vec::new();
+    let mut client = YT_CLIENTS[0];
+    let mut extra = client_args(client);
+    let mut refused: Vec<String> = Vec::new();
     loop {
         match run_ytdlp(&args, &extra, &target, timeout).await {
             Ok(out) => return Ok(out),
-            Err(e) => match next_bot_check_args(&extra) {
-                Some(next) if is_bot_check(&e.to_string()) => extra = next,
-                _ => return Err(e),
-            },
+            Err(e) => {
+                let message = format!("{e:#}");
+                let reason = classify_ytdlp_error(&message);
+                logln!(
+                    MOD,
+                    "[yt-dlp] {client} failed ({reason:?}): {}",
+                    crate::util::truncate(message.trim(), 200)
+                );
+                match reason {
+                    YtDlpFailure::BotWall => {
+                        refused.push(client.to_string());
+                        match YT_CLIENTS.iter().find(|c| !refused.contains(*c)) {
+                            Some(next) => {
+                                client = next;
+                                extra = client_args(client);
+                            }
+                            None => {
+                                return Err(anyhow!(
+                                    "every YouTube client refused the request ({refused:?}): {message}"
+                                ))
+                            }
+                        }
+                    }
+                    YtDlpFailure::Format => {
+                        return Err(anyhow!("format selection failed, another client cannot help: {message}"))
+                    }
+                    YtDlpFailure::Cdn | YtDlpFailure::Other => return Err(e),
+                }
+            }
         }
     }
 }
@@ -716,10 +787,22 @@ async fn autoplay_candidate(queue: &GuildQueue, base: &Song) -> Option<Song> {
     None
 }
 
+/// Send and say why it failed: a dropped reply looked exactly like the bot ignoring you.
+async fn send_logged(
+    http: &serenity::http::Http,
+    channel: ChannelId,
+    message: CreateMessage,
+    what: &str,
+) {
+    if let Err(e) = channel.send_message(http, message).await {
+        logln!(MOD, "[Send] {what} failed: {e}");
+    }
+}
+
 async fn send_embed_to(channel: Option<ChannelId>, http: &serenity::http::Http, description: &str, colour: u32) {
     if let Some(channel) = channel {
         let embed = CreateEmbed::new().colour(colour).description(description);
-        let _ = channel.send_message(http, CreateMessage::new().embed(embed)).await;
+        send_logged(http, channel, CreateMessage::new().embed(embed), "embed").await;
     }
 }
 
@@ -881,7 +964,7 @@ fn play_next<'a>(
             embed = embed.thumbnail(format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"));
         }
         if let Some(channel) = channel {
-            let _ = channel.send_message(&ctx.http, CreateMessage::new().embed(embed)).await;
+            send_logged(&ctx.http, channel, CreateMessage::new().embed(embed), "now playing").await;
         }
         logln!(MOD, "[Music Stream Start] {guild_id} | {} - {}", song.title, song.artist);
     })
@@ -900,77 +983,68 @@ struct Stream {
 ///
 /// songbird's `YoutubeDl` keeps the CDN's reply to itself, so a 403 turned into
 /// "played 0ns of the stream"; doing the request here means the log says what YouTube said.
-/// Two extraction strategies: m4a/AAC (what symphonia can decode) and, if the CDN refuses,
-/// the android_vr client.
+/// Extraction goes through [`spawn_ytdlp`], so a refused client walks to the next one and every
+/// attempt is logged; the format chain guarantees a fallback before we even start.
 async fn resolve_stream(web_url: &str) -> Result<Stream> {
-    let mut last = String::from("no attempt ran");
-    for (attempt, extra) in [
-        ["-S", "ext:m4a,acodec:aac"],
-        ["--extractor-args", "youtube:player_client=android_vr"],
-    ]
-    .iter()
-    .enumerate()
-    {
-        let out = tokio::process::Command::new("yt-dlp")
-            .args(["--js-runtimes", "node", "-j", "--no-playlist", "-f", "ba[abr>0][vcodec=none]/best"])
-            .args(extra)
-            .arg(web_url)
-            .output()
-            .await
-            .map_err(|e| anyhow!("run yt-dlp: {e}"))?;
-        if !out.status.success() {
-            last = format!("yt-dlp {}", crate::util::truncate(String::from_utf8_lossy(&out.stderr).trim(), 160));
-            continue;
-        }
-        let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else {
-            last = "yt-dlp printed no JSON".into();
-            continue;
-        };
-        let Some(url) = v["url"].as_str().map(str::to_string) else {
-            last = "yt-dlp found no stream url".into();
-            continue;
-        };
-        let mut headers = reqwest12::header::HeaderMap::new();
-        if let Some(map) = v["http_headers"].as_object() {
-            for (k, val) in map {
-                if let (Ok(name), Ok(value)) = (
-                    reqwest12::header::HeaderName::from_bytes(k.as_bytes()),
-                    reqwest12::header::HeaderValue::from_str(val.as_str().unwrap_or_default()),
-                ) {
+    let args = vec![
+        "--js-runtimes".to_string(),
+        "node".to_string(),
+        "-j".to_string(),
+        "--no-playlist".to_string(),
+        "-f".to_string(),
+        YT_AUDIO_FORMAT_CHAIN.to_string(),
+        "-S".to_string(),
+        "ext:m4a,acodec:aac".to_string(),
+    ];
+    let stdout = spawn_ytdlp(args, web_url.to_string(), Duration::from_secs(90)).await?;
+    let v: Value = serde_json::from_str(&stdout)
+        .map_err(|e| anyhow!("yt-dlp printed no JSON for {web_url}: {e}"))?;
+    let url = v["url"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("yt-dlp found no stream url for {web_url}"))?;
+
+    let mut headers = reqwest12::header::HeaderMap::new();
+    if let Some(map) = v["http_headers"].as_object() {
+        for (k, val) in map {
+            match (
+                reqwest12::header::HeaderName::from_bytes(k.as_bytes()),
+                reqwest12::header::HeaderValue::from_str(val.as_str().unwrap_or_default()),
+            ) {
+                (Ok(name), Ok(value)) => {
                     headers.insert(name, value);
                 }
+                _ => logln!(MOD, "[Music HTTP] dropped unusable header {k}"),
             }
         }
-        let len = v["filesize"].as_u64().or_else(|| v["filesize_approx"].as_u64());
-        let artist = ["artist", "uploader", "channel", "creator"]
-            .iter()
-            .find_map(|key| v[*key].as_str())
-            .map(clean_artist);
-        let mut req = crate::util::sb_client().get(&url).headers(headers.clone());
-        if let Some(l) = len {
-            req = req.header(reqwest12::header::RANGE, format!("bytes=0-{}", l.saturating_sub(1)));
-        }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                logln!(
-                    MOD,
-                    "[Music HTTP] {status} {codec} {len:?} bytes",
-                    status = resp.status(),
-                    codec = v["acodec"].as_str().unwrap_or("?"),
-                    len = len
-                );
-                return Ok(Stream { url, headers, len, artist });
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                last = format!("{status}: {}", crate::util::truncate(body.trim(), 160));
-            }
-            Err(e) => last = format!("{e:#}"),
-        }
-        logln!(MOD, "[Music HTTP] attempt {} refused: {last}", attempt + 1);
     }
-    Err(anyhow!("{last}"))
+    let len = v["filesize"].as_u64().or_else(|| v["filesize_approx"].as_u64());
+    let artist = ["artist", "uploader", "channel", "creator"]
+        .iter()
+        .find_map(|key| v[*key].as_str())
+        .map(clean_artist);
+
+    let mut req = crate::util::sb_client().get(&url).headers(headers.clone());
+    if let Some(l) = len {
+        req = req.header(reqwest12::header::RANGE, format!("bytes=0-{}", l.saturating_sub(1)));
+    }
+    let resp = req.send().await.map_err(|e| anyhow!("CDN request failed: {e:#}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "CDN refused the stream: {status}: {}",
+            crate::util::truncate(body.trim(), 160)
+        ));
+    }
+    logln!(
+        MOD,
+        "[Music HTTP] {status} {codec} {len:?} bytes",
+        status = resp.status(),
+        codec = v["acodec"].as_str().unwrap_or("?"),
+        len = len
+    );
+    Ok(Stream { url, headers, len, artist })
 }
 
 struct TrackEndNotifier {
@@ -1226,14 +1300,18 @@ async fn handle_member_join(ctx: &Context, member: &Member) {
         return;
     };
     let count = ctx.cache.guild(member.guild_id).map(|g| g.member_count).unwrap_or(0);
-    let _ = ChannelId::new(channel_id)
+    if let Err(e) = ChannelId::new(channel_id)
         .send_message(
             &ctx.http,
             CreateMessage::new()
                 .content(format!("You are member **#{count}** <@{}>", member.user.id))
                 .add_file(CreateAttachment::bytes(png, "welcome.png")),
         )
-        .await;
+        .await
+    {
+        logln!(MOD, "[Welcome] send failed: {e}");
+        return;
+    }
     logln!(MOD, "[Welcome] Sent for {}", member.user.name);
 }
 
@@ -1252,14 +1330,18 @@ async fn handle_member_leave(ctx: &Context, _guild_id: GuildId, user: &User) {
         logln!(MOD, "[Goodbye] banner render failed");
         return;
     };
-    let _ = ChannelId::new(channel_id)
+    if let Err(e) = ChannelId::new(channel_id)
         .send_message(
             &ctx.http,
             CreateMessage::new()
                 .content(format!("See you <@{}>", user.id))
                 .add_file(CreateAttachment::bytes(png, "goodbye.png")),
         )
-        .await;
+        .await
+    {
+        logln!(MOD, "[Goodbye] send failed: {e}");
+        return;
+    }
     logln!(MOD, "[Goodbye] Sent for {}", user.name);
 }
 
@@ -1313,16 +1395,21 @@ async fn update_stats_guild(ctx: &Context, guild_id: GuildId) -> Result<()> {
         });
         match existing {
             Some(channel) if channel.name != target => {
-                let _ = ctx.http.edit_channel(channel.id, &EditChannel::new().name(&target), None).await;
+                if let Err(e) = ctx.http.edit_channel(channel.id, &EditChannel::new().name(&target), None).await {
+                    logln!(MOD, "[Stats] rename to {target} failed: {e}");
+                }
             }
             Some(_) => {}
             None => {
-                let _ = guild_id
+                if let Err(e) = guild_id
                     .create_channel(
                         &ctx.http,
                         CreateChannel::new(&target).kind(ChannelType::Voice).category(category_id),
                     )
-                    .await;
+                    .await
+                {
+                    logln!(MOD, "[Stats] create {target} failed: {e}");
+                }
             }
         }
     }
@@ -1336,7 +1423,7 @@ fn embed(description: &str, colour: u32) -> CreateEmbed {
 }
 
 async fn reply_embed(ctx: &Context, msg: &Message, description: &str, colour: u32) {
-    let _ = msg.channel_id.send_message(&ctx.http, CreateMessage::new().embed(embed(description, colour))).await;
+    send_logged(&ctx.http, msg.channel_id, CreateMessage::new().embed(embed(description, colour)), "reply").await;
 }
 
 async fn member_voice_channel(ctx: &Context, msg: &Message) -> Option<ChannelId> {
@@ -1421,7 +1508,8 @@ async fn cmd_help(ctx: &Context, msg: &Message) {
                     )),
             ),
         )
-        .await;
+        .await
+        .map_err(|e| logln!(MOD, "[Send] help failed: {e}"));
 }
 
 async fn cmd_queue(ctx: &Context, msg: &Message) {
@@ -1471,7 +1559,8 @@ async fn cmd_queue(ctx: &Context, msg: &Message) {
                     ))),
             ),
         )
-        .await;
+        .await
+        .map_err(|e| logln!(MOD, "[Send] queue list failed: {e}"));
 }
 
 /// Turn a `!p` argument into candidate songs (playlist/Spotify/Apple/SoundCloud/link/search).
@@ -1609,7 +1698,7 @@ async fn cmd_play(ctx: &Context, msg: &Message, query: &str) -> Result<()> {
                 if let Some(id) = song_id(first) {
                     card = card.thumbnail(format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"));
                 }
-                let _ = msg.channel_id.send_message(&ctx.http, CreateMessage::new().embed(card)).await;
+                send_logged(&ctx.http, msg.channel_id, CreateMessage::new().embed(card), "queue card").await;
             }
         }
         None => {}
@@ -1685,7 +1774,9 @@ async fn cmd_disconnect(ctx: &Context, msg: &Message) {
     logln!(MOD, "[Disconnect Command] {guild_id} | Disconnected by {}", msg.author.name);
     destroy_queue(guild_id).await;
     if let Some(songbird) = songbird::get(ctx).await.map(|s| s.clone()) {
-        let _ = songbird.remove(guild_id).await;
+        if let Err(e) = songbird.remove(guild_id).await {
+            logln!(MOD, "[Voice] leave failed: {e}");
+        }
     }
     reply_embed(ctx, msg, "Music stopped and disconnected from voice channel.", 0xFF0000).await;
 }
@@ -1744,6 +1835,7 @@ impl EventHandler for Handler {
         if !content.starts_with('!') {
             return;
         }
+        // typing indicator only: a failure here is noise, not a lost reply
         let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
         let mut parts = content[1..].split_whitespace();
         let command = parts.next().unwrap_or("").to_lowercase();
@@ -1866,22 +1958,31 @@ mod tests {
     }
 
     #[test]
-    fn bot_check_detection_and_fallbacks() {
-        assert!(is_bot_check("Sign in to confirm you're not a bot"));
-        assert!(is_bot_check("HTTP Error 429"));
-        assert!(!is_bot_check("all good"));
-        let used = vec!["youtube:player_client=web_safari".to_string()];
+    fn ytdlp_failures_are_classified_not_guessed() {
+        // only a real refusal is worth another client
         assert_eq!(
-            next_bot_check_args(&used),
-            Some(vec!["--extractor-args".into(), "youtube:player_client=mweb".into()])
+            classify_ytdlp_error("ERROR: [youtube] abc: Sign in to confirm you're not a bot"),
+            YtDlpFailure::BotWall
         );
-        let all_used = vec![
-            "youtube:player_client=web_safari".to_string(),
-            "youtube:player_client=mweb".to_string(),
-            "youtube:player_client=tv".to_string(),
-        ];
-        assert_eq!(next_bot_check_args(&all_used), None);
+        assert_eq!(classify_ytdlp_error("ERROR: Precondition check failed."), YtDlpFailure::BotWall);
+        // a format problem cannot be fixed by switching client, so it must not be retried
+        assert_eq!(
+            classify_ytdlp_error("ERROR: [youtube] abc: Requested format is not available"),
+            YtDlpFailure::Format
+        );
+        assert_eq!(
+            classify_ytdlp_error("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
+            YtDlpFailure::Cdn
+        );
+        assert_eq!(classify_ytdlp_error("ERROR: something else entirely"), YtDlpFailure::Other);
+    }
+
+    #[test]
+    fn audio_format_chain_always_has_a_fallback() {
+        assert!(YT_AUDIO_FORMAT_CHAIN.contains('/'));
+        assert!(YT_AUDIO_FORMAT_CHAIN.ends_with("/ba/b"));
         assert!(!has_client_arg(&["--no-warnings".to_string()]));
+        assert_eq!(client_of(&client_args("tv")), Some("tv"));
     }
 
     #[test]

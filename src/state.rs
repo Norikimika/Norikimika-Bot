@@ -19,10 +19,15 @@ impl State {
                     match serde_json::from_str::<Value>(&clean) {
                         Ok(Value::Object(m)) => m,
                         _ => {
-                            let _ = std::fs::rename(&path, path.with_extension(format!(
+                            let quarantine = path.with_extension(format!(
                                 "corrupt-{}",
                                 chrono::Local::now().timestamp()
-                            )));
+                            ));
+                            if let Err(e) = std::fs::rename(&path, &quarantine) {
+                                logln!("state", "could not quarantine {name}: {e}");
+                            } else {
+                                logln!("state", "{name} was corrupt, moved to {}", quarantine.display());
+                            }
                             Map::new()
                         }
                     }

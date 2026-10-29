@@ -445,7 +445,9 @@ impl Monitor {
     fn setup_storage(&self) {
         let path = state_path();
         if !path.exists() {
-            let _ = save_entries(&[]);
+            if let Err(e) = save_entries(&[]) {
+                logln!(MOD, "could not create {path:?}: {e}");
+            }
             logln!(MOD, "JSON storage initialized (new file)");
             return;
         }
@@ -453,7 +455,9 @@ impl Monitor {
         let valid = st.map.get("entries").map(|v| v.is_array()).unwrap_or(false);
         if !valid {
             logln!(MOD, "WARNING JSON file invalid (expected a list), resetting.");
-            let _ = save_entries(&[]);
+            if let Err(e) = save_entries(&[]) {
+                logln!(MOD, "reset failed: {e}");
+            }
             return;
         }
         logln!(MOD, "JSON storage loaded ({} entries)", load_entries().len());

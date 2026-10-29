@@ -178,7 +178,7 @@ impl Bot {
         if self.is_admin(msg.chat_id, msg.user_id).await {
             return true;
         }
-        let _ = self
+        if let Err(e) = self
             .send(
                 msg.chat_id,
                 msg.thread_id,
@@ -186,7 +186,10 @@ impl Bot {
                 Some(msg.message_id),
                 None,
             )
-            .await;
+            .await
+        {
+            logln!(MOD, "could not warn a non-admin: {e}");
+        }
         false
     }
 
@@ -200,6 +203,7 @@ impl Bot {
                 if let Some(t) = thread {
                     body["message_thread_id"] = json!(t);
                 }
+                // typing indicator only: logging every failure would drown the log
                 let _ = http
                     .post(format!("https://api.telegram.org/bot{token}/sendChatAction"))
                     .json(&body)
@@ -1235,7 +1239,7 @@ async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
                 bot.edit(msg.chat_id, info_message, &tt_status_text(platform, &media.uploader, &title, "Failed"), None).await?;
             } else {
                 if let Some(audio) = &media.audio {
-                    let _ = bot
+                    if let Err(e) = bot
                         .send_file(
                             "sendAudio",
                             msg.chat_id,
@@ -1245,7 +1249,10 @@ async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
                             "audio.mp3",
                             json!({ "title": title, "performer": media.uploader }),
                         )
-                        .await;
+                        .await
+                    {
+                        logln!(MOD, "[TT] audio upload failed: {e}");
+                    }
                 }
                 bot.edit(msg.chat_id, info_message, &tt_status_text(platform, &media.uploader, &title, "Success"), None).await?;
             }
