@@ -46,6 +46,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ !matrix.android }}
+        with:
+          components: clippy
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ matrix.android }}
         with:
@@ -62,6 +64,11 @@ jobs:
       - name: Test
         if: ${{ !matrix.android }}
         run: cargo test --release --locked
+
+      # lints catch the classes of bug a test cannot: swallowed results, needless clones, panics
+      - name: Clippy
+        if: ${{ !matrix.android }}
+        run: cargo clippy --release --all-targets --locked -- -D warnings
 
       - name: Build
         if: ${{ !matrix.android }}
