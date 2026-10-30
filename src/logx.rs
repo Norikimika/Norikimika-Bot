@@ -7,7 +7,7 @@ fn stamp() -> String {
 /// Append to <state_dir>/<name>.log and echo to stderr.
 pub fn log_to(name: &str, msg: &str) {
     // the module name is part of the line: without it every module looks the same in the terminal
-    let line = format!("[{}] {}: {}\n", stamp(), name, msg);
+    let line = format!("[{}] {}: {}\n", stamp(), name, crate::util::redact_token(msg));
     eprintln!("{}", line.trim_end());
     let path = crate::config::state_file(&format!("{name}.log"));
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {

@@ -62,11 +62,16 @@ pub fn classify(message: &str) -> Failure {
     }
 }
 
-/// Audio format chain, same as the JS bot: 251 is Opus 143k/48kHz, 140 is AAC 129k/44.1kHz.
+/// Audio format chain: 140 is AAC 129k/44.1kHz in m4a, 251 is Opus 143k/48kHz in webm.
+///
+/// 140 comes first because Telegram stores the cover but only renders it for m4a/mp3 — the
+/// response to sendAudio says "kept the cover" for a webm track and the client still shows nothing.
+/// 140 is YouTube's own AAC stream, downloaded as-is: this is a different source format, not a
+/// re-encode, so nothing is lost compared to the video's audio.
 ///
 /// It stops at "any audio" instead of falling through to `b`: a client that only offers images
 /// would otherwise hand us a jpeg and call it a download.
-pub const AUDIO_FORMAT_CHAIN: &str = "251/140/bestaudio/ba";
+pub const AUDIO_FORMAT_CHAIN: &str = "140/251/bestaudio/ba";
 
 /// Fallback clients, tried only after yt-dlp's own default set has failed.
 ///

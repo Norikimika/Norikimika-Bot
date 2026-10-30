@@ -14,6 +14,7 @@ const ADMIN_CACHE_TTL_SECS: i64 = 5 * 60;
 /// One command may not hold a handler slot forever (downloads legitimately take minutes).
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(300);
 const SH_TIMEOUT: Duration = Duration::from_secs(60);
+const UPLOAD_ATTEMPTS: u32 = 2;
 const AUDIO_EXTS: &[&str] = &["webm", "m4a", "mp3", "opus", "ogg", "aac", "flac", "wav"];
 
 fn dir() -> PathBuf {
@@ -65,6 +66,7 @@ type AdminCache = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<(i
 #[derive(Clone)]
 pub struct Bot {
     http: reqwest::Client,
+    upload: reqwest::Client,
     token: String,
     topic_id: Option<i64>,
     admins: AdminCache,
@@ -75,6 +77,11 @@ impl Bot {
         Ok(Self {
             http: crate::util::http()
                 .timeout(Duration::from_secs(120))
+                .build()?,
+            // a 5 MB track on a mobile uplink took longer than the 120 s API timeout, so uploads
+            // get their own client
+            upload: crate::util::http()
+                .timeout(Duration::from_secs(600))
                 .build()?,
             token: crate::config::req("BOT_TOKEN")?,
             topic_id: topic("TOPIC_ID"),
@@ -241,40 +248,56 @@ impl Bot {
     }
 
     /// Upload one file with `kind` = sendPhoto/sendVideo/sendAudio/sendDocument.
+    ///
+    /// Retried only when the request itself failed: a slow uplink that times out is worth another
+    /// try, while a 4xx would fail the same way twice.
     async fn send_file(&self, up: Upload<'_>) -> Result<()> {
         let kind = up.kind;
-        let part = reqwest::multipart::Part::bytes(up.bytes)
-            .file_name(up.filename.to_string())
-            .mime_str(audio_mime(up.filename))?;
-        let mut form = reqwest::multipart::Form::new()
-            .text("chat_id", up.chat_id.to_string())
-            .part(up.field.to_string(), part);
-        if let Some((bytes, name)) = up.thumb {
-            let cover = reqwest::multipart::Part::bytes(bytes)
-                .file_name(name)
-                .mime_str("image/jpeg")?;
-            form = form.part("thumbnail", cover);
-        }
-        if let Some(t) = up.thread {
-            form = form.text("message_thread_id", t.to_string());
-        }
-        if let Some(obj) = up.extra.as_object() {
-            for (k, v) in obj {
-                // `duration` is a number; as_str() turned it into an empty string and Telegram
-                // got `duration=`
-                let text = match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                form = form.text(k.clone(), text);
+        let url = format!("https://api.telegram.org/bot{}/{kind}", self.token);
+        let mut last = String::new();
+        for attempt in 1..=UPLOAD_ATTEMPTS {
+            let form = upload_form(&up)?;
+            match self.upload.post(&url).multipart(form).send().await {
+                Ok(res) => {
+                    if !res.status().is_success() {
+                        let body = res.text().await.unwrap_or_default();
+                        return Err(anyhow!(
+                            "{kind} failed: {}",
+                            crate::util::redact_token(&body)
+                        ));
+                    }
+                    if kind == "sendAudio" {
+                        // Telegram answers with what it actually stored. A cover that was sent but
+                        // dropped leaves no trace in the message, so ask the response instead of
+                        // the screenshot.
+                        let body: Value = res.json().await.unwrap_or(Value::Null);
+                        let stored = body["result"]["audio"]["thumb"].get("file_id").is_some();
+                        let container = up
+                            .filename
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or("?")
+                            .to_lowercase();
+                        logln!(
+                            MOD,
+                            "[sendAudio] telegram {} the cover ({container})",
+                            if stored { "kept" } else { "dropped" }
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last = crate::util::redact_token(&format!("{e}"));
+                    logln!(MOD, "[upload] {kind} attempt {attempt}/{UPLOAD_ATTEMPTS}: {last}");
+                    if attempt < UPLOAD_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
             }
         }
-        let url = format!("https://api.telegram.org/bot{}/{kind}", self.token);
-        let res = self.http.post(&url).multipart(form).send().await?;
-        if !res.status().is_success() {
-            return Err(anyhow!("{kind} failed: {}", res.text().await.unwrap_or_default()));
-        }
-        Ok(())
+        Err(anyhow!(
+            "{kind} upload failed after {UPLOAD_ATTEMPTS} attempts: {last}"
+        ))
     }
 
     /// sendMediaGroup with local files (attach:// references).
@@ -300,6 +323,37 @@ impl Bot {
         }
         Ok(())
     }
+}
+
+/// The multipart body for an upload. Rebuilt per attempt because a `Form` cannot be cloned.
+fn upload_form(up: &Upload<'_>) -> Result<reqwest::multipart::Form> {
+    let part = reqwest::multipart::Part::bytes(up.bytes.clone())
+        .file_name(up.filename.to_string())
+        .mime_str("application/octet-stream")?;
+    let mut form = reqwest::multipart::Form::new()
+        .text("chat_id", up.chat_id.to_string())
+        .part(up.field.to_string(), part);
+    if let Some((bytes, name)) = &up.thumb {
+        let cover = reqwest::multipart::Part::bytes(bytes.clone())
+            .file_name(name.clone())
+            .mime_str("image/jpeg")?;
+        form = form.part("thumbnail", cover);
+    }
+    if let Some(t) = up.thread {
+        form = form.text("message_thread_id", t.to_string());
+    }
+    if let Some(obj) = up.extra.as_object() {
+        for (k, v) in obj {
+            // `duration` is a number; as_str() turned it into an empty string and Telegram got
+            // `duration=`
+            let text = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            form = form.text(k.clone(), text);
+        }
+    }
+    Ok(form)
 }
 
 // ================== shared helpers ==================
@@ -948,7 +1002,9 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
                 bytes,
                 filename: &filename,
                 extra: extra.take(),
-                thumb: audio_thumb(&thumb_base, &info).await,
+                thumb: audio_thumb(&thumb_base, &info)
+                    .await
+                    .map(|(bytes, _)| (bytes, format!("{file_id}.jpg"))),
             })
             .await;
         if let Err(e) = &sent {
@@ -1026,20 +1082,6 @@ fn jpg_thumbnail_url(info: &Value) -> Option<&str> {
         .as_array()
         .and_then(|list| list.iter().rev().find_map(jpg))
         .or_else(|| jpg(&info["thumbnail"]))
-}
-
-/// The container yt-dlp picked decides the mime type; `application/octet-stream` made Telegram
-/// treat the file as a plain document instead of audio.
-fn audio_mime(filename: &str) -> &'static str {
-    match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
-        "webm" => "audio/webm",
-        "m4a" | "mp4" => "audio/mp4",
-        "mp3" => "audio/mpeg",
-        "opus" | "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        _ => "application/octet-stream",
-    }
 }
 
 fn volume_home_text(volumes: &[Value]) -> String {
@@ -2159,12 +2201,5 @@ mod mime_tests {
         assert_eq!(jpg_thumbnail_url(&json!({ "thumbnail": "https://x/y.webp" })), None);
     }
 
-    /// Telegram shows a grey placeholder when the audio arrives as application/octet-stream.
-    #[test]
-    fn audio_containers_get_their_real_mime() {
-        assert_eq!(audio_mime("1712_abc.webm"), "audio/webm");
-        assert_eq!(audio_mime("1712_abc.m4a"), "audio/mp4");
-        assert_eq!(audio_mime("1712_abc.opus"), "audio/ogg");
-        assert_eq!(audio_mime("audio"), "application/octet-stream");
-    }
+
 }

@@ -142,6 +142,35 @@ pub fn escape_html(text: &str) -> String {
 }
 
 /// Truncate on a char boundary, appending "..." like the JS version.
+/// Hide a bot token inside arbitrary text.
+///
+/// reqwest quotes the URL it failed on, and that URL contains the token: one upload timeout put a
+/// live token into telegram.log and into the chat. Every log line goes through this first.
+pub fn redact_token(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("bot") {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let after = &tail[3..];
+        let digits = after.chars().take_while(char::is_ascii_digit).count();
+        let colon = after[digits..].starts_with(':');
+        let secret = after[digits + usize::from(colon)..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .count();
+        if digits > 0 && colon && secret >= 20 {
+            out.push_str("bot<redacted>");
+            rest = &after[digits + 1 + secret..];
+        } else {
+            out.push_str("bot");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -251,5 +280,18 @@ mod tests {
             .with_no_client_auth();
         // songbird builds exactly this client for yt-dlp; it panicked before the fix
         let _songbird_style = reqwest12::Client::new();
+    }
+
+    /// A timeout quotes the URL, and that URL carries the token: it reached telegram.log and the
+    /// chat once already.
+    #[test]
+    fn bot_tokens_never_reach_a_log() {
+        let leaked = "error sending request for url (https://api.telegram.org/bot123456789:AAF-xyz_ABCdefGHIjklMNOpqrSTUvwx/sendAudio)";
+        let clean = redact_token(leaked);
+        assert!(!clean.contains("AAF-xyz"), "token survived: {clean}");
+        assert!(clean.contains("bot<redacted>/sendAudio"), "{clean}");
+        // nothing token-shaped, nothing to hide
+        assert_eq!(redact_token("bot is running"), "bot is running");
+        assert_eq!(redact_token("robot:1"), "robot:1");
     }
 }
