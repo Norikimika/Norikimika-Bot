@@ -30,6 +30,12 @@ pub fn classify(message: &str) -> Failure {
         "sign in to confirm",
         "page needs to be reloaded",
         "precondition check failed",
+        // A client that needs a PO token we do not have skips its formats and then dies with a
+        // 403 from the CDN. That 403 is not the CDN's fault, so it must not stop the fallback:
+        // another client serves the same video fine.
+        "po token",
+        "po_token",
+        "gvs po token",
     ];
     const FORMAT: &[&str] = &[
         "requested format is not available",
@@ -56,12 +62,36 @@ pub fn classify(message: &str) -> Failure {
     }
 }
 
-/// Audio format chain: `ba` alone fails on videos that only expose a muxed stream, and a chain
-/// always has a next option, so "Requested format is not available" is never our own doing.
-pub const AUDIO_FORMAT_CHAIN: &str = "ba[abr>0][vcodec=none]/ba/b";
+/// Audio format chain, same as the JS bot: 251 is Opus 143k/48kHz, 140 is AAC 129k/44.1kHz.
+///
+/// It stops at "any audio" instead of falling through to `b`: a client that only offers images
+/// would otherwise hand us a jpeg and call it a download.
+pub const AUDIO_FORMAT_CHAIN: &str = "251/140/bestaudio/ba";
 
-/// Clients tried in order. android_vr needs no PO token and still serves m4a/AAC.
-pub const CLIENTS: &[&str] = &["android_vr", "web_safari", "mweb", "tv"];
+/// Fallback clients, tried only after yt-dlp's own default set has failed.
+///
+/// Pinning one client used to be the only way to get around a bot wall, but YouTube now hands out
+/// a different wall per client: `tv` answers "The page needs to be reloaded", `mweb` and
+/// `android_vr` demand a PO token, `web_safari` offers images only. yt-dlp's default set is kept
+/// current with all of that and works on videos every single pinned client refuses, so it goes
+/// first and this list is only the safety net.
+pub const CLIENTS: &[&str] = &["tv", "web_safari", "mweb", "android_vr"];
+
+/// yt-dlp needs an external JavaScript runtime to solve YouTube's challenge; without one it warns
+/// "n challenge solving failed" and most formats go missing. Deno is enabled by default, node and
+/// bun are not, so whatever is installed gets passed explicitly.
+const JS_RUNTIMES: &[&str] = &["deno", "node", "bun"];
+
+fn on_path(binary: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
+        .unwrap_or(false)
+}
+
+fn js_runtime() -> Option<&'static str> {
+    static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| JS_RUNTIMES.iter().copied().find(|rt| on_path(rt)))
+}
 
 fn client_args(client: &str) -> Vec<String> {
     vec![
@@ -79,6 +109,16 @@ fn base_args() -> Vec<String> {
     if let Some(proxy) = crate::config::get("YTDLP_PROXY").filter(|p| !p.is_empty()) {
         all.push("--proxy".to_string());
         all.push(proxy);
+    }
+    // A cookies.txt from a signed-in browser is the only thing that clears a bot wall for good;
+    // every client falls back to it before giving up.
+    if let Some(jar) = crate::config::get("YTDLP_COOKIES").filter(|p| !p.is_empty()) {
+        all.push("--cookies".to_string());
+        all.push(jar);
+    }
+    if let Some(rt) = js_runtime() {
+        all.push("--js-runtimes".to_string());
+        all.push(rt.to_string());
     }
     // transient CDN hiccups are worth a retry inside yt-dlp; that is a fix, not a dodge
     all.extend([
@@ -123,7 +163,12 @@ async fn run_once(
     }
 }
 
-/// Run yt-dlp, moving to the next client only when YouTube refused this one.
+/// Run yt-dlp, moving to the next client on every failure the JS bot also retried.
+///
+/// That is all of them but an unrecognised error: a bot wall, a missing PO token, a format the
+/// client does not serve and a CDN refusal are all client-specific in practice — the original
+/// `isBotCheck` matched the same set. Only an error we cannot read stops the walk, because then
+/// nothing says another client would do better.
 pub async fn run(
     args: Vec<String>,
     target: String,
@@ -134,8 +179,37 @@ pub async fn run(
     if has_client_arg(&args) {
         return run_once(&args, None, &target, timeout).await;
     }
-    let mut refused: Vec<&'static str> = Vec::new();
-    let mut last = String::new();
+    if js_runtime().is_none() {
+        logln!(
+            module,
+            "[yt-dlp] no JavaScript runtime found ({}), YouTube challenges will fail: \
+             install node (pkg install nodejs) or deno",
+            JS_RUNTIMES.join("/")
+        );
+    }
+
+    // First try yt-dlp's own client set: it tracks what YouTube currently serves.
+    let mut tried: Vec<String> = Vec::new();
+    match run_once(&args, None, &target, timeout).await {
+        Ok(out) => return Ok(out),
+        Err(e) => {
+            let message = format!("{e:#}");
+            let reason = classify(&message);
+            logln!(
+                module,
+                "[yt-dlp] default clients failed ({reason:?}): {}",
+                crate::util::truncate(message.trim(), 300)
+            );
+            if reason == Failure::Other {
+                return Err(e);
+            }
+            tried.push(format!(
+                "default {reason:?}: {}",
+                crate::util::truncate(message.trim(), 200)
+            ));
+        }
+    }
+
     for client in CLIENTS {
         match run_once(&args, Some(client), &target, timeout).await {
             Ok(out) => return Ok(out),
@@ -147,24 +221,17 @@ pub async fn run(
                     "[yt-dlp] {client} failed ({reason:?}): {}",
                     crate::util::truncate(message.trim(), 300)
                 );
-                match reason {
-                    Failure::BotWall => {
-                        refused.push(client);
-                        last = message;
-                    }
-                    Failure::Format => {
-                        return Err(anyhow!(
-                            "format selection failed, another client cannot help: {message}"
-                        ))
-                    }
-                    Failure::Cdn | Failure::Other => return Err(e),
+                if reason == Failure::Other {
+                    return Err(e);
                 }
+                tried.push(format!(
+                    "{client} {reason:?}: {}",
+                    crate::util::truncate(message.trim(), 200)
+                ));
             }
         }
     }
-    Err(anyhow!(
-        "every YouTube client refused the request ({refused:?}): {last}"
-    ))
+    Err(anyhow!("every attempt failed:\n{}", tried.join("\n")))
 }
 
 #[cfg(test)]
@@ -181,6 +248,25 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_po_token_is_a_client_problem_not_a_cdn_one() {
+        // real message: android_vr skipped every format, then the CDN answered 403
+        let message = "WARNING: [youtube] abc: android_vr client https formats require a GVS PO Token \
+which was not provided.\nERROR: unable to download video data: HTTP Error 403: Forbidden";
+        assert_eq!(classify(message), Failure::BotWall, "another client must be tried");
+        // a 403 with no PO token in it is still a CDN problem: retrying clients will not help
+        assert_eq!(
+            classify("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
+            Failure::Cdn
+        );
+    }
+
+    #[test]
+    fn a_runtime_that_is_not_installed_is_not_reported() {
+        assert!(!on_path("norikimika-no-such-runtime"));
+        assert!(JS_RUNTIMES.contains(&"node"));
+    }
+
+    #[test]
     fn format_errors_are_not_blamed_on_the_client() {
         assert_eq!(
             classify("ERROR: Requested format is not available"),
@@ -188,6 +274,21 @@ mod tests {
         );
         assert_eq!(classify("ERROR: HTTP Error 403: Forbidden"), Failure::Cdn);
         assert_eq!(classify("ERROR: something else entirely"), Failure::Other);
+    }
+
+    #[test]
+    fn every_client_failure_the_js_bot_retried_is_retried_here() {
+        // the JS bot's isBotCheck matched these, so a format or CDN error must not stop the walk
+        for message in [
+            "ERROR: Requested format is not available",
+            "ERROR: No video formats found",
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+            "ERROR: HTTP Error 429: Too Many Requests",
+        ] {
+            assert_ne!(classify(message), Failure::Other, "{message} must be retried");
+        }
+        // nothing to act on: another client will not help
+        assert_eq!(classify("ERROR: Unsupported URL: foo"), Failure::Other);
     }
 
     #[test]

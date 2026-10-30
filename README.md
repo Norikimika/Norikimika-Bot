@@ -115,6 +115,7 @@ All optional; empty means the main chat with no thread. The value is a `message_
 | `DOWNLOAD_DIR` | bot | `STATE_DIR/media` | Scratch space for `/tt`, audio and thumbnails. |
 | `BING_WORK_DIR` | bing | `STATE_DIR` | Screenshots and `uiautomator` dumps. **Must be absolute** — a relative value is resolved against the bot's cwd, which is how the dump used to be written somewhere else and then fail to read. |
 | `YTDLP_PROXY` | discord, bot | – | Passed as `--proxy` to every yt-dlp call. |
+| `YTDLP_COOKIES` | discord, bot | – | Path to a `cookies.txt` exported from a signed-in browser, passed as `--cookies`. The only reliable way past a YouTube bot wall; without it every client is tried and the last one wins or fails. |
 
 ### Repositories and APIs
 

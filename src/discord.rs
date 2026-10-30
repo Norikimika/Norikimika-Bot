@@ -837,9 +837,8 @@ struct Stream {
 /// Extraction goes through [`crate::ytdlp::run`], so a refused client walks to the next one and every
 /// attempt is logged; the format chain guarantees a fallback before we even start.
 async fn resolve_stream(web_url: &str) -> Result<Stream> {
+    // the runtime is chosen in ytdlp::base_args, from what is actually installed
     let args = vec![
-        "--js-runtimes".to_string(),
-        "node".to_string(),
         "-j".to_string(),
         "--no-playlist".to_string(),
         "-f".to_string(),
