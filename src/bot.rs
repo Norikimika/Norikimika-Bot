@@ -1723,6 +1723,12 @@ fn parse_message(v: &Value) -> Option<Msg> {
 /// Telegram's update offset has to survive restarts. It used to start at 0 every boot, so the
 /// whole 24h backlog was replayed — one `/reboot` therefore rebooted the device on every start.
 fn offset_path() -> PathBuf {
+    crate::config::state_file("telegram.json")
+}
+
+/// The offset used to live in `telegram-offset.json`. It is still read once so an upgrade keeps
+/// its position instead of falling back to "newest update" and losing what arrived while down.
+fn legacy_offset_path() -> PathBuf {
     crate::config::state_file("telegram-offset.json")
 }
 
@@ -1742,7 +1748,22 @@ fn write_offset(path: &std::path::Path, offset: i64) -> std::io::Result<()> {
 }
 
 fn load_offset() -> Option<i64> {
-    read_offset(&offset_path())
+    load_offset_from(&offset_path(), &legacy_offset_path())
+}
+
+fn load_offset_from(path: &std::path::Path, legacy: &std::path::Path) -> Option<i64> {
+    if let Some(offset) = read_offset(path) {
+        return Some(offset);
+    }
+    let offset = read_offset(legacy)?;
+    if let Err(e) = write_offset(path, offset) {
+        logln!(MOD, "offset migrate failed: {e}");
+        return Some(offset);
+    }
+    if let Err(e) = std::fs::remove_file(legacy) {
+        logln!(MOD, "old offset file not removed: {e}");
+    }
+    Some(offset)
 }
 
 fn save_offset(offset: i64) {
@@ -1994,12 +2015,26 @@ mod offset_tests {
     #[test]
     fn offset_survives_a_restart() {
         let dir = std::env::temp_dir().join(format!("norikimika-offset-{}", std::process::id()));
-        let path = dir.join("telegram-offset.json");
+        let path = dir.join("telegram.json");
         assert_eq!(read_offset(&path), None, "no state file yet");
         write_offset(&path, 4242).expect("write offset");
         assert_eq!(read_offset(&path), Some(4242), "first write must be readable");
         write_offset(&path, 4243).expect("rewrite offset");
         assert_eq!(read_offset(&path), Some(4243), "restart resumes at the newest offset");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Renaming the file must not throw away the saved position.
+    #[test]
+    fn old_offset_file_is_carried_over() {
+        let dir = std::env::temp_dir().join(format!("norikimika-offset-migrate-{}", std::process::id()));
+        let new_path = dir.join("telegram.json");
+        let legacy = dir.join("telegram-offset.json");
+        write_offset(&legacy, 777).expect("write legacy offset");
+        assert_eq!(load_offset_from(&new_path, &legacy), Some(777));
+        assert_eq!(read_offset(&new_path), Some(777), "offset must land in the new file");
+        assert!(!legacy.exists(), "old file is gone once carried over");
+        assert_eq!(load_offset_from(&new_path, &legacy), Some(777), "second boot reads the new file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
