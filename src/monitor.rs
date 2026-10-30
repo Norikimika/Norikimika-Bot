@@ -1219,6 +1219,15 @@ async fn connection_info(http: &reqwest::Client) -> (String, String) {
     (ip, isp)
 }
 
+/// When a run of failed checks becomes an outage worth reporting.
+///
+/// The outage starts at the first failure, but it only counts once `CONN_FAIL_LIMIT` checks in a
+/// row have failed. Marking the state on the very first failure made a single lost packet reset
+/// the uptime streak, so a link that had been up for hours reported "Uptime: 1m 13s".
+fn outage_start(first_fail_ms: i64, fails: u32) -> Option<i64> {
+    (fails >= CONN_FAIL_LIMIT).then_some(first_fail_ms)
+}
+
 /// A restore is only announced once the link has answered this many times in a row.
 fn restore_is_stable(good_streak: u32) -> bool {
     good_streak >= CONN_STABLE_CHECKS
@@ -1302,8 +1311,14 @@ pub async fn run() -> Result<()> {
             let mut conn_up = true;
             let mut fails = 0u32;
             let mut good_streak = 0u32;
+            let mut first_fail_ms: Option<i64> = None;
             let mut pending: Option<ConnAlert> = None;
             let mut state = load_state();
+            // A fresh install has no streak yet: start counting from now instead of reporting 0s.
+            if state.conn_up_ms == 0 {
+                state.conn_up_ms = now_ms();
+                save_state(&state);
+            }
             loop {
                 // Retry a restore message that did not make it out last cycle.
                 if let Some(alert) = pending.take() {
@@ -1339,6 +1354,7 @@ pub async fn run() -> Result<()> {
                 };
                 if ping_ok && (code == 200 || code == 204) {
                     fails = 0;
+                    first_fail_ms = None;
                     good_streak += 1;
                     if let Some(down) = state.conn_down_ms {
                         // A link that just came back usually answers once and then drops again.
@@ -1385,14 +1401,16 @@ pub async fn run() -> Result<()> {
                 } else {
                     fails += 1;
                     good_streak = 0;
+                    let started = *first_fail_ms.get_or_insert_with(now_ms);
                     let why = if ping_ok { format!("HTTP={code}") } else { reason };
                     logln!(MOD, "Connection lost {fails}/{CONN_FAIL_LIMIT} ({why})");
-                    if state.conn_down_ms.is_none() {
-                        state.conn_down_ms = Some(now_ms());
-                        save_state(&state);
-                    }
-                    if fails >= CONN_FAIL_LIMIT {
-                        fails = 0;
+                    // Only a real outage is written down; a blip that never reaches the limit
+                    // leaves the uptime streak alone.
+                    if let Some(start) = outage_start(started, fails) {
+                        if state.conn_down_ms.is_none() {
+                            state.conn_down_ms = Some(start);
+                            save_state(&state);
+                        }
                         if conn_up {
                             conn_up = false;
                             logln!(MOD, "Connection down, will notify on restore");
@@ -1663,6 +1681,16 @@ mod tests {
         assert!(!restore_is_stable(1), "a single answer is what made the alert miss");
         assert!(restore_is_stable(2));
         assert!(restore_is_stable(7));
+    }
+
+    #[test]
+    fn a_blip_does_not_become_an_outage() {
+        let started = 1_000;
+        for fails in 1..CONN_FAIL_LIMIT {
+            assert_eq!(outage_start(started, fails), None, "{fails} failed checks is not an outage");
+        }
+        assert_eq!(outage_start(started, CONN_FAIL_LIMIT), Some(started));
+        assert_eq!(outage_start(started, CONN_FAIL_LIMIT + 3), Some(started));
     }
 
     #[test]
