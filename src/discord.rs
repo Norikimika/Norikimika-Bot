@@ -27,7 +27,6 @@ const GOODBYE_BG: &[u8] = include_bytes!("../assets/banners/goodbye.jpg");
 const SPOTIFY_MAX_TRACKS: usize = 50;
 const ALONE_TIMEOUT_SECS: u64 = 300;
 const PLAY_FAIL_LIMIT: u32 = 3;
-const YT_PRIMARY_CLIENT_ARGS: [&str; 2] = ["--extractor-args", "youtube:player_client=android_vr"];
 const STATS_DEFS: &[(&str, &str)] = &[
     ("all", "🧩┃all members"),
     ("humans", "🪢┃members"),
@@ -260,157 +259,8 @@ fn can_control_queue(msg: &Message, queue: Option<&GuildQueue>) -> bool {
 
 // ================== yt-dlp plumbing ==================
 
-/// Why yt-dlp failed, read from what it printed.
-///
-/// The old code treated every one of these as "bot check" and silently retried another client —
-/// useless for a format problem and it hid the real message. Only a genuine refusal is retried.
-#[derive(Debug, PartialEq, Eq)]
-enum YtDlpFailure {
-    /// YouTube wants a sign-in / cookie for this client. Another client can still work.
-    BotWall,
-    /// Our format selector asked for something the video does not have: not a client problem.
-    Format,
-    /// The CDN refused or dropped the media transfer.
-    Cdn,
-    Other,
-}
-
-fn classify_ytdlp_error(message: &str) -> YtDlpFailure {
-    let lower = message.to_lowercase();
-    const BOT_WALL: &[&str] = &[
-        "confirm you're not a bot",
-        "confirm youre not a bot",
-        "sign in to confirm",
-        "page needs to be reloaded",
-        "precondition check failed",
-    ];
-    const FORMAT: &[&str] = &["requested format is not available", "no video formats found", "requested format not available"];
-    const CDN: &[&str] = &[
-        "unable to download video data",
-        "http error 403",
-        "http error 429",
-        "read timed out",
-        "giving up after",
-        "connection reset",
-    ];
-    let hit = |needles: &[&str]| needles.iter().any(|n| lower.contains(*n));
-    if hit(BOT_WALL) {
-        YtDlpFailure::BotWall
-    } else if hit(FORMAT) {
-        YtDlpFailure::Format
-    } else if hit(CDN) {
-        YtDlpFailure::Cdn
-    } else {
-        YtDlpFailure::Other
-    }
-}
-
-/// Audio format chain: `ba` alone fails on videos that only expose a muxed stream, and a chain
-/// always has a next option, so "Requested format is not available" is never our own doing.
-const YT_AUDIO_FORMAT_CHAIN: &str = "ba[abr>0][vcodec=none]/ba/b";
-
-/// Clients tried in order. android_vr needs no PO token and still serves m4a/AAC.
-const YT_CLIENTS: &[&str] = &["android_vr", "web_safari", "mweb", "tv"];
-
-fn client_args(client: &str) -> Vec<String> {
-    vec!["--extractor-args".to_string(), format!("youtube:player_client={client}")]
-}
-
-#[cfg(test)]
-fn client_of(extra: &[String]) -> Option<&str> {
-    extra.iter().find_map(|a| a.strip_prefix("youtube:player_client="))
-}
-
-fn has_client_arg(extra: &[String]) -> bool {
-    extra.iter().any(|a| a.contains("player_client"))
-}
-
-async fn run_ytdlp(args: &[String], extra: &[String], target: &str, timeout: Duration) -> Result<String> {
-    let mut all: Vec<String> = Vec::new();
-    if let Some(proxy) = crate::config::get("YTDLP_PROXY").filter(|p| !p.is_empty()) {
-        all.push("--proxy".to_string());
-        all.push(proxy);
-    }
-    let mut client_args: Vec<String> = Vec::new();
-    if !has_client_arg(args) && !has_client_arg(extra) {
-        client_args = client_args_for_default();
-    }
-    // transient CDN hiccups are worth a retry inside yt-dlp; that is a fix, not a dodge
-    all.extend([
-        "--retries".to_string(),
-        "3".to_string(),
-        "--fragment-retries".to_string(),
-        "3".to_string(),
-        "--socket-timeout".to_string(),
-        "15".to_string(),
-    ]);
-    all.extend(args.iter().cloned());
-    all.extend(client_args);
-    all.extend(extra.iter().cloned());
-    all.push(target.to_string());
-
-    let child = tokio::process::Command::new("yt-dlp")
-        .args(&all)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(Ok(out)) => Err(anyhow!(
-            "yt-dlp exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Ok(Err(e)) => Err(anyhow!("yt-dlp spawn error: {e}")),
-        Err(_) => Err(anyhow!("yt-dlp timeout after {timeout:?}")),
-    }
-}
-
-fn client_args_for_default() -> Vec<String> {
-    YT_PRIMARY_CLIENT_ARGS.iter().map(|s| s.to_string()).collect()
-}
-
-/// Run yt-dlp, walking to the next client only when YouTube actually refuses the current one.
-/// Every attempt is logged with its reason, so a real failure is visible instead of swallowed.
-async fn spawn_ytdlp(args: Vec<String>, target: String, timeout: Duration) -> Result<String> {
-    let mut client = YT_CLIENTS[0];
-    let mut extra = client_args(client);
-    let mut refused: Vec<&'static str> = Vec::new();
-    loop {
-        match run_ytdlp(&args, &extra, &target, timeout).await {
-            Ok(out) => return Ok(out),
-            Err(e) => {
-                let message = format!("{e:#}");
-                let reason = classify_ytdlp_error(&message);
-                logln!(
-                    MOD,
-                    "[yt-dlp] {client} failed ({reason:?}): {}",
-                    crate::util::truncate(message.trim(), 200)
-                );
-                match reason {
-                    YtDlpFailure::BotWall => {
-                        refused.push(client);
-                        match YT_CLIENTS.iter().copied().find(|c| !refused.iter().any(|r| r == c)) {
-                            Some(next) => {
-                                client = next;
-                                extra = client_args(client);
-                            }
-                            None => {
-                                return Err(anyhow!(
-                                    "every YouTube client refused the request ({refused:?}): {message}"
-                                ))
-                            }
-                        }
-                    }
-                    YtDlpFailure::Format => {
-                        return Err(anyhow!("format selection failed, another client cannot help: {message}"))
-                    }
-                    YtDlpFailure::Cdn | YtDlpFailure::Other => return Err(e),
-                }
-            }
-        }
-    }
-}
+/// Audio format chain lives with the rest of the yt-dlp setup.
+const YT_AUDIO_FORMAT_CHAIN: &str = crate::ytdlp::AUDIO_FORMAT_CHAIN;
 
 fn build_track_from_item(item: &Value) -> Option<Song> {
     let id = item["id"]
@@ -477,7 +327,7 @@ async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
         limit.to_string(),
         "-J".to_string(),
     ];
-    match spawn_ytdlp(args, music_search_url(query), Duration::from_secs(60)).await {
+    match crate::ytdlp::run(args, music_search_url(query), Duration::from_secs(60), MOD).await {
         Ok(stdout) => flat_entries(&stdout),
         Err(e) => {
             logln!(MOD, "[yt-dlp Search Error] {query}: {e}");
@@ -497,7 +347,7 @@ async fn get_playlist_tracks(url: &str) -> Vec<Song> {
         "--skip-download".to_string(),
         "-J".to_string(),
     ];
-    match spawn_ytdlp(args, url.to_string(), Duration::from_secs(180)).await {
+    match crate::ytdlp::run(args, url.to_string(), Duration::from_secs(180), MOD).await {
         Ok(stdout) => flat_entries(&stdout),
         Err(e) => {
             logln!(MOD, "[yt-dlp Playlist Error] {url}: {e}");
@@ -523,7 +373,7 @@ async fn get_radio_tracks(video_id: &str) -> Vec<Song> {
         "-J".to_string(),
     ];
     let target = format!("https://music.youtube.com/watch?v={video_id}&list=RD{video_id}");
-    match spawn_ytdlp(args, target, Duration::from_secs(90)).await {
+    match crate::ytdlp::run(args, target, Duration::from_secs(90), MOD).await {
         Ok(stdout) => {
             let tracks = flat_entries(&stdout);
             if !tracks.is_empty() {
@@ -551,7 +401,7 @@ async fn fetch_video_info(video_id: &str) -> Option<Song> {
         "--skip-download".to_string(),
         "-j".to_string(),
     ];
-    let stdout = match spawn_ytdlp(args, format!("https://www.youtube.com/watch?v={video_id}"), Duration::from_secs(60)).await {
+    let stdout = match crate::ytdlp::run(args, format!("https://www.youtube.com/watch?v={video_id}"), Duration::from_secs(60), MOD).await {
         Ok(out) => out,
         Err(e) => {
             logln!(MOD, "[Video Info Error] {video_id}: {e}");
@@ -984,7 +834,7 @@ struct Stream {
 ///
 /// songbird's `YoutubeDl` keeps the CDN's reply to itself, so a 403 turned into
 /// "played 0ns of the stream"; doing the request here means the log says what YouTube said.
-/// Extraction goes through [`spawn_ytdlp`], so a refused client walks to the next one and every
+/// Extraction goes through [`crate::ytdlp::run`], so a refused client walks to the next one and every
 /// attempt is logged; the format chain guarantees a fallback before we even start.
 async fn resolve_stream(web_url: &str) -> Result<Stream> {
     let args = vec![
@@ -997,7 +847,7 @@ async fn resolve_stream(web_url: &str) -> Result<Stream> {
         "-S".to_string(),
         "ext:m4a,acodec:aac".to_string(),
     ];
-    let stdout = spawn_ytdlp(args, web_url.to_string(), Duration::from_secs(90)).await?;
+    let stdout = crate::ytdlp::run(args, web_url.to_string(), Duration::from_secs(90), MOD).await?;
     let v: Value = serde_json::from_str(&stdout)
         .map_err(|e| anyhow!("yt-dlp printed no JSON for {web_url}: {e}"))?;
     let url = v["url"]
@@ -1979,34 +1829,6 @@ mod tests {
             Some("https://soundcloud.com/artist/track-name".into())
         );
         assert!(extract_spotify("https://example.com").is_none());
-    }
-
-    #[test]
-    fn ytdlp_failures_are_classified_not_guessed() {
-        // only a real refusal is worth another client
-        assert_eq!(
-            classify_ytdlp_error("ERROR: [youtube] abc: Sign in to confirm you're not a bot"),
-            YtDlpFailure::BotWall
-        );
-        assert_eq!(classify_ytdlp_error("ERROR: Precondition check failed."), YtDlpFailure::BotWall);
-        // a format problem cannot be fixed by switching client, so it must not be retried
-        assert_eq!(
-            classify_ytdlp_error("ERROR: [youtube] abc: Requested format is not available"),
-            YtDlpFailure::Format
-        );
-        assert_eq!(
-            classify_ytdlp_error("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
-            YtDlpFailure::Cdn
-        );
-        assert_eq!(classify_ytdlp_error("ERROR: something else entirely"), YtDlpFailure::Other);
-    }
-
-    #[test]
-    fn audio_format_chain_always_has_a_fallback() {
-        assert!(YT_AUDIO_FORMAT_CHAIN.contains('/'));
-        assert!(YT_AUDIO_FORMAT_CHAIN.ends_with("/ba/b"));
-        assert!(!has_client_arg(&["--no-warnings".to_string()]));
-        assert_eq!(client_of(&client_args("tv")), Some("tv"));
     }
 
     #[test]

@@ -14,8 +14,6 @@ const ADMIN_CACHE_TTL_SECS: i64 = 5 * 60;
 /// One command may not hold a handler slot forever (downloads legitimately take minutes).
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(300);
 const SH_TIMEOUT: Duration = Duration::from_secs(60);
-const YT_AUDIO_FORMAT: &str = "251/140/bestaudio";
-const YT_PRIMARY_CLIENT_ARG: &str = "youtube:player_client=web_embedded";
 const AUDIO_EXTS: &[&str] = &["webm", "m4a", "mp3", "opus", "ogg", "aac", "flac", "wav"];
 
 fn dir() -> PathBuf {
@@ -331,17 +329,6 @@ fn format_track_duration(seconds: f64) -> String {
         return "??:??".into();
     }
     format!("{}:{:02}", (seconds / 60.0).floor() as i64, (seconds % 60.0).floor() as i64)
-}
-
-fn ytdlp_args(args: Vec<String>) -> Vec<String> {
-    match crate::config::get("YTDLP_PROXY") {
-        Some(proxy) if !proxy.is_empty() => {
-            let mut out = vec!["--proxy".to_string(), proxy];
-            out.extend(args);
-            out
-        }
-        _ => args,
-    }
 }
 
 /// Download one media part; on failure say why instead of dropping it silently.
@@ -838,25 +825,31 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
     };
 
     let typing = bot.typing_loop(msg.chat_id, msg.thread_id, "typing").await;
-    let info_args = ytdlp_args(vec![
-        "-f".into(), YT_AUDIO_FORMAT.into(),
-        "--no-playlist".into(),
-        "--extractor-args".into(), YT_PRIMARY_CLIENT_ARG.into(),
-        "-j".into(), search_arg,
-    ]);
-    let args_ref: Vec<&str> = info_args.iter().map(String::as_str).collect();
-    let (ok, stdout) = sh("yt-dlp", &args_ref).await;
-    if !ok {
-        typing.abort();
-        logln!(MOD, "[FETCH ERROR] yt-dlp -j failed");
-        bot.send(msg.chat_id, msg.thread_id, "❌ Failed to fetch music.", Some(msg.message_id), None).await?;
-        return Ok(());
-    }
+    let info_args = vec![
+        "-f".to_string(),
+        crate::ytdlp::AUDIO_FORMAT_CHAIN.to_string(),
+        "--no-playlist".to_string(),
+        "-j".to_string(),
+    ];
+    // the shared runner walks to the next client on a bot wall, and says why it gave up
+    let stdout = match crate::ytdlp::run(info_args, search_arg.clone(), Duration::from_secs(60), MOD).await {
+        Ok(out) => out,
+        Err(e) => {
+            typing.abort();
+            logln!(MOD, "[FETCH ERROR] yt-dlp -j failed for {search_arg:?}: {e:#}");
+            bot.send(msg.chat_id, msg.thread_id, "❌ Failed to fetch music.", Some(msg.message_id), None).await?;
+            return Ok(());
+        }
+    };
     let info: Value = match serde_json::from_str(&stdout) {
         Ok(v) => v,
         Err(e) => {
             typing.abort();
-            logln!(MOD, "[FETCH ERROR] {e}");
+            logln!(
+                MOD,
+                "[FETCH ERROR] yt-dlp printed no JSON for {search_arg:?}: {e}: {}",
+                crate::util::truncate(stdout.trim(), 300)
+            );
             bot.send(msg.chat_id, msg.thread_id, "❌ Failed to fetch music.", Some(msg.message_id), None).await?;
             return Ok(());
         }
@@ -890,18 +883,22 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
         )
         .await?;
 
-    let dl_args = ytdlp_args(vec![
-        "-f".into(), YT_AUDIO_FORMAT.into(),
-        "--no-playlist".into(),
-        "--extractor-args".into(), YT_PRIMARY_CLIENT_ARG.into(),
-        "-o".into(), audio_out.display().to_string(),
-        "--write-thumbnail".into(),
-        "--convert-thumbnails".into(), "jpg".into(),
-        "-o".into(), format!("thumbnail:{}", thumb_base.display()),
-        media_url,
-    ]);
-    let dl_ref: Vec<&str> = dl_args.iter().map(String::as_str).collect();
-    let (dl_ok, _) = sh("yt-dlp", &dl_ref).await;
+    let dl_args = vec![
+        "-f".to_string(),
+        crate::ytdlp::AUDIO_FORMAT_CHAIN.to_string(),
+        "--no-playlist".to_string(),
+        "-o".to_string(), audio_out.display().to_string(),
+        "--write-thumbnail".to_string(),
+        "--convert-thumbnails".to_string(), "jpg".to_string(),
+        "-o".to_string(), format!("thumbnail:{}", thumb_base.display()),
+    ];
+    let dl_ok = match crate::ytdlp::run(dl_args, media_url.clone(), Duration::from_secs(180), MOD).await {
+        Ok(_) => true,
+        Err(e) => {
+            logln!(MOD, "[DOWNLOAD ERROR] {media_url}: {e:#}");
+            false
+        }
+    };
 
     let mut status = "Failed";
     let mut audio_file = None;

@@ -11,6 +11,7 @@ mod repo;
 mod state;
 mod telegram;
 mod util;
+mod ytdlp;
 
 use anyhow::Result;
 use std::future::Future;
