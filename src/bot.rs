@@ -942,9 +942,12 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
                 bytes,
                 filename: &filename,
                 extra: extra.take(),
-                thumb: audio_thumb(&thumb_base),
+                thumb: audio_thumb(&thumb_base, &info).await,
             })
             .await;
+        if let Err(e) = &sent {
+            logln!(MOD, "[SEND ERROR] audio for {file_id}: {e:#}");
+        }
         status = if sent.is_ok() { "Success" } else { "Failed" };
         bot.edit(msg.chat_id, info_message, &music_info_text(&title, &performer, &duration, status), None).await?;
     }
@@ -960,23 +963,54 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
     Ok(())
 }
 
-/// Telegram accepts an audio cover only as a small jpeg, and yt-dlp writes whatever the video
-/// had (often 1280x720, sometimes webp). Resize it to fit 320x320 so the upload is accepted, and
-/// fall back to the original bytes when it cannot be decoded.
-fn audio_thumb(base: &std::path::Path) -> Option<(Vec<u8>, String)> {
-    let raw = ["jpg", "webp", "png"]
+/// Telegram accepts an audio cover only as a small jpeg. yt-dlp converts it when ffmpeg is on
+/// PATH; when it is not, the file left behind is the original webp, which this build cannot decode
+/// — so the jpg URL from the info JSON is fetched instead. i.ytimg.com offers both, and only the
+/// jpg one is usable here, which is why the `.webp` entry must not be picked.
+async fn audio_thumb(base: &std::path::Path, info: &Value) -> Option<(Vec<u8>, String)> {
+    let mut raw = ["jpg", "jpeg", "png"]
         .iter()
-        .find_map(|ext| std::fs::read(base.with_extension(ext)).ok())?;
-    let small = image::load_from_memory(&raw)
-        .ok()
-        .and_then(|img| {
+        .find_map(|ext| std::fs::read(base.with_extension(ext)).ok());
+    if raw.is_none() {
+        match jpg_thumbnail_url(info) {
+            Some(url) => match reqwest::get(url).await {
+                Ok(res) => raw = res.bytes().await.ok().map(|b| b.to_vec()),
+                Err(e) => logln!(MOD, "[music] thumbnail fetch failed: {e}"),
+            },
+            None => logln!(MOD, "[music] no jpg thumbnail in the info JSON"),
+        }
+    }
+    let raw = raw?;
+    match image::load_from_memory(&raw) {
+        Ok(img) => {
             let mut out = std::io::Cursor::new(Vec::new());
-            img.thumbnail(320, 320)
-                .write_to(&mut out, image::ImageFormat::Jpeg)
-                .ok()?;
-            Some(out.into_inner())
-        });
-    Some((small.unwrap_or(raw), "thumb.jpg".to_string()))
+            match img.thumbnail(320, 320).write_to(&mut out, image::ImageFormat::Jpeg) {
+                Ok(()) => Some((out.into_inner(), "thumb.jpg".to_string())),
+                Err(e) => {
+                    logln!(MOD, "[music] thumbnail encode failed: {e}");
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            logln!(MOD, "[music] thumbnail decode failed: {e}");
+            None
+        }
+    }
+}
+
+/// The largest jpg yt-dlp listed. `info["thumbnail"]` is usually the webp variant, so the
+/// `thumbnails` array is searched instead of trusting that field.
+fn jpg_thumbnail_url(info: &Value) -> Option<&str> {
+    fn jpg(entry: &Value) -> Option<&str> {
+        entry["url"]
+            .as_str()
+            .filter(|u| u.ends_with(".jpg") || u.ends_with(".jpeg"))
+    }
+    info["thumbnails"]
+        .as_array()
+        .and_then(|list| list.iter().rev().find_map(jpg))
+        .or_else(|| jpg(&info["thumbnail"]))
 }
 
 /// The container yt-dlp picked decides the mime type; `application/octet-stream` made Telegram
@@ -2089,6 +2123,26 @@ mod offset_tests {
 #[cfg(test)]
 mod mime_tests {
     use super::*;
+
+    /// yt-dlp lists the webp variant last, and `thumbnail` points at it: picking it gives a file
+    /// this build cannot decode, which is how the cover disappeared.
+    #[test]
+    fn the_webp_thumbnail_url_is_never_chosen() {
+        let info = json!({
+            "thumbnail": "https://i.ytimg.com/vi_webp/abc/maxresdefault.webp",
+            "thumbnails": [
+                { "url": "https://i.ytimg.com/vi/abc/hqdefault.jpg" },
+                { "url": "https://i.ytimg.com/vi/abc/maxresdefault.jpg" },
+                { "url": "https://i.ytimg.com/vi_webp/abc/maxresdefault.webp" }
+            ]
+        });
+        assert_eq!(
+            jpg_thumbnail_url(&info),
+            Some("https://i.ytimg.com/vi/abc/maxresdefault.jpg"),
+            "the largest jpg wins"
+        );
+        assert_eq!(jpg_thumbnail_url(&json!({ "thumbnail": "https://x/y.webp" })), None);
+    }
 
     /// Telegram shows a grey placeholder when the audio arrives as application/octet-stream.
     #[test]
