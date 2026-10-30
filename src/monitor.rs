@@ -280,25 +280,31 @@ async fn check_battery(tg: &Tg, state: &mut MonitorState) {
     let status = data["status"].as_str().unwrap_or("UNKNOWN").to_uppercase();
     let temperature = data["temperature"].as_f64().unwrap_or(0.0).round() as i64;
 
+    // One save per poll at most, and none at all when nothing moved: this ran every 30s and
+    // rewrote the whole state file up to three times for a battery that had not changed.
+    let mut dirty = false;
     let charging = status == "CHARGING" || status == "FULL";
     let discharging = status == "DISCHARGING" || status == "NOT_CHARGING";
     if charging && (state.last_status == "DISCHARGING" || state.last_status == "NOT_CHARGING") {
         state.charge_start_ms = now_ms();
-        save_state(state);
+        dirty = true;
     } else if discharging && (state.last_status == "CHARGING" || state.last_status == "FULL") {
         state.use_start_ms = now_ms();
-        save_state(state);
+        dirty = true;
     }
-    if status != "UNKNOWN" {
+    if status != "UNKNOWN" && status != state.last_status {
         state.last_status = status.clone();
-        save_state(state);
+        dirty = true;
     }
     if level < 100 && state.battery_full_sent {
         state.battery_full_sent = false;
-        save_state(state);
+        dirty = true;
     }
     if level > 20 && state.battery_low_sent {
         state.battery_low_sent = false;
+        dirty = true;
+    }
+    if dirty {
         save_state(state);
     }
 
