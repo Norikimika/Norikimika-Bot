@@ -86,12 +86,12 @@ where
     tokio::spawn(async move {
         loop {
             match tokio::spawn(factory()).await {
-                Ok(Ok(())) => logln!("all", "{name} finished on its own"),
-                Ok(Err(e)) => logln!("all", "{name} stopped: {e:#}"),
-                Err(e) if e.is_panic() => logln!("all", "{name} panicked: {e}"),
-                Err(e) => logln!("all", "{name} aborted: {e}"),
+                Ok(Ok(())) => logln!(name, "finished on its own"),
+                Ok(Err(e)) => logln!(name, "stopped: {e:#}"),
+                Err(e) if e.is_panic() => logln!(name, "panicked: {e}"),
+                Err(e) => logln!(name, "aborted: {e}"),
             }
-            logln!("all", "{name} restarting in 15s");
+            logln!(name, "restarting in 15s");
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
@@ -153,7 +153,7 @@ async fn run_all(dry_run: bool) -> Result<()> {
     spawn_module("repo", || async {
         loop {
             if let Err(e) = repo::run(false).await {
-                logln!("all", "repo error: {e:#}");
+                logln!("repo", "error: {e:#}");
             }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
@@ -162,17 +162,17 @@ async fn run_all(dry_run: bool) -> Result<()> {
         use chrono::Timelike;
         // a reboot or restart after 01:00 used to skip the whole day
         if chrono::Local::now().hour() >= 1 && !bing::ran_today() {
-            logln!("all", "bing catch-up: today's run has not happened yet");
+            logln!("bing", "catch-up: today's run has not happened yet");
             if let Err(e) = bing::run().await {
-                logln!("all", "bing error: {e:#}");
+                logln!("bing", "error: {e:#}");
             }
         }
         loop {
             let wait = secs_until(1);
-            logln!("all", "bing: next run in {wait}s at 01:00 local");
+            logln!("bing", "next run in {wait}s at 01:00 local");
             tokio::time::sleep(Duration::from_secs(wait)).await;
             if let Err(e) = bing::run().await {
-                logln!("all", "bing error: {e:#}");
+                logln!("bing", "error: {e:#}");
             }
         }
     });
@@ -184,7 +184,7 @@ async fn run_all(dry_run: bool) -> Result<()> {
     if config::get("DISCORD_BOT_TOKEN").is_some() {
         spawn_module("discord", discord::run);
     } else {
-        logln!("all", "discord skipped: DISCORD_BOT_TOKEN not set");
+        logln!("discord", "skipped: DISCORD_BOT_TOKEN not set");
     }
 
     std::future::pending::<()>().await;
