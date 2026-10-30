@@ -414,6 +414,41 @@ fn price_value(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
+/// One API entry turned into a row. Kept separate so the tests can feed real payloads through
+/// exactly the same code the notification uses.
+fn model_row(m: &Value) -> ModelRow {
+    let id = m["id"].as_str().unwrap_or("").to_string();
+    let name = m["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(&id).to_string();
+    let date = match m["created"].as_i64().filter(|c| *c > 0).and_then(|c| chrono::DateTime::from_timestamp(c, 0)) {
+        Some(dt) => dt.format("%d %b %Y").to_string(),
+        None => "Unknown".to_string(),
+    };
+    let raw_desc = m["description"].as_str().unwrap_or("");
+    let desc = if raw_desc.is_empty() {
+        "No description".to_string()
+    } else {
+        let d = strip_leading_model_name(&name, raw_desc);
+        if d.chars().count() > 220 {
+            format!("{}…", truncate(&d, 220).trim_end_matches(['.', ',', ';', ':', ' ']))
+        } else {
+            d
+        }
+    };
+    let context = m["context_length"].as_f64().or_else(|| m["top_provider"]["context_length"].as_f64()).unwrap_or(0.0);
+    let (is_media, price_unit) = media_pricing(m);
+    ModelRow {
+        name,
+        id,
+        date,
+        desc,
+        context,
+        price_in: price_value(&m["pricing"]["prompt"]),
+        price_out: price_value(&m["pricing"]["completion"]),
+        is_media,
+        price_unit,
+    }
+}
+
 /// Whether a model sells outputs instead of tokens, and what one output costs.
 ///
 /// A model that emits only media (image, video, audio) reports `prompt`/`completion` as "0" —
@@ -426,12 +461,19 @@ fn media_pricing(m: &Value) -> (bool, Option<f64>) {
         .unwrap_or_default();
     let price_in = price_value(&m["pricing"]["prompt"]);
     let price_out = price_value(&m["pricing"]["completion"]);
-    let price_unit = ["image", "video", "audio", "request"]
+    let price_unit = ["image_output", "image", "video", "audio", "speech", "request"]
         .iter()
         .find_map(|key| price_value(&m["pricing"][key]))
         .filter(|p| p.is_finite() && *p > 0.0);
-    let media = (!modalities.is_empty() && !modalities.contains(&"text"))
-        || (price_unit.is_some() && price_in.unwrap_or(0.0) == 0.0 && price_out.unwrap_or(0.0) == 0.0);
+    // Whatever the output is called, a model that charges per token sells tokens: OpenRouter
+    // labels the output of clairic and joey-1 "decisions", nemotron "transcription" and
+    // assemblyai "speech", yet all four are billed through `prompt`. Only when no token price
+    // exists is it a per-output model.
+    let token_priced = price_in.unwrap_or(0.0) > 0.0 || price_out.unwrap_or(0.0) > 0.0;
+    let media_output = modalities
+        .iter()
+        .any(|o| matches!(*o, "image" | "video" | "audio" | "speech"));
+    let media = !token_priced && (media_output || price_unit.is_some());
     (media, price_unit)
 }
 
@@ -441,17 +483,34 @@ fn price_cells(m: &ModelRow) -> (String, String) {
     if m.is_media {
         let out = match m.price_unit {
             Some(p) if p.is_finite() && p > 0.0 => {
-                if p < 0.01 {
-                    format!("From ${p:.4}")
+                let decimals = if p >= 0.01 {
+                    2
+                } else if p >= 0.0001 {
+                    4
                 } else {
-                    format!("From ${p:.2}")
-                }
+                    6
+                };
+                format!("From ${p:.decimals$}")
             }
             _ => "From".to_string(),
         };
         return ("—".to_string(), out);
     }
-    (format_price(m.price_in), format_price(m.price_out))
+    // A model that only charges on one side reports "0" for the other. Printing "Free" there
+    // claims something the data does not say, so an uncharged side is shown as a dash.
+    let in_free = m.price_in.unwrap_or(0.0) <= 0.0;
+    let out_free = m.price_out.unwrap_or(0.0) <= 0.0;
+    if in_free && out_free {
+        return ("Free".to_string(), "Free".to_string());
+    }
+    let side = |free: bool, v: Option<f64>| {
+        if free {
+            "—".to_string()
+        } else {
+            format_price(v)
+        }
+    };
+    (side(in_free, m.price_in), side(out_free, m.price_out))
 }
 
 fn format_price(value: Option<f64>) -> String {
@@ -642,43 +701,23 @@ async fn check_openrouter_models(tg: &Tg, http: &reqwest::Client, state: &mut Mo
     }
 
     let visible: Vec<&Value> = new_models.iter().take(20).copied().collect();
-    let rows: Vec<ModelRow> = visible
-        .iter()
-        .map(|m| {
-            let id = m["id"].as_str().unwrap_or("").to_string();
-            let name = m["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(&id).to_string();
-            let date = match m["created"].as_i64().filter(|c| *c > 0).and_then(|c| chrono::DateTime::from_timestamp(c, 0)) {
-                Some(dt) => dt.format("%d %b %Y").to_string(),
-                None => "Unknown".to_string(),
-            };
-            let raw_desc = m["description"].as_str().unwrap_or("");
-            let desc = if raw_desc.is_empty() {
-                "No description".to_string()
-            } else {
-                let d = strip_leading_model_name(&name, raw_desc);
-                if d.chars().count() > 220 {
-                    format!("{}…", truncate(&d, 220).trim_end_matches(['.', ',', ';', ':', ' ']))
-                } else {
-                    d
-                }
-            };
-            let context = m["context_length"].as_f64().or_else(|| m["top_provider"]["context_length"].as_f64()).unwrap_or(0.0);
-            let price_in: Option<f64> = price_value(&m["pricing"]["prompt"]);
-            let price_out: Option<f64> = price_value(&m["pricing"]["completion"]);
-            let (is_media, price_unit) = media_pricing(m);
-            ModelRow {
-                name,
-                id,
-                date,
-                desc,
-                context,
-                price_in,
-                price_out,
-                is_media,
-                price_unit,
-            }
-        })
-        .collect();
+    for m in &visible {
+        let outputs: Vec<&str> = m["architecture"]["output_modalities"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let (media, unit) = media_pricing(m);
+        logln!(
+            MOD,
+            "OpenRouter row {}: outputs={outputs:?} context={} prompt={:?} completion={:?} unit={unit:?} -> {}",
+            m["id"].as_str().unwrap_or("?"),
+            m["context_length"].as_i64().unwrap_or(0),
+            price_value(&m["pricing"]["prompt"]),
+            price_value(&m["pricing"]["completion"]),
+            if media { "per output" } else { "per token" }
+        );
+    }
+    let rows: Vec<ModelRow> = visible.iter().map(|m| model_row(m)).collect();
 
     let extra = if new_models.len() > 20 {
         format!("{} more models in this update", new_models.len() - 20)
@@ -1451,56 +1490,141 @@ pub fn render_selftest() -> Result<Vec<std::path::PathBuf>> {
 mod tests {
     use super::*;
 
-    fn row(is_media: bool, price_in: Option<f64>, price_out: Option<f64>, price_unit: Option<f64>) -> ModelRow {
-        ModelRow {
-            name: "m".into(),
-            id: "v/m".into(),
-            date: "29 Oct 2026".into(),
-            desc: "d".into(),
-            context: 33_000.0,
-            price_in,
-            price_out,
-            is_media,
-            price_unit,
+    /// The seven models the notification actually rendered on 30 Oct 2026, copied from
+    /// `GET /api/v1/models?sort=newest&output_modalities=all&limit=1000`.
+    fn api_models() -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "cloudflare/clairic",
+                serde_json::json!({
+                    "id": "cloudflare/clairic",
+                    "name": "Cloudflare: Clairic",
+                    "context_length": 65536,
+                    "architecture": { "modality": "text+image->decisions", "output_modalities": ["decisions"] },
+                    "pricing": { "prompt": "0.0000001", "completion": "0" }
+                }),
+            ),
+            (
+                "tbc/mischief-1",
+                serde_json::json!({
+                    "id": "tbc/mischief-1",
+                    "name": "TBC: Mischief 1",
+                    "context_length": 0,
+                    "architecture": { "modality": "text+image->video", "output_modalities": ["video"] },
+                    "pricing": { "prompt": "0", "completion": "0" }
+                }),
+            ),
+            (
+                "baseten/joey-1",
+                serde_json::json!({
+                    "id": "baseten/joey-1",
+                    "name": "Baseten: Joey 1",
+                    "context_length": 16384,
+                    "architecture": { "modality": "text+image->decisions", "output_modalities": ["decisions"] },
+                    "pricing": { "prompt": "0.00000001", "completion": "0" }
+                }),
+            ),
+            (
+                "sourceful/riverflow-v2.6-pro",
+                serde_json::json!({
+                    "id": "sourceful/riverflow-v2.6-pro",
+                    "name": "Sourceful: Riverflow V2.6 Pro",
+                    "context_length": 32768,
+                    "architecture": { "modality": "text+image->image", "output_modalities": ["image"] },
+                    "pricing": {
+                        "prompt": "0",
+                        "completion": "0",
+                        "image_token": "0.0000311377245508982",
+                        "image_output": "0.0000311377245508982"
+                    }
+                }),
+            ),
+            (
+                "nvidia/nemotron-3.5-transcribe",
+                serde_json::json!({
+                    "id": "nvidia/nemotron-3.5-transcribe",
+                    "name": "NVIDIA: Nemotron 3.5 Transcribe",
+                    "context_length": 0,
+                    "architecture": { "modality": "audio->transcription", "output_modalities": ["transcription"] },
+                    "pricing": { "prompt": "0.0000333", "completion": "0" }
+                }),
+            ),
+            (
+                "assemblyai/assemblyai-tts-1",
+                serde_json::json!({
+                    "id": "assemblyai/assemblyai-tts-1",
+                    "name": "AssemblyAI: TTS 1",
+                    "context_length": 0,
+                    "architecture": { "modality": "text->speech", "output_modalities": ["speech"] },
+                    "pricing": { "prompt": "0.000015", "completion": "0" }
+                }),
+            ),
+            (
+                "particle-ai/particle-1",
+                serde_json::json!({
+                    "id": "particle-ai/particle-1",
+                    "name": "Particle AI: Particle-1",
+                    "context_length": 1048576,
+                    "architecture": { "modality": "text+image->text", "output_modalities": ["text"] },
+                    "pricing": { "prompt": "0.00000025", "completion": "0.000001" }
+                }),
+            ),
+        ]
+    }
+
+    fn cells(id: &str) -> (String, String) {
+        let models = api_models();
+        let (_, m) = models.iter().find(|(name, _)| *name == id).expect("model in fixture");
+        price_cells(&model_row(m))
+    }
+
+    #[test]
+    fn the_real_october_release_renders_the_prices_openrouter_publishes() {
+        // billed per prompt token, so the token price is the one to show; the side that is
+        // reported as "0" gets a dash instead of claiming it is free
+        assert_eq!(cells("cloudflare/clairic"), ("$0.10".to_string(), "—".to_string()));
+        assert_eq!(cells("baseten/joey-1"), ("$0.01".to_string(), "—".to_string()));
+        assert_eq!(
+            cells("nvidia/nemotron-3.5-transcribe"),
+            ("$33.30".to_string(), "—".to_string())
+        );
+        assert_eq!(cells("assemblyai/assemblyai-tts-1"), ("$15.00".to_string(), "—".to_string()));
+        assert_eq!(
+            cells("particle-ai/particle-1"),
+            ("$0.25".to_string(), "$1.00".to_string())
+        );
+    }
+
+    #[test]
+    fn the_real_media_release_is_priced_per_output() {
+        // riverflow publishes only an image price, mischief publishes no price at all
+        assert_eq!(
+            cells("sourceful/riverflow-v2.6-pro"),
+            ("—".to_string(), "From $0.000031".to_string())
+        );
+        assert_eq!(cells("tbc/mischief-1"), ("—".to_string(), "From".to_string()));
+    }
+
+    #[test]
+    fn every_fixture_model_is_classified_from_its_own_pricing() {
+        let models = api_models();
+        for (id, m) in &models {
+            let row = model_row(m);
+            let token_priced = row.price_in.unwrap_or(0.0) > 0.0 || row.price_out.unwrap_or(0.0) > 0.0;
+            assert_eq!(row.is_media, !token_priced, "{id}: media iff no token price");
         }
     }
 
     #[test]
-    fn media_models_show_a_starting_price_instead_of_free() {
-        let (inp, out) = price_cells(&row(true, Some(0.0), Some(0.0), Some(0.04)));
-        assert_eq!(inp, "—", "a media model has no per-token input price");
-        assert_eq!(out, "From $0.04");
-        assert!(!out.contains("Free"), "a per-output model is not free");
-    }
-
-    #[test]
-    fn media_models_without_a_known_price_still_say_from() {
-        let (_, out) = price_cells(&row(true, Some(0.0), Some(0.0), None));
-        assert_eq!(out, "From");
-    }
-
-    #[test]
-    fn a_video_only_model_is_media_not_free() {
-        // the shape OpenRouter returned for tbc/mischief-1
+    fn a_text_model_with_no_charge_on_either_side_is_free() {
         let v: Value = serde_json::json!({
-            "id": "tbc/mischief-1",
-            "architecture": { "output_modalities": ["video"] },
-            "pricing": { "prompt": "0", "completion": "0", "image": "0.02" }
+            "architecture": { "output_modalities": ["text"] },
+            "pricing": { "prompt": "0", "completion": "0" }
         });
-        let (is_media, price_unit) = media_pricing(&v);
-        assert!(is_media, "a video-only model does not sell tokens");
-        let m = row(is_media, Some(0.0), Some(0.0), price_unit);
-        assert_eq!(price_cells(&m), ("—".to_string(), "From $0.02".to_string()));
-    }
-
-    #[test]
-    fn multimodal_models_keep_their_token_prices() {
-        let v: Value = serde_json::json!({
-            "architecture": { "output_modalities": ["text", "image"] },
-            "pricing": { "prompt": "0.000003", "completion": "0.000015", "image": "0.04" }
-        });
-        let (is_media, _) = media_pricing(&v);
-        assert!(!is_media, "it also answers in text, so tokens are the comparable price");
+        assert_eq!(
+            price_cells(&model_row(&v)),
+            ("Free".to_string(), "Free".to_string())
+        );
     }
 
     #[test]
@@ -1508,24 +1632,6 @@ mod tests {
         assert_eq!(models_count(0), "0 new models");
         assert_eq!(models_count(1), "1 new model");
         assert_eq!(models_count(2), "2 new models");
-    }
-
-    #[test]
-    fn a_paid_text_model_is_not_media() {
-        let v: Value = serde_json::json!({
-            "architecture": { "output_modalities": ["text"] },
-            "pricing": { "prompt": "0.000003", "completion": "0.000015" }
-        });
-        assert_eq!(media_pricing(&v), (false, None));
-    }
-
-    #[test]
-    fn text_models_keep_their_token_prices() {
-        assert_eq!(price_cells(&row(false, Some(0.0), Some(0.0), None)), ("Free".into(), "Free".into()));
-        assert_eq!(
-            price_cells(&row(false, Some(0.000003), Some(0.000015), None)),
-            ("$3.00".into(), "$15.00".into())
-        );
     }
 
     #[test]
