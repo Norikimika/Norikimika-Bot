@@ -54,6 +54,9 @@ struct Upload<'a> {
     bytes: Vec<u8>,
     filename: &'a str,
     extra: Value,
+    /// `thumbnail` part: sendAudio shows it as the cover, and without it Telegram falls back to a
+    /// grey placeholder — the JS bot attached one, the port dropped it.
+    thumb: Option<(Vec<u8>, String)>,
 }
 
 /// (chat_id, user_id) -> (is_admin, checked_at)
@@ -242,10 +245,16 @@ impl Bot {
         let kind = up.kind;
         let part = reqwest::multipart::Part::bytes(up.bytes)
             .file_name(up.filename.to_string())
-            .mime_str("application/octet-stream")?;
+            .mime_str(audio_mime(up.filename))?;
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", up.chat_id.to_string())
             .part(up.field.to_string(), part);
+        if let Some((bytes, name)) = up.thumb {
+            let cover = reqwest::multipart::Part::bytes(bytes)
+                .file_name(name)
+                .mime_str("image/jpeg")?;
+            form = form.part("thumbnail", cover);
+        }
         if let Some(t) = up.thread {
             form = form.text("message_thread_id", t.to_string());
         }
@@ -933,6 +942,7 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
                 bytes,
                 filename: &filename,
                 extra: extra.take(),
+                thumb: audio_thumb(&thumb_base),
             })
             .await;
         status = if sent.is_ok() { "Success" } else { "Failed" };
@@ -948,6 +958,39 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
         let _ = std::fs::remove_file(path);
     }
     Ok(())
+}
+
+/// Telegram accepts an audio cover only as a small jpeg, and yt-dlp writes whatever the video
+/// had (often 1280x720, sometimes webp). Resize it to fit 320x320 so the upload is accepted, and
+/// fall back to the original bytes when it cannot be decoded.
+fn audio_thumb(base: &std::path::Path) -> Option<(Vec<u8>, String)> {
+    let raw = ["jpg", "webp", "png"]
+        .iter()
+        .find_map(|ext| std::fs::read(base.with_extension(ext)).ok())?;
+    let small = image::load_from_memory(&raw)
+        .ok()
+        .and_then(|img| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.thumbnail(320, 320)
+                .write_to(&mut out, image::ImageFormat::Jpeg)
+                .ok()?;
+            Some(out.into_inner())
+        });
+    Some((small.unwrap_or(raw), "thumb.jpg".to_string()))
+}
+
+/// The container yt-dlp picked decides the mime type; `application/octet-stream` made Telegram
+/// treat the file as a plain document instead of audio.
+fn audio_mime(filename: &str) -> &'static str {
+    match filename.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+        "webm" => "audio/webm",
+        "m4a" | "mp4" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "opus" | "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
 }
 
 fn volume_home_text(volumes: &[Value]) -> String {
@@ -1265,6 +1308,7 @@ async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
                     bytes: video.clone(),
                     filename: "video.mp4",
                     extra: json!({}),
+                    thumb: None,
                 })
                 .await
             } else {
@@ -1285,6 +1329,7 @@ async fn cmd_tt(bot: &Bot, msg: &Msg) -> Result<()> {
                             bytes: audio.clone(),
                             filename: "audio.mp3",
                             extra: json!({ "title": title, "performer": media.uploader }),
+                            thumb: None,
                         })
                         .await
                     {
@@ -1321,6 +1366,7 @@ async fn send_slides(bot: &Bot, chat_id: i64, thread: Option<i64>, items: &[(Str
                 bytes: bytes.clone(),
                 filename: name,
                 extra: json!({}),
+                thumb: None,
             })
             .await;
     }
@@ -1593,6 +1639,7 @@ async fn cmd_receipt(bot: &Bot, msg: &Msg, file_id: &str) -> Result<()> {
             bytes: png.clone(),
             filename: "receipt.png",
             extra: json!({}),
+            thumb: None,
         })
         .await?;
 
@@ -2036,5 +2083,19 @@ mod offset_tests {
         assert!(!legacy.exists(), "old file is gone once carried over");
         assert_eq!(load_offset_from(&new_path, &legacy), Some(777), "second boot reads the new file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod mime_tests {
+    use super::*;
+
+    /// Telegram shows a grey placeholder when the audio arrives as application/octet-stream.
+    #[test]
+    fn audio_containers_get_their_real_mime() {
+        assert_eq!(audio_mime("1712_abc.webm"), "audio/webm");
+        assert_eq!(audio_mime("1712_abc.m4a"), "audio/mp4");
+        assert_eq!(audio_mime("1712_abc.opus"), "audio/ogg");
+        assert_eq!(audio_mime("audio"), "application/octet-stream");
     }
 }
