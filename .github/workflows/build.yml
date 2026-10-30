@@ -136,16 +136,47 @@ jobs:
           cargo build --release --locked --target aarch64-linux-android
           "$STRIP" --strip-unneeded "${{ matrix.bin }}"
 
-      - name: Publish binary to build branch
+      # the three binaries have to meet in one place: the build branch is published as a
+      # single commit, so a separate job assembles them instead of each matrix job pushing.
+      # The copy is needed because every target builds a file called Norikimika-Bot.
+      - name: Stage binary
         if: github.event_name == 'push'
+        run: cp "${{ matrix.bin }}" "Norikimika-Bot-${{ matrix.name }}"
+
+      - name: Upload binary
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Norikimika-Bot-${{ matrix.name }}
+          path: Norikimika-Bot-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish binaries
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Quiet git init hint
+        run: git config --global init.defaultBranch master
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to build branch
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-build-branch.sh "${{ matrix.bin }}" "Norikimika-Bot-${{ matrix.name }}"
+        run: bash scripts/publish-build-branch.sh dist "$GITHUB_SHA"
 
   # runs once every matrix build above has finished
   scan:
     name: Penetration Test
-    needs: build
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space

@@ -47,7 +47,8 @@ Debian default.
 `cargo clippy --release --all-targets --locked -- -D warnings` and the build itself. A separate
 `Penetration Test` job (Strix) scans the tree once all builds pass. Pushes that only touch
 markdown skip the workflow entirely — a README edit cannot change the binary. On every push to `rust` the
-compiled binary is committed to the **`build` branch** (no artifacts):
+compiled binaries are published to the **`build` branch** as a single commit (the branch is a
+download shelf, so each publish replaces it instead of stacking commits):
 
 ```
 https://github.com/Norikimika/Norikimika-Bot/raw/build/Norikimika-Bot-linux-x86_64
