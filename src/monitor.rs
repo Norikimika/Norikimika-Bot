@@ -379,10 +379,20 @@ struct ModelRow {
     context: f64,
     price_in: Option<f64>,
     price_out: Option<f64>,
-    /// Image generators report `prompt`/`completion` as "0", which used to be printed as "Free".
-    /// They are not free, they are billed per image, so they get their own label.
-    is_image: bool,
-    price_image: Option<f64>,
+    /// Media generators (image, video, audio) report `prompt`/`completion` as "0" because they
+    /// do not sell tokens, which used to be printed as "Free". They are billed per output, so
+    /// they get their own label and no token columns.
+    is_media: bool,
+    price_unit: Option<f64>,
+}
+
+/// "1 new model", not "1 new models".
+fn models_count(n: usize) -> String {
+    if n == 1 {
+        "1 new model".to_string()
+    } else {
+        format!("{n} new models")
+    }
 }
 
 fn format_context(value: f64) -> String {
@@ -404,11 +414,32 @@ fn price_value(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
-/// What goes in the two price columns. An image generator reports "0" for prompt and
+/// Whether a model sells outputs instead of tokens, and what one output costs.
+///
+/// A model that emits only media (image, video, audio) reports `prompt`/`completion` as "0" —
+/// calling that "Free" was the bug. A model that also emits text keeps its token prices,
+/// because those are the numbers people actually compare.
+fn media_pricing(m: &Value) -> (bool, Option<f64>) {
+    let modalities: Vec<&str> = m["architecture"]["output_modalities"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let price_in = price_value(&m["pricing"]["prompt"]);
+    let price_out = price_value(&m["pricing"]["completion"]);
+    let price_unit = ["image", "video", "audio", "request"]
+        .iter()
+        .find_map(|key| price_value(&m["pricing"][key]))
+        .filter(|p| p.is_finite() && *p > 0.0);
+    let media = (!modalities.is_empty() && !modalities.contains(&"text"))
+        || (price_unit.is_some() && price_in.unwrap_or(0.0) == 0.0 && price_out.unwrap_or(0.0) == 0.0);
+    (media, price_unit)
+}
+
+/// What goes in the two price columns. A media generator reports "0" for prompt and
 /// completion because it does not sell tokens; printing "Free" for it is simply wrong.
 fn price_cells(m: &ModelRow) -> (String, String) {
-    if m.is_image {
-        let out = match m.price_image {
+    if m.is_media {
+        let out = match m.price_unit {
             Some(p) if p.is_finite() && p > 0.0 => {
                 if p < 0.01 {
                     format!("From ${p:.4}")
@@ -493,7 +524,7 @@ fn render_new_models(list: &[ModelRow], total: usize, extra: &str) -> Result<Vec
 
     c.text(pad as i32, 73, 48.0, Face::Bold, colors("white"), "New OpenRouter Models");
     c.text(pad as i32, 111, 22.0, Face::Mono, colors("bright"), "NEWEST RELEASES FIRST");
-    c.text_right((w - pad) as i32, 72, 18.0, Face::Mono, colors("muted"), &format!("{total} new models"));
+    c.text_right((w - pad) as i32, 72, 18.0, Face::Mono, colors("muted"), &models_count(total));
     c.text_right((w - pad) as i32, 104, 16.0, Face::Body, colors("muted"), &date_line);
 
     c.fill(pad as i32, 130, content_w, 34, colors("panel"));
@@ -501,7 +532,7 @@ fn render_new_models(list: &[ModelRow], total: usize, extra: &str) -> Result<Vec
     c.text(146, 153, 14.0, Face::MonoBold, colors("muted"), "MODEL / PROVIDER / RELEASED");
     c.text_right(700, 153, 14.0, Face::MonoBold, colors("muted"), "CONTEXT");
     c.text_right(835, 153, 14.0, Face::MonoBold, colors("muted"), "INPUT / M");
-    let output_header = if list.iter().any(|m| m.is_image) { "OUTPUT / IMG" } else { "OUTPUT / M" };
+    let output_header = if list.iter().any(|m| m.is_media) { "OUTPUT / UNIT" } else { "OUTPUT / M" };
     c.text_right(1030, 153, 14.0, Face::MonoBold, colors("muted"), output_header);
 
     for (i, m) in list.iter().enumerate() {
@@ -528,7 +559,15 @@ fn render_new_models(list: &[ModelRow], total: usize, extra: &str) -> Result<Vec
         let sub = c.fit(Face::Body, 16.0, &format!("{} · {}", m.id, m.date), 520.0);
         c.text(146, (y + 65) as i32, 16.0, Face::Body, colors("muted"), &sub);
 
-        c.text_right(700, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &format_context(m.context));
+        // A context window means nothing for a model that answers with a video or an image.
+        let context = if m.context > 0.0 {
+            format_context(m.context)
+        } else if m.is_media {
+            "—".to_string()
+        } else {
+            format_context(m.context)
+        };
+        c.text_right(700, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &context);
         let (price_in, price_out) = price_cells(m);
         c.text_right(835, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &price_in);
         c.text_right(1030, (y + 43) as i32, 20.0, Face::Mono, colors("white"), &price_out);
@@ -624,21 +663,9 @@ async fn check_openrouter_models(tg: &Tg, http: &reqwest::Client, state: &mut Mo
                 }
             };
             let context = m["context_length"].as_f64().or_else(|| m["top_provider"]["context_length"].as_f64()).unwrap_or(0.0);
-            let modalities: Vec<&str> = m["architecture"]["output_modalities"]
-                .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
             let price_in: Option<f64> = price_value(&m["pricing"]["prompt"]);
             let price_out: Option<f64> = price_value(&m["pricing"]["completion"]);
-            let price_image: Option<f64> = price_value(&m["pricing"]["image"])
-                .or_else(|| price_value(&m["pricing"]["request"]))
-                .filter(|p| p.is_finite() && *p > 0.0);
-            // Image-only when it emits images and no text; a model that does both keeps its
-            // token prices, which are the numbers people actually compare.
-            let is_image = (modalities.contains(&"image") && !modalities.contains(&"text"))
-                || (price_image.is_some()
-                    && price_in.unwrap_or(0.0) == 0.0
-                    && price_out.unwrap_or(0.0) == 0.0);
+            let (is_media, price_unit) = media_pricing(m);
             ModelRow {
                 name,
                 id,
@@ -647,8 +674,8 @@ async fn check_openrouter_models(tg: &Tg, http: &reqwest::Client, state: &mut Mo
                 context,
                 price_in,
                 price_out,
-                is_image,
-                price_image,
+                is_media,
+                price_unit,
             }
         })
         .collect();
@@ -1384,8 +1411,8 @@ pub fn render_selftest() -> Result<Vec<std::path::PathBuf>> {
             context: 200000.0,
             price_in: Some(0.000001),
             price_out: Some(0.000002),
-            is_image: false,
-            price_image: None,
+            is_media: false,
+            price_unit: None,
         })
         .collect();
     let lb = LbConfig {
@@ -1424,7 +1451,7 @@ pub fn render_selftest() -> Result<Vec<std::path::PathBuf>> {
 mod tests {
     use super::*;
 
-    fn row(is_image: bool, price_in: Option<f64>, price_out: Option<f64>, price_image: Option<f64>) -> ModelRow {
+    fn row(is_media: bool, price_in: Option<f64>, price_out: Option<f64>, price_unit: Option<f64>) -> ModelRow {
         ModelRow {
             name: "m".into(),
             id: "v/m".into(),
@@ -1433,23 +1460,63 @@ mod tests {
             context: 33_000.0,
             price_in,
             price_out,
-            is_image,
-            price_image,
+            is_media,
+            price_unit,
         }
     }
 
     #[test]
-    fn image_models_show_a_starting_price_instead_of_free() {
+    fn media_models_show_a_starting_price_instead_of_free() {
         let (inp, out) = price_cells(&row(true, Some(0.0), Some(0.0), Some(0.04)));
-        assert_eq!(inp, "—", "an image model has no per-token input price");
+        assert_eq!(inp, "—", "a media model has no per-token input price");
         assert_eq!(out, "From $0.04");
-        assert!(!out.contains("Free"), "a per-image model is not free");
+        assert!(!out.contains("Free"), "a per-output model is not free");
     }
 
     #[test]
-    fn image_models_without_a_known_price_still_say_from() {
+    fn media_models_without_a_known_price_still_say_from() {
         let (_, out) = price_cells(&row(true, Some(0.0), Some(0.0), None));
         assert_eq!(out, "From");
+    }
+
+    #[test]
+    fn a_video_only_model_is_media_not_free() {
+        // the shape OpenRouter returned for tbc/mischief-1
+        let v: Value = serde_json::json!({
+            "id": "tbc/mischief-1",
+            "architecture": { "output_modalities": ["video"] },
+            "pricing": { "prompt": "0", "completion": "0", "image": "0.02" }
+        });
+        let (is_media, price_unit) = media_pricing(&v);
+        assert!(is_media, "a video-only model does not sell tokens");
+        let m = row(is_media, Some(0.0), Some(0.0), price_unit);
+        assert_eq!(price_cells(&m), ("—".to_string(), "From $0.02".to_string()));
+    }
+
+    #[test]
+    fn multimodal_models_keep_their_token_prices() {
+        let v: Value = serde_json::json!({
+            "architecture": { "output_modalities": ["text", "image"] },
+            "pricing": { "prompt": "0.000003", "completion": "0.000015", "image": "0.04" }
+        });
+        let (is_media, _) = media_pricing(&v);
+        assert!(!is_media, "it also answers in text, so tokens are the comparable price");
+    }
+
+    #[test]
+    fn the_count_reads_naturally() {
+        assert_eq!(models_count(0), "0 new models");
+        assert_eq!(models_count(1), "1 new model");
+        assert_eq!(models_count(2), "2 new models");
+    }
+
+    #[test]
+    fn a_paid_text_model_is_not_media() {
+        let v: Value = serde_json::json!({
+            "architecture": { "output_modalities": ["text"] },
+            "pricing": { "prompt": "0.000003", "completion": "0.000015" }
+        });
+        assert_eq!(media_pricing(&v), (false, None));
     }
 
     #[test]
