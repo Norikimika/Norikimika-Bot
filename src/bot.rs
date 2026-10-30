@@ -260,7 +260,13 @@ impl Bot {
         }
         if let Some(obj) = up.extra.as_object() {
             for (k, v) in obj {
-                form = form.text(k.clone(), v.as_str().unwrap_or("").to_string());
+                // `duration` is a number; as_str() turned it into an empty string and Telegram
+                // got `duration=`
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                form = form.text(k.clone(), text);
             }
         }
         let url = format!("https://api.telegram.org/bot{}/{kind}", self.token);
@@ -980,12 +986,21 @@ async fn audio_thumb(base: &std::path::Path, info: &Value) -> Option<(Vec<u8>, S
             None => logln!(MOD, "[music] no jpg thumbnail in the info JSON"),
         }
     }
-    let raw = raw?;
+    let Some(raw) = raw else {
+        logln!(MOD, "[music] no cover file and no jpg url, sending without artwork");
+        return None;
+    };
     match image::load_from_memory(&raw) {
         Ok(img) => {
+            let small = img.thumbnail(320, 320);
+            let (w, h) = (small.width(), small.height());
             let mut out = std::io::Cursor::new(Vec::new());
-            match img.thumbnail(320, 320).write_to(&mut out, image::ImageFormat::Jpeg) {
-                Ok(()) => Some((out.into_inner(), "thumb.jpg".to_string())),
+            match small.write_to(&mut out, image::ImageFormat::Jpeg) {
+                Ok(()) => {
+                    let bytes = out.into_inner();
+                    logln!(MOD, "[music] cover {w}x{h} {}KB", bytes.len() / 1024);
+                    Some((bytes, "thumb.jpg".to_string()))
+                }
                 Err(e) => {
                     logln!(MOD, "[music] thumbnail encode failed: {e}");
                     None
