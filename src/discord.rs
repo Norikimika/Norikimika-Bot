@@ -635,7 +635,13 @@ async fn resolve_meta_to_songs(tracks: Vec<(String, String)>, requester: Option<
 // ================== playback ==================
 
 async fn autoplay_candidate(queue: &GuildQueue, base: &Song) -> Option<Song> {
-    let radio = get_radio_tracks(&song_id(base)?).await;
+    let mut radio = get_radio_tracks(&song_id(base)?).await;
+    if radio.is_empty() {
+        // The radio mix is a music.youtube.com playlist and YouTube sometimes answers "Video
+        // unavailable" for it — the very video that just played. Searching the artist is a plain
+        // ytsearch and keeps autoplay alive instead of stopping the queue.
+        radio = autoplay_search(base).await;
+    }
     for candidate in radio {
         if !is_valid_song(&candidate) {
             continue;
@@ -656,6 +662,17 @@ async fn autoplay_candidate(queue: &GuildQueue, base: &Song) -> Option<Song> {
         return Some(normalize_song(song));
     }
     None
+}
+
+/// Autoplay fallback: more from the same artist, minus what already played.
+async fn autoplay_search(base: &Song) -> Vec<Song> {
+    let query = if base.artist == "Unknown Artist" {
+        base.title.clone()
+    } else {
+        format!("{} {}", base.artist, base.title)
+    };
+    logln!(MOD, "[Autoplay] radio empty, searching {query:?}");
+    search_flat(format!("ytsearch10:{query}"), 10).await
 }
 
 /// Send and say why it failed: a dropped reply looked exactly like the bot ignoring you.
