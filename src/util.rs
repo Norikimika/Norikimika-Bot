@@ -59,8 +59,43 @@ pub fn su() -> String {
 }
 
 /// reqwest 0.12 client for songbird's types (`HttpRequest`, `YoutubeDl` live on 0.12).
+///
+/// yt-dlp hands out a CDN URL bound to the IP that asked for it. When a proxy is configured the
+/// extraction goes through the proxy, so the media request has to leave through it too — otherwise
+/// the CDN answers 403 and the track is skipped before a single frame plays.
 pub fn sb_client() -> reqwest12::Client {
-    reqwest12::Client::new()
+    static CLIENT: std::sync::OnceLock<reqwest12::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let mut builder = reqwest12::Client::builder();
+            if let Some(proxy) = crate::config::get("YTDLP_PROXY").filter(|p| !p.is_empty()) {
+                match reqwest12::Proxy::all(&proxy) {
+                    Ok(p) => {
+                        logln!("discord", "[proxy] media requests use {}", proxy_kind(&proxy));
+                        builder = builder.proxy(p);
+                    }
+                    // the value itself is never logged: it can carry credentials
+                    Err(e) => logln!(
+                        "discord",
+                        "[proxy] YTDLP_PROXY cannot be used for media requests ({e}), \
+                         the CDN will refuse the stream; an http:// proxy works, socks:// needs a \
+                         build with the socks feature"
+                    ),
+                }
+            }
+            builder.build().unwrap_or_else(|e| {
+                logln!("discord", "[proxy] media client build failed: {e}");
+                reqwest12::Client::new()
+            })
+        })
+        .clone()
+}
+
+/// `scheme://host` only: the userinfo part of a proxy URL is a credential.
+fn proxy_kind(proxy: &str) -> String {
+    let (scheme, rest) = proxy.split_once("://").unwrap_or(("http", proxy));
+    let host = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+    format!("{scheme}://{host}")
 }
 
 /// Run a command and capture its stdout. On failure the error says *why* (spawn error, or exit
@@ -280,6 +315,14 @@ mod tests {
             .with_no_client_auth();
         // songbird builds exactly this client for yt-dlp; it panicked before the fix
         let _songbird_style = reqwest12::Client::new();
+    }
+
+    /// A proxy URL can carry `user:pass@`; only scheme and host may reach a log.
+    #[test]
+    fn proxy_logs_drop_the_credentials() {
+        assert_eq!(proxy_kind("http://user:secret@1.2.3.4:8080"), "http://1.2.3.4:8080");
+        assert_eq!(proxy_kind("socks5://1.2.3.4:1080"), "socks5://1.2.3.4:1080");
+        assert_eq!(proxy_kind("1.2.3.4:8080"), "http://1.2.3.4:8080");
     }
 
     /// A timeout quotes the URL, and that URL carries the token: it reached telegram.log and the
