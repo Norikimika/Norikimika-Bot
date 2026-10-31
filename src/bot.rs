@@ -150,12 +150,20 @@ impl Bot {
     }
 
     async fn answer_callback(&self, id: &str, text: &str, alert: bool) -> Result<()> {
-        self.api(
-            "answerCallbackQuery",
-            json!({ "callback_query_id": id, "text": text, "show_alert": alert }),
-        )
-        .await
-        .map(|_| ())
+        let body = json!({ "callback_query_id": id, "text": text, "show_alert": alert });
+        match self.api("answerCallbackQuery", body).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // A button pressed after a restart, or one whose handler outlived Telegram's
+                // ~15s window, can no longer be answered. Nothing is broken, so this must not be
+                // reported as a handler failure — but it is still written down.
+                if is_expired_query(&format!("{e:#}")) {
+                    logln!(MOD, "[callback] answer skipped, query already expired");
+                    return Ok(());
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn is_admin(&self, chat_id: i64, user_id: i64) -> bool {
@@ -862,6 +870,11 @@ async fn cmd_usage(bot: &Bot, msg: &Msg) -> Result<()> {
     report += "</blockquote>";
     bot.send(msg.chat_id, msg.thread_id, report.trim(), Some(msg.message_id), None).await?;
     Ok(())
+}
+
+/// Telegram's answer for a callback that waited too long or belongs to a previous run.
+fn is_expired_query(message: &str) -> bool {
+    message.contains("query is too old") || message.contains("query ID is invalid")
 }
 
 fn music_info_text(title: &str, performer: &str, duration: &str, status: &str) -> String {
@@ -2180,6 +2193,16 @@ mod offset_tests {
 #[cfg(test)]
 mod mime_tests {
     use super::*;
+
+    /// A stale button press is not a handler failure.
+    #[test]
+    fn an_expired_callback_is_recognised() {
+        assert!(is_expired_query(
+            "telegram answerCallbackQuery failed: {\"description\":\"Bad Request: query is too old \
+and response timeout expired or query ID is invalid\"}"
+        ));
+        assert!(!is_expired_query("telegram sendMessage failed: chat not found"));
+    }
 
     /// yt-dlp lists the webp variant last, and `thumbnail` points at it: picking it gives a file
     /// this build cannot decode, which is how the cover disappeared.
