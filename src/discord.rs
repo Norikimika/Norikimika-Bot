@@ -54,6 +54,11 @@ struct GuildQueue {
     playing: bool,
     fail_count: u32,
     text_channel: Option<ChannelId>,
+    /// Where the bot is supposed to be: a dropped voice connection has to be re-established
+    /// without a new `!p`.
+    voice_channel: Option<ChannelId>,
+    /// True while yt-dlp is resolving; the queue has no current track then, and that is normal.
+    resolving: bool,
     played_ids: HashSet<String>,
     played_keys: HashSet<String>,
     played_urls: HashSet<String>,
@@ -68,6 +73,8 @@ impl Default for GuildQueue {
             playing: false,
             fail_count: 0,
             text_channel: None,
+            voice_channel: None,
+            resolving: false,
             played_ids: HashSet::new(),
             played_keys: HashSet::new(),
             played_urls: HashSet::new(),
@@ -296,20 +303,66 @@ fn flat_entries(stdout: &str) -> Vec<Song> {
         .unwrap_or_default()
 }
 
-/// Search the YouTube Music catalogue, and only fall back to plain YouTube when it cannot answer.
+/// Search YouTube, then rank the hits ourselves.
+///
+/// `ytsearch` orders by watch count, so "cardigan - taylor swift (tiktok version, slowed +
+/// reverb)" outranks "cardigan" and `!p cardigan` played the edit. Asking for several and scoring
+/// them against the words that were typed is what keeps the original in front.
 async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
     if query.trim().is_empty() {
         return Vec::new();
     }
-    match crate::ytmusic::search(query, limit).await {
-        Ok(tracks) if !tracks.is_empty() => return tracks.into_iter().map(song_from_track).collect(),
-        Ok(_) => logln!(MOD, "[Resolve] YouTube Music answered with no tracks"),
-        Err(e) => logln!(MOD, "[Resolve] YouTube Music search failed: {e}"),
+    let want = (limit * 4).clamp(limit, 20);
+    let songs = search_flat(format!("ytsearch{want}:{query}"), want).await;
+    rank_matches(query, songs, limit)
+}
+
+/// The best hit for `query` as a watch URL, for callers that only need something to download.
+pub(crate) async fn best_song_url(query: &str) -> Option<String> {
+    search_yt_music(query, 1).await.into_iter().next().map(|song| song.url)
+}
+
+/// Rank candidates against what was typed: an exact title wins, words that never show up lose,
+/// and an edit of a song ranks below the song.
+fn rank_matches(query: &str, mut songs: Vec<Song>, limit: usize) -> Vec<Song> {
+    let want = title_key(query);
+    let words: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .map(title_key)
+        .filter(|word| !word.is_empty())
+        .collect();
+    songs.sort_by_key(|song| std::cmp::Reverse(score_match(song, &want, &words)));
+    songs.truncate(limit);
+    songs
+}
+
+fn score_match(song: &Song, want: &str, words: &[String]) -> i32 {
+    let title = title_key(&song.title);
+    let artist = title_key(&song.artist);
+    let mut score = 0;
+    if !want.is_empty() && title == want {
+        score += 100;
+    } else if !want.is_empty() && title.contains(want) {
+        score += 60;
     }
-    // InnerTube is the music catalogue itself; this is the plain YouTube one, where the same
-    // query returns slowed and reverb edits first. Only used when the music answer is unusable.
-    logln!(MOD, "[Resolve] falling back to ytsearch");
-    search_flat(format!("ytsearch{limit}:{query}"), limit).await
+    let hits = words
+        .iter()
+        .filter(|word| title.contains(word.as_str()) || artist.contains(word.as_str()))
+        .count();
+    score += 10 * hits as i32;
+    if hits < words.len() {
+        score -= 30;
+    }
+    if has_derivative_marker(&song.title) {
+        score -= 70;
+    }
+    // "Taylor Swift - Topic" is the label's own upload of the album version
+    let channel = song.artist.to_lowercase();
+    if channel.contains("topic") || channel.contains("vevo") || channel.ends_with("official") {
+        score += 20;
+    }
+    score
 }
 
 /// A YouTube Music row as a queue entry. The id is a normal YouTube video id, so the stream is
@@ -682,19 +735,22 @@ async fn autoplay_search(base: &Song) -> Vec<Song> {
         base.artist.clone()
     };
     logln!(MOD, "[Autoplay] radio empty, searching {query:?}");
-    match crate::ytmusic::search(&query, 10).await {
-        Ok(tracks) if !tracks.is_empty() => tracks.into_iter().map(song_from_track).collect(),
-        Ok(_) => Vec::new(),
-        Err(e) => {
-            logln!(MOD, "[Autoplay] YouTube Music search failed: {e}");
-            Vec::new()
-        }
-    }
+    search_yt_music(&query, 10).await
 }
 
 /// Versions of a track rather than another track: slowed, reverb, nightcore, tiktok edits and
 /// anything whose title still contains the one that just played.
 fn is_derivative(candidate: &Song, base: &Song) -> bool {
+    if has_derivative_marker(&candidate.title) {
+        return true;
+    }
+    // the same song under another name: "Cardigan (best version + slowed)" vs "cardigan"
+    let base_key = title_key(&base.title);
+    !base_key.is_empty() && title_key(&candidate.title).contains(&base_key)
+}
+
+/// Titles that announce an edit rather than a track.
+fn has_derivative_marker(title: &str) -> bool {
     const MARKERS: &[&str] = &[
         "slowed",
         "reverb",
@@ -711,13 +767,8 @@ fn is_derivative(candidate: &Song, base: &Song) -> bool {
         "hour version",
         "loop",
     ];
-    let title = candidate.title.to_lowercase();
-    if MARKERS.iter().any(|m| title.contains(m)) {
-        return true;
-    }
-    // the same song under another name: "Cardigan (best version + slowed)" vs "cardigan"
-    let base_key = title_key(&base.title);
-    !base_key.is_empty() && title_key(&candidate.title).contains(&base_key)
+    let title = title.to_lowercase();
+    MARKERS.iter().any(|marker| title.contains(marker))
 }
 
 /// Letters and digits only, so punctuation and emoji cannot hide a repeat.
@@ -853,7 +904,14 @@ fn play_next<'a>(
         let mut enqueued = false;
         if let Some(call) = songbird.get(guild_id) {
             let mut call = call.lock().await;
-            match resolve_stream(&song.url).await {
+            if let Some(queue) = queues().lock().await.get_mut(&guild_id) {
+                queue.resolving = true;
+            }
+            let resolved = resolve_stream(&song.url).await;
+            if let Some(queue) = queues().lock().await.get_mut(&guild_id) {
+                queue.resolving = false;
+            }
+            match resolved {
                 Ok(stream) => {
                     // a music-search hit has no channel, so fill the artist from the resolved stream
                     if song.artist == "Unknown Artist" {
@@ -1635,6 +1693,7 @@ async fn cmd_play(ctx: &Context, msg: &Message, query: &str) -> Result<()> {
         let mut all = queues().lock().await;
         let queue = all.entry(guild_id).or_default();
         queue.text_channel = Some(msg.channel_id);
+        queue.voice_channel = Some(voice_channel);
         let existing: HashSet<String> = queue.songs.iter().filter_map(song_id).collect();
         let fresh: Vec<Song> = songs
             .into_iter()
@@ -1783,10 +1842,67 @@ struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         logln!(MOD, "Logged in as {}", ready.user.name);
+        // ready fires again after every reconnect; a second watchdog would resume the same track
+        // twice
+        static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let stats_ctx = ctx.clone();
         tokio::spawn(async move {
             loop {
-                update_stats(&ctx).await;
+                update_stats(&stats_ctx).await;
                 tokio::time::sleep(Duration::from_secs(600)).await;
+            }
+        });
+        let watch_ctx = ctx;
+        tokio::spawn(async move {
+            let mut missing: HashMap<GuildId, u8> = HashMap::new();
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                let watched: Vec<(GuildId, Option<ChannelId>, String)> = {
+                    let all = queues().lock().await;
+                    all.iter()
+                        .filter(|(_, q)| q.playing && !q.resolving && !q.songs.is_empty())
+                        .map(|(guild, q)| (*guild, q.voice_channel, q.songs[0].title.clone()))
+                        .collect()
+                };
+                for (guild, voice, title) in watched {
+                    let playing = match songbird::get(&watch_ctx).await {
+                        Some(manager) => match manager.get(guild) {
+                            Some(call) => call.lock().await.queue().current().is_some(),
+                            None => false,
+                        },
+                        None => false,
+                    };
+                    if playing {
+                        missing.remove(&guild);
+                        continue;
+                    }
+                    // two checks, so a track change is never mistaken for a dead connection
+                    let count = missing.entry(guild).or_insert(0);
+                    *count += 1;
+                    if *count < 2 {
+                        continue;
+                    }
+                    missing.remove(&guild);
+                    logln!(MOD, "[Music] {title} stopped outside the queue, resuming");
+                    if let Some(queue) = queues().lock().await.get_mut(&guild) {
+                        queue.playing = false;
+                    }
+                    let gone = match songbird::get(&watch_ctx).await {
+                        Some(manager) => manager.get(guild).is_none(),
+                        None => true,
+                    };
+                    if gone {
+                        if let Some(channel) = voice {
+                            if let Err(e) = ensure_voice(&watch_ctx, guild, channel).await {
+                                logln!(MOD, "[Music] rejoin failed: {e:#}");
+                            }
+                        }
+                    }
+                    play_next(&watch_ctx, guild).await;
+                }
             }
         });
     }
@@ -2026,6 +2142,36 @@ mod tests {
             requested_by: None,
             manual: false,
         }
+    }
+
+    /// ytsearch ranked "cardigan (tiktok version, slowed + reverb)" above "cardigan", so `!p
+    /// cardigan` played the edit.
+    #[test]
+    fn the_original_outranks_an_edit_of_it() {
+        let ranked = rank_matches(
+            "cardigan",
+            vec![
+                song("cardigan - taylor swift (tiktok version, slowed + reverb) - Elstrax.", "Elstrax"),
+                song("Cardigan (best version + slowed)", "Still Dreaming"),
+                song("cardigan", "Taylor Swift - Topic"),
+            ],
+            1,
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].title, "cardigan");
+    }
+
+    #[test]
+    fn a_result_that_misses_a_word_ranks_below_one_that_has_them_all() {
+        let ranked = rank_matches(
+            "cardigan taylor swift",
+            vec![
+                song("cardigan", "Some Cover Band"),
+                song("cardigan", "Taylor Swift"),
+            ],
+            2,
+        );
+        assert_eq!(ranked[0].artist, "Taylor Swift");
     }
 
     /// Autoplay kept queueing six copies of the track that just played.
