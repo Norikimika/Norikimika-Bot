@@ -9,6 +9,7 @@ mod notification;
 mod render;
 mod repo;
 mod state;
+mod ytmusic;
 mod telegram;
 mod util;
 mod ytdlp;

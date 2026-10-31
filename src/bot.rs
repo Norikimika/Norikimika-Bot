@@ -903,7 +903,23 @@ async fn handle_music(bot: &Bot, msg: &Msg, target_topic: Option<i64>) -> Result
     } else if query.to_lowercase().starts_with("sc:") {
         format!("scsearch1:{}", query[3..].trim())
     } else {
-        format!("ytsearch1:{query}")
+        // YouTube Music first: plain ytsearch ranks slowed, reverb and tiktok edits of a song
+        // above the song itself
+        match crate::ytmusic::search(&query, 1).await {
+            Ok(tracks) if !tracks.is_empty() => {
+                let track = &tracks[0];
+                logln!(MOD, "[music] YouTube Music picked {} - {}", track.title, track.artist);
+                format!("https://www.youtube.com/watch?v={}", track.id)
+            }
+            Ok(_) => {
+                logln!(MOD, "[music] YouTube Music had no match for {query:?}, falling back to ytsearch");
+                format!("ytsearch1:{query}")
+            }
+            Err(e) => {
+                logln!(MOD, "[music] YouTube Music search failed: {e}");
+                format!("ytsearch1:{query}")
+            }
+        }
     };
 
     let typing = bot.typing_loop(msg.chat_id, msg.thread_id, "typing").await;

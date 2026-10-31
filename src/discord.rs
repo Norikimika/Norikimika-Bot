@@ -296,38 +296,33 @@ fn flat_entries(stdout: &str) -> Vec<Song> {
         .unwrap_or_default()
 }
 
-/// Percent-encode a search query for a URL (titles carry `&`, `#`, spaces, emoji).
-fn url_encode(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for byte in query.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-/// YouTube Music search instead of the plain YouTube one: same catalogue and video ids, but the
-/// music tab ranks official albums/singles above covers, shorts and reaction clips.
-fn music_search_url(query: &str) -> String {
-    format!("https://music.youtube.com/search?q={}", url_encode(query))
-}
-
+/// Search the YouTube Music catalogue, and only fall back to plain YouTube when it cannot answer.
 async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
     if query.trim().is_empty() {
         return Vec::new();
     }
-    let music = search_flat(music_search_url(query), limit).await;
-    if !music.is_empty() {
-        return music;
+    match crate::ytmusic::search(query, limit).await {
+        Ok(tracks) if !tracks.is_empty() => return tracks.into_iter().map(song_from_track).collect(),
+        Ok(_) => logln!(MOD, "[Resolve] YouTube Music answered with no tracks"),
+        Err(e) => logln!(MOD, "[Resolve] YouTube Music search failed: {e}"),
     }
-    // Fetched through a proxy the YouTube Music page answers with a consent/bot page, and yt-dlp
-    // reports that as an empty playlist rather than an error. `ytsearch` talks to the search
-    // endpoint instead — the same one the Telegram command has always used — so a proxy cannot
-    // empty the result.
-    logln!(MOD, "[Resolve] YouTube Music search gave nothing, falling back to ytsearch");
+    // InnerTube is the music catalogue itself; this is the plain YouTube one, where the same
+    // query returns slowed and reverb edits first. Only used when the music answer is unusable.
+    logln!(MOD, "[Resolve] falling back to ytsearch");
     search_flat(format!("ytsearch{limit}:{query}"), limit).await
+}
+
+/// A YouTube Music row as a queue entry. The id is a normal YouTube video id, so the stream is
+/// fetched exactly like any other track.
+fn song_from_track(track: crate::ytmusic::Track) -> Song {
+    Song {
+        url: format!("https://www.youtube.com/watch?v={}", track.id),
+        id: Some(track.id),
+        title: track.title,
+        artist: track.artist,
+        requested_by: None,
+        manual: false,
+    }
 }
 
 /// Flat search or playlist listing: `-J` plus `--flat-playlist`, parsed into tracks.
@@ -382,6 +377,18 @@ async fn get_radio_tracks(video_id: &str) -> Vec<Song> {
     }
     if let Some(cached) = radio_cache().lock().await.get(video_id) {
         return cached.clone();
+    }
+    // the radio is a music.youtube.com playlist, and yt-dlp's page scrape of it answers
+    // "Video unavailable" for the track that just played; InnerTube hands over the same queue as
+    // JSON. The scrape stays as a fallback for the day the API changes shape.
+    match crate::ytmusic::radio(video_id, 15).await {
+        Ok(tracks) if !tracks.is_empty() => {
+            let tracks: Vec<Song> = tracks.into_iter().map(song_from_track).collect();
+            radio_cache().lock().await.insert(video_id.to_string(), tracks.clone());
+            return tracks;
+        }
+        Ok(_) => logln!(MOD, "[Autoplay] YouTube Music radio was empty"),
+        Err(e) => logln!(MOD, "[Autoplay] YouTube Music radio failed: {e}"),
     }
     let args = vec![
         "--flat-playlist".to_string(),
@@ -643,7 +650,7 @@ async fn autoplay_candidate(queue: &GuildQueue, base: &Song) -> Option<Song> {
         radio = autoplay_search(base).await;
     }
     for candidate in radio {
-        if !is_valid_song(&candidate) {
+        if !is_valid_song(&candidate) || is_derivative(&candidate, base) {
             continue;
         }
         let Some(id) = song_id(&candidate) else { continue };
@@ -665,14 +672,61 @@ async fn autoplay_candidate(queue: &GuildQueue, base: &Song) -> Option<Song> {
 }
 
 /// Autoplay fallback: more from the same artist, minus what already played.
+///
+/// The query is the artist alone. Searching "artist title" returns the same song in a dozen
+/// slowed/reverb/tiktok versions, which is how autoplay turned into six copies of one track.
 async fn autoplay_search(base: &Song) -> Vec<Song> {
     let query = if base.artist == "Unknown Artist" {
         base.title.clone()
     } else {
-        format!("{} {}", base.artist, base.title)
+        base.artist.clone()
     };
     logln!(MOD, "[Autoplay] radio empty, searching {query:?}");
-    search_flat(format!("ytsearch10:{query}"), 10).await
+    match crate::ytmusic::search(&query, 10).await {
+        Ok(tracks) if !tracks.is_empty() => tracks.into_iter().map(song_from_track).collect(),
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            logln!(MOD, "[Autoplay] YouTube Music search failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Versions of a track rather than another track: slowed, reverb, nightcore, tiktok edits and
+/// anything whose title still contains the one that just played.
+fn is_derivative(candidate: &Song, base: &Song) -> bool {
+    const MARKERS: &[&str] = &[
+        "slowed",
+        "reverb",
+        "sped up",
+        "speed up",
+        "nightcore",
+        "tiktok",
+        "8d audio",
+        "bass boost",
+        "bassboost",
+        "instrumental",
+        "karaoke",
+        "remix",
+        "hour version",
+        "loop",
+    ];
+    let title = candidate.title.to_lowercase();
+    if MARKERS.iter().any(|m| title.contains(m)) {
+        return true;
+    }
+    // the same song under another name: "Cardigan (best version + slowed)" vs "cardigan"
+    let base_key = title_key(&base.title);
+    !base_key.is_empty() && title_key(&candidate.title).contains(&base_key)
+}
+
+/// Letters and digits only, so punctuation and emoji cannot hide a repeat.
+fn title_key(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// Send and say why it failed: a dropped reply looked exactly like the bot ignoring you.
@@ -1804,7 +1858,6 @@ pub async fn run() -> Result<()> {
 mod tests {
     use super::*;
 
-
     #[test]
     fn non_ascii_titles_do_not_panic() {
         // `to_lowercase` can change byte lengths (İ becomes i + combining dot), and slicing the
@@ -1964,16 +2017,38 @@ mod tests {
     }
 
     /// The production path: yt-dlp resolve, then the same GET songbird will send.
-    #[test]
-    fn music_search_url_encodes_the_query() {
-        assert_eq!(music_search_url("cardigan"), "https://music.youtube.com/search?q=cardigan");
-        assert_eq!(
-            music_search_url("taylor swift - cardigan"),
-            "https://music.youtube.com/search?q=taylor%20swift%20-%20cardigan"
-        );
-        assert_eq!(music_search_url("A&B #1"), "https://music.youtube.com/search?q=A%26B%20%231");
+    fn song(title: &str, artist: &str) -> Song {
+        Song {
+            title: title.to_string(),
+            artist: artist.to_string(),
+            url: String::new(),
+            id: None,
+            requested_by: None,
+            manual: false,
+        }
     }
 
+    /// Autoplay kept queueing six copies of the track that just played.
+    #[test]
+    fn versions_of_the_current_track_are_not_autoplay_candidates() {
+        let base = song("cardigan", "Taylor Swift");
+        for derivative in [
+            "cardigan - taylor swift (tiktok version, slowed + reverb) - Elstrax.",
+            "Cardigan (best version + slowed) - Still Dreaming",
+            "Cardigan - (Slowed & Reverb) - 𝕊𝕝𝕖𝕟𝕕𝕖𝕣𝕫𝕚𝕝𝕝𝕒",
+            "cardigan (nightcore)",
+            "Cardigan - instrumental",
+        ] {
+            assert!(
+                is_derivative(&song(derivative, "someone"), &base),
+                "{derivative} is a version of the same track"
+            );
+        }
+        assert!(!is_derivative(&song("willow", "Taylor Swift"), &base));
+        assert!(!is_derivative(&song("august", "Taylor Swift"), &base));
+    }
+
+    
     #[tokio::test]
     #[ignore]
     async fn music_search_returns_a_playable_track() {

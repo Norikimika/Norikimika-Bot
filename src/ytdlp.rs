@@ -19,6 +19,8 @@ pub enum Failure {
     Format,
     /// The CDN refused or dropped the media transfer.
     Cdn,
+    /// YouTube is throttling this IP: every further request makes it worse.
+    RateLimit,
     Other,
 }
 
@@ -45,13 +47,17 @@ pub fn classify(message: &str) -> Failure {
     const CDN: &[&str] = &[
         "unable to download video data",
         "http error 403",
-        "http error 429",
         "read timed out",
         "giving up after",
         "connection reset",
     ];
+    const RATE_LIMIT: &[&str] = &["http error 429", "too many requests"];
     let hit = |needles: &[&str]| needles.iter().any(|n| lower.contains(*n));
-    if hit(BOT_WALL) {
+    if hit(RATE_LIMIT) {
+        // checked first: a 429 is not a client problem, and retrying it four more times is what
+        // turned one throttled request into twenty
+        Failure::RateLimit
+    } else if hit(BOT_WALL) {
         Failure::BotWall
     } else if hit(FORMAT) {
         Failure::Format
@@ -107,6 +113,28 @@ fn client_args(client: &str) -> Vec<String> {
 
 fn has_client_arg(args: &[String]) -> bool {
     args.iter().any(|a| a.contains("player_client"))
+}
+
+/// Epoch-ms before which no yt-dlp call should be made, set when YouTube answers 429.
+static RATE_LIMIT_UNTIL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn start_cooldown(module: &str) {
+    const COOLDOWN_MS: u64 = 60_000;
+    RATE_LIMIT_UNTIL_MS.store(now_ms() + COOLDOWN_MS, std::sync::atomic::Ordering::Relaxed);
+    logln!(module, "[yt-dlp] YouTube answered 429, pausing calls for {}s", COOLDOWN_MS / 1000);
+}
+
+/// yt-dlp writes several lines of warnings; a log line per warning buries everything else.
+fn one_line(message: &str, max: usize) -> String {
+    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    crate::util::truncate(&flat, max)
 }
 
 fn base_args() -> Vec<String> {
@@ -184,6 +212,12 @@ pub async fn run(
     if has_client_arg(&args) {
         return run_once(&args, None, &target, timeout).await;
     }
+    let until = RATE_LIMIT_UNTIL_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let wait = until.saturating_sub(now_ms());
+    if wait > 0 {
+        logln!(module, "[yt-dlp] waiting {}s for the 429 cooldown", wait / 1000);
+        tokio::time::sleep(Duration::from_millis(wait)).await;
+    }
     if js_runtime().is_none() {
         logln!(
             module,
@@ -205,12 +239,15 @@ pub async fn run(
                 "[yt-dlp] default clients failed ({reason:?}): {}",
                 crate::util::truncate(message.trim(), 300)
             );
-            if reason == Failure::Other {
+            if reason == Failure::RateLimit {
+                start_cooldown(module);
+            }
+            if matches!(reason, Failure::Other | Failure::RateLimit) {
                 return Err(e);
             }
             tried.push(format!(
                 "default {reason:?}: {}",
-                crate::util::truncate(message.trim(), 200)
+                one_line(&message, 200)
             ));
         }
     }
@@ -224,15 +261,15 @@ pub async fn run(
                 logln!(
                     module,
                     "[yt-dlp] {client} failed ({reason:?}): {}",
-                    crate::util::truncate(message.trim(), 300)
+                    one_line(&message, 300)
                 );
-                if reason == Failure::Other {
+                if reason == Failure::RateLimit {
+                    start_cooldown(module);
+                }
+                if matches!(reason, Failure::Other | Failure::RateLimit) {
                     return Err(e);
                 }
-                tried.push(format!(
-                    "{client} {reason:?}: {}",
-                    crate::util::truncate(message.trim(), 200)
-                ));
+                tried.push(format!("{client} {reason:?}: {}", one_line(&message, 200)));
             }
         }
     }
@@ -263,6 +300,25 @@ which was not provided.\nERROR: unable to download video data: HTTP Error 403: F
             classify("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
             Failure::Cdn
         );
+    }
+
+    /// A 429 is not client-specific: walking four more clients is what buried YouTube in requests.
+    #[test]
+    fn a_rate_limit_stops_the_walk() {
+        assert_eq!(
+            classify("WARNING: Unable to download webpage: HTTP Error 429: Too Many Requests"),
+            Failure::RateLimit
+        );
+        assert_eq!(
+            classify("ERROR: Unable to download webpage: HTTP Error 403: Forbidden"),
+            Failure::Cdn
+        );
+    }
+
+    #[test]
+    fn multi_line_errors_become_one_log_line() {
+        let message = "WARNING: first\nWARNING: second\nERROR: third";
+        assert_eq!(one_line(message, 200), "WARNING: first WARNING: second ERROR: third");
     }
 
     #[test]
