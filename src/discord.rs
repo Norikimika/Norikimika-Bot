@@ -318,6 +318,20 @@ async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
     if query.trim().is_empty() {
         return Vec::new();
     }
+    let music = search_flat(music_search_url(query), limit).await;
+    if !music.is_empty() {
+        return music;
+    }
+    // Fetched through a proxy the YouTube Music page answers with a consent/bot page, and yt-dlp
+    // reports that as an empty playlist rather than an error. `ytsearch` talks to the search
+    // endpoint instead — the same one the Telegram command has always used — so a proxy cannot
+    // empty the result.
+    logln!(MOD, "[Resolve] YouTube Music search gave nothing, falling back to ytsearch");
+    search_flat(format!("ytsearch{limit}:{query}"), limit).await
+}
+
+/// Flat search or playlist listing: `-J` plus `--flat-playlist`, parsed into tracks.
+async fn search_flat(target: String, limit: usize) -> Vec<Song> {
     let args = vec![
         "--flat-playlist".to_string(),
         "--no-warnings".to_string(),
@@ -327,10 +341,10 @@ async fn search_yt_music(query: &str, limit: usize) -> Vec<Song> {
         limit.to_string(),
         "-J".to_string(),
     ];
-    match crate::ytdlp::run(args, music_search_url(query), Duration::from_secs(60), MOD).await {
+    match crate::ytdlp::run(args, target.clone(), Duration::from_secs(60), MOD).await {
         Ok(stdout) => flat_entries(&stdout),
         Err(e) => {
-            logln!(MOD, "[yt-dlp Search Error] {query}: {e}");
+            logln!(MOD, "[yt-dlp Search Error] {target}: {e:#}");
             Vec::new()
         }
     }
@@ -340,17 +354,23 @@ async fn get_playlist_tracks(url: &str) -> Vec<Song> {
     if url.is_empty() {
         return Vec::new();
     }
-    let args = vec![
-        "--flat-playlist".to_string(),
-        "--no-warnings".to_string(),
-        "--no-cache-dir".to_string(),
-        "--skip-download".to_string(),
-        "-J".to_string(),
-    ];
-    match crate::ytdlp::run(args, url.to_string(), Duration::from_secs(180), MOD).await {
+    match crate::ytdlp::run(
+        vec![
+            "--flat-playlist".to_string(),
+            "--no-warnings".to_string(),
+            "--no-cache-dir".to_string(),
+            "--skip-download".to_string(),
+            "-J".to_string(),
+        ],
+        url.to_string(),
+        Duration::from_secs(180),
+        MOD,
+    )
+    .await
+    {
         Ok(stdout) => flat_entries(&stdout),
         Err(e) => {
-            logln!(MOD, "[yt-dlp Playlist Error] {url}: {e}");
+            logln!(MOD, "[yt-dlp Playlist Error] {url}: {e:#}");
             Vec::new()
         }
     }
