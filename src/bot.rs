@@ -1993,8 +1993,12 @@ pub async fn run() -> Result<()> {
             Ok(r) => r.json().await.unwrap_or(Value::Null),
             Err(e) => {
                 failures += 1;
-                logln!(MOD, "getUpdates failed ({failures}): {e}");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                // reqwest's Display stops at "error sending request"; the cause (timeout, DNS,
+                // connection refused) is one level down, so the whole chain is printed.
+                logln!(MOD, "getUpdates failed ({failures}): {:#}", anyhow::Error::new(e));
+                // during an outage this used to hammer Telegram every 5 s and bury the log
+                let backoff = 5 * u64::from(failures.min(6));
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
                 continue;
             }
         };

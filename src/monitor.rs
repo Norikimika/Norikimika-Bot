@@ -1403,7 +1403,12 @@ pub async fn run() -> Result<()> {
                     good_streak = 0;
                     let started = *first_fail_ms.get_or_insert_with(now_ms);
                     let why = if ping_ok { format!("HTTP={code}") } else { reason };
-                    logln!(MOD, "Connection lost {fails}/{CONN_FAIL_LIMIT} ({why})");
+                    // "8/7" made no sense once the outage was already announced
+                    if fails <= CONN_FAIL_LIMIT {
+                        logln!(MOD, "Connection lost {fails}/{CONN_FAIL_LIMIT} ({why})");
+                    } else {
+                        logln!(MOD, "Connection still down ({fails} checks, {why})");
+                    }
                     // Only a real outage is written down; a blip that never reaches the limit
                     // leaves the uptime streak alone.
                     if let Some(start) = outage_start(started, fails) {

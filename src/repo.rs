@@ -147,7 +147,7 @@ impl Watcher {
                     continue;
                 }
                 Err(e) => {
-                    logln!(MOD, "❌ Fetch error on {}: {e}", repo.repo);
+                    logln!(MOD, "❌ Fetch error on {}: {:#}", repo.repo, anyhow::Error::new(e));
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
